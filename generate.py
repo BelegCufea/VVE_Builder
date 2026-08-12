@@ -8,6 +8,7 @@ import threading
 import time
 import requests
 from runstats import Regression
+from datetime import datetime, timedelta
 
 #region Configuration
 # Voicebox API Configuration
@@ -93,6 +94,60 @@ def format_time(seconds):
     days = int(hours // 24)
     hrs = int(hours % 24)
     return f"{days}d{hrs}h"
+
+
+def format_finish_time(eta_seconds):
+    """
+    Format an estimated time remaining into a human-readable finish time string.
+
+    Converts the ETA (in seconds) to an absolute date/time that the process is
+    expected to complete. The format automatically adapts based on how far
+    in the future the finish time is:
+    - Same day: Shows time only (e.g., "14:30:45")
+    - Future day: Shows date and time using the system's locale settings
+
+    This provides users with a clear, at-a-glance understanding of when their
+    long-running generation job will complete, making it easier to plan
+    around the process.
+
+    Args:
+        eta_seconds (float): Estimated time remaining in seconds.
+            Can be fractional (e.g., 125.5 seconds).
+
+    Returns:
+        str: Formatted finish time string.
+            - If eta_seconds > 0: Returns formatted date/time.
+            - If eta_seconds <= 0: Returns "..." (indicates ETA is being
+              calculated or process is nearly complete).
+
+    Examples:
+        >>> # Assuming current time is 2026-08-12 14:00:00 in US locale
+        >>> format_finish_time(2745)  # 45 minutes 45 seconds
+        "14:45:45"
+        >>> format_finish_time(86400)  # 24 hours from now
+        "08/13/2026 14:00"  # US locale
+        "13.08.2026 14:00"  # German locale
+
+    Note:
+        The function uses the system's local time and locale settings for
+        date formatting. This means the output will automatically adapt to
+        the user's regional preferences (e.g., MM/DD/YYYY in US, DD.MM.YYYY
+        in Europe). For multi-day runs, this is generally accurate enough
+        for practical purposes.
+    """
+    if eta_seconds > 0:
+        finish_time = datetime.now() + timedelta(seconds=eta_seconds)
+        # If finishing today, show time only
+        if finish_time.date() == datetime.now().date():
+            finish_time_str = finish_time.strftime("%H:%M:%S")
+        else:
+            # Use locale-aware date format with time
+            # %x = locale's appropriate date representation
+            # %X = locale's appropriate time representation
+            finish_time_str = finish_time.strftime("%x %X")
+    else:
+        finish_time_str = "..."
+    return finish_time_str
 
 
 def progress_bar(percent, width=30):
@@ -858,7 +913,7 @@ def print_pregeneration_summary(npc_stats, profile_map):
     for npc_name, stats in npc_stats.items():
         profile_name = get_voice_profile_name(npc_name)
         has_profile = profile_name in profile_map
-        profile_str = "✅ " + profile_name if has_profile else "❌ Missing"
+        profile_str = f"✅ {profile_name}" if has_profile else "❌ Missing"
         total = stats["total"]
         skipped = stats["skipped"]
         to_gen = stats["to_generate"]
@@ -1246,7 +1301,7 @@ def print_job_summary(idx, total_jobs, filename, chars, elapsed, audio_duration,
     )
 
 
-def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, idx, overall_regressor, avg_time_per_char):
+def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, idx, overall_regressor, avg_time_per_char, elapsed_total):   
     """
     Print the overall progress bar and ETA.
 
@@ -1262,9 +1317,9 @@ def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, i
         remaining_chars = (total_chars_all - total_chars_processed)
         
         if len(overall_regressor) > 1:
-            eta = overall_regressor.slope() * remaining_chars + overall_regressor.intercept() * (total_jobs - idx)
+            eta_seconds = overall_regressor.slope() * remaining_chars + overall_regressor.intercept() * (total_jobs - idx)
         else:
-            eta = remaining_chars * avg_time_per_char if remaining_chars > 0 else 0
+            eta_seconds = remaining_chars * avg_time_per_char if remaining_chars > 0 else 0
 
         overall_percent = (total_chars_processed / total_chars_all) * 100
 
@@ -1272,7 +1327,9 @@ def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, i
             f"Overall: "
             f"{progress_bar(overall_percent)}  "
             f"{total_chars_processed}/{total_chars_all} chars  "
-            f"ETA: {format_time(eta)}"
+            f"Elapsed: {format_time(elapsed_total)}  "
+            f"ETA: {format_time(eta_seconds)}"
+            f"@ {format_finish_time(eta_seconds)}"
         )
     else:
         print("Overall: processing...")
@@ -1416,9 +1473,10 @@ def main():
             print_job_summary(idx, total_jobs, filename, chars, elapsed, audio_duration, display_name, voice_name)
         
         # Print overall progress
+        elapsed_total = time.time() - total_start_time
         print_overall_progress(
             total_chars_processed, total_chars_all, total_jobs, idx,
-            overall_regressor, avg_time_per_char
+            overall_regressor, avg_time_per_char, elapsed_total
         )
 
     # 8. Final summary
