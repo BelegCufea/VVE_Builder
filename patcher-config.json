@@ -1,0 +1,161 @@
+{
+  "pcName":   "adventurer",
+  "pcRace":   "person",
+  "pcGender": "neutral",
+
+  "creNameReplacements": {
+    "BDORN":     "DORN",
+    "HAERDA":    "HAER",
+    "HAERD":     "HAER",
+    "HEXXAT":    "OHHEX",
+    "HEXXA":     "OHHEX",
+    "VALYGAR":   "VALYG",
+    "VALYGA":    "VALYG",
+    "YOSHIMOX":  "YOSHI",
+    "YOSHIMO":   "YOSHI",
+    "YOSHIM":    "YOSHI",
+    "EDWINW":    "EDWIN",
+    "IMOEM":     "IMOEN",
+    "IMRAE":     "UDIMRAE",
+    "KORGANA":   "KORGAN",
+    "KORGANF":   "KORGAN",
+    "MAIRYN":    "RSPIRIT",
+    "OHBNOOB":   "NOOBER",
+    "BAELOTHJ":  "BAELOTH",
+    "BAELOTHP":  "BAELOTH",
+    "BRANWJ":    "BRANWE",
+    "DELAINY":   "DELAIN",
+    "KIRINHAL":  "KIRINH",
+    "LUSETTE":   "HARPASS",
+    "MINCS":     "MINSC",
+    "MINSCZ":    "MINSC",
+    "NEERAZ":    "NEERA",
+    "SAFANZ":    "SAFANA",
+    "TIRLANA":   "IRLANA",
+    "VALYGARX":  "VALYG",
+    "VICONZ":    "VICONI",
+    "XANZ":      "XAN",
+    "YAGCON":    "HGSLV",
+    "RASAADZ":   "RASAAD",
+    "MURCRAG":   "CRAGMOON",
+    "RANGER1":   "VALRAN01",
+    "RGRWLF":    "RNGWLF",
+    "SARMEL":    "MEL",
+    "CUTSILK":   "SILKE",
+    "CORIAN":    "UBCORIAN",
+    "JAMERONA":  "JAMERONI"
+
+  },
+
+  "genderOverrides": {
+    "EDWINW":   "F",
+    "BDMKHIIJ": "F",
+    "BDMKHIIN": "F",
+    "PPSTAT01": "F",
+    "FSRIDD":   "F",
+    "C#STFF24": "F"
+  },
+
+  "genderTokens": {
+    "PRO_HESHE":          { "male": "he",      "female": "she",     "neutral": "they"     },
+    "HESHE":              { "male": "he",      "female": "she",     "neutral": "they"     },
+    "PRO_HIMHER":         { "male": "him",     "female": "her",     "neutral": "them"     },
+    "HIMHER":             { "male": "him",     "female": "her",     "neutral": "them"     },
+    "PRO_HISHER":         { "male": "his",     "female": "her",     "neutral": "their"    },
+    "HISHER":             { "male": "his",     "female": "her",     "neutral": "their"    },
+    "PRO_MANWOMAN":       { "male": "man",     "female": "woman",   "neutral": "person"   },
+    "MANWOMAN":           { "male": "man",     "female": "woman",   "neutral": "person"   },
+    "PRO_MALEFEMALE":     { "male": "male",    "female": "female",  "neutral": "person"   },
+    "MALEFEMALE":         { "male": "male",    "female": "female",  "neutral": "person"   },
+    "PRO_LADYLORD":       { "male": "lord",    "female": "lady",    "neutral": "noble"    },
+    "LADYLORD":           { "male": "lord",    "female": "lady",    "neutral": "noble"    },
+    "PRO_SIRMAAM":        { "male": "sir",     "female": "madam",   "neutral": "friend"   },
+    "SIRMAAM":            { "male": "sir",     "female": "madam",   "neutral": "friend"   },
+    "PRO_GIRLBOY":        { "male": "boy",     "female": "girl",    "neutral": "child"    },
+    "GIRLBOY":            { "male": "boy",     "female": "girl",    "neutral": "child"    },
+    "PRO_BROTHERSISTER":  { "male": "brother", "female": "sister",  "neutral": "sibling"  },
+    "BROTHERSISTER":      { "male": "brother", "female": "sister",  "neutral": "sibling"  },
+    "PRO_BROSIS":         { "male": "brother", "female": "sister",  "neutral": "sibling"  },
+    "PRO_MASTERMISTRESS": { "male": "master",  "female": "mistress","neutral": "master"   }
+  },
+
+  "identityTokens": [
+    "CHARNAME",
+    "GABBER",
+    "PRO_RACE",
+    "RACE"
+  ],
+
+  "phoneticRules": [
+    {
+      "pattern": "\\r?\\n",
+      "replacement": " ... ",
+      "comment": "pause after paragraph"
+    },
+    {
+      "pattern": "\\^0x[0-9A-Fa-f]{8}|\\^-",
+      "replacement": "",
+      "comment": "strip NPC Color mod code"
+    },
+    {
+      "pattern": "\\*{2,}",
+      "replacement": "*",
+      "comment": "squash consecutive asterisks (two or more) into one"
+    },
+    {
+      "pattern": "\\*(?:[Aa]chooo?|ahem|belch|boom|bu+r[pp]|cackle|chuckle|cough|crunch|er[pf]|gag|gasp|giggle|glug|grin|groan|growl|gr+u?m+ble|gr+w+r+|gulp|gurgle|gurk|hack|hic(?:cup)?|his+s+|hum|moan|mumble|mutter|nngh|pant|retch|sigh|shiver|shrug|shudder|snarl|snicker|sniff(?:le)?|snork|snort|snore|sob|squeak|u+r[pp]|whinn+e|whistle|yawn)[!\\s]*\\*",
+      "replacement": "",
+      "comment": "silence vocal sounds, audio effects, and onomatopoeia within asterisks"
+    },
+    {
+      "pattern": "\\*([^*]+)\\*",
+      "replacement": "\"$1\"",
+      "comment": "attempt to emphasize remianing text enclosed in asterisks"
+    },
+    {
+      "pattern": "—",
+      "replacement": " ... ",
+      "comment": "em-dash to pause"
+    },
+    {
+      "pattern": "(?<=\\S)\\s*\\.{3,}\\s*|\\s*\\.{3,}\\s*(?=\\S)",
+      "replacement": " ... ",
+      "comment": "ensure single space padding around ellipsis when adjacent to text"
+    },
+    {
+      "pattern": "\\\\\\[(.*?)\\\\?\\]",
+      "replacement": "$1",
+      "comment": "keep and unescape text enclosed in escaped square brackets"
+    },
+    {
+      "pattern": "\\[.*?\\]",
+      "replacement": "",
+      "comment": "remove text enclosed in square brackets"
+    },
+    {
+      "pattern": "\\b([Gg])orion\\b",
+      "replacement": "$1oh-rye-uhn",
+      "comment": "attempt at neural TTS pronunciation"
+    },
+    {
+      "pattern": "\\b([Ii])moen\\b",
+      "replacement": "$1hm-oh-an",
+      "comment": "attempt at neural TTS pronunciation"
+    },
+    {
+      "pattern": "\\b([Aa])rchmage\\b",
+      "replacement": "$1rch-maige",
+      "comment": "attempt at neural TTS pronunciation"
+    },
+    {
+      "pattern": "\\b[Uu]st\\b",
+      "replacement": "Oost",
+      "comment": "attempt at neural TTS pronunciation"
+    },
+        {
+      "pattern": "\\b[Aa]mn\\b",
+      "replacement": "Ahmn",
+      "comment": "attempt at neural TTS pronunciation"
+    }
+  ]
+}
