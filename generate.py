@@ -711,15 +711,25 @@ def preprocess_text(text, patcher_config):
 
     for rule in phonetic_rules:
         pattern = rule.get("pattern")
-        replacement = rule.get("replacement", "")
-
+        replacement_template = rule.get("replacement", "")
+        
         try:
-            text = re.sub(
-                pattern,
-                replacement,
-                text,
-                flags=re.IGNORECASE | re.MULTILINE
-            )
+            compiled_pattern = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
+            
+            # If replacement contains C#-style backreferences ($1, $2, etc.)
+            if replacement_template and '$' in replacement_template:
+                def repl_func(match):
+                    result = replacement_template
+                    # Replace $1, $2, etc. with match groups
+                    for i in range(1, match.lastindex + 1 if match.lastindex else 0):
+                        group_value = match.group(i) or ''
+                        result = result.replace(f'${i}', group_value)
+                    return result
+                
+                text = compiled_pattern.sub(repl_func, text)
+            else:
+                text = compiled_pattern.sub(replacement_template, text)
+                
         except re.error:
             # Skip malformed regex patterns rather than crashing
             continue
