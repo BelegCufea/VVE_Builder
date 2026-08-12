@@ -31,13 +31,13 @@ LIMIT = 0                           # set to 0 to process all
 TARGET_VOICES = [                   
     # "Jaheira",
     # "Edwin",
-    "Nym Khalazza"
+    # "Nym Khalazza"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
 VOICE_SUBSTITUTIONS = {
     # "Drizzt Do'Urden": "Drizzt",
-    "Nym Khalazza": "BG1 Narrator",
+    # "Nym Khalazza": "BG1 Narrator",
 }
 FILENAME_PATTERN = r"^TS"          # regex pattern for filename (column 6)
 
@@ -821,10 +821,15 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, np
         bar = progress_bar(percent)
         time_str = f"{format_time(elapsed)} / {format_time(estimated_sec)}"
 
+        # Build the progress message
+        message = f"\r[{job_idx}/{total_jobs}] {filename}  {bar}  {time_str}  ({chars} chars)  {npc_name}"
+        
+        # Only show voice if it's different from npc_name (avoids visual clutter)
+        if voice != npc_name:
+            message += f" ({voice})"
+
         # Overwrite the current line with updated progress
-        sys.stdout.write(
-            f"\r[{job_idx}/{total_jobs}] {filename}  {bar}  {time_str}  ({chars} chars)  {npc_name} ({voice})"
-        )
+        sys.stdout.write(message)
         sys.stdout.flush()
 
         time.sleep(0.5)
@@ -1328,7 +1333,7 @@ def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, i
             f"{progress_bar(overall_percent)}  "
             f"{total_chars_processed}/{total_chars_all} chars  "
             f"Elapsed: {format_time(elapsed_total)}  "
-            f"ETA: {format_time(eta_seconds)}"
+            f"ETA: {format_time(eta_seconds)}  "
             f"@ {format_finish_time(eta_seconds)}"
         )
     else:
