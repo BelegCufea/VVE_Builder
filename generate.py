@@ -830,10 +830,17 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, np
         bar = progress_bar(percent)
         time_str = f"{format_time(elapsed)} / {format_time(estimated_sec)}"
 
-        # Build the progress message
-        message = f"\r[{job_idx}/{total_jobs}] {filename}  {bar}  {time_str}  ({chars} chars)  {npc_name}"
+        # Build the progress message with fixed widths
+        message = (
+            f"\r[{job_idx:>3}/{total_jobs:>3}] "
+            f"{filename:<10}  "
+            f"{bar}  "
+            f"{time_str:>18}  "
+            f"({chars:>4} chars)  "
+            f"{npc_name:<20}"
+        )
         
-        # Only show voice if it's different from npc_name (avoids visual clutter)
+        # Only show voice if it's different from npc_name
         if voice_name != npc_name:
             message += f" ({voice_name})"
 
@@ -843,7 +850,7 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, np
 
         time.sleep(0.5)
 
-    # Clear the line when the generation finishes to prevent visual clutter
+    # Clear the line when the generation finishes
     sys.stdout.write('\r' + ' ' * 120 + '\r')
     sys.stdout.flush()
 
@@ -1293,13 +1300,15 @@ def print_job_summary(idx, total_jobs, filename, chars, elapsed, audio_duration,
     """
     realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
     voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
+    
+    # Format with fixed widths for alignment
     print(
-        f"[{idx}/{total_jobs}] ✅ {filename}  "
-        f"({chars} chars)  "
-        f"Gen: {elapsed:.2f}s  "
-        f"Audio: {audio_duration:.2f}s  "
-        f"Realtime speed: {realtime_speed:.2f}%  "
-        f"NPC: {npc_name}"
+        f"[{idx:>3}/{total_jobs:>3}] ✅ {filename:<10}  "
+        f"({chars:>4} chars)  "
+        f"Gen: {elapsed:>6.2f}s  "
+        f"Audio: {audio_duration:>5.2f}s  "
+        f"Speed: {realtime_speed:>5.1f}%  "
+        f"NPC: {npc_name:<20}"
         f"{voice_part}"
     )
 
@@ -1326,12 +1335,16 @@ def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, i
 
         overall_percent = (total_chars_processed / total_chars_all) * 100
 
+        # Format with thousands separators and fixed widths
+        chars_processed_str = f"{total_chars_processed:,}"
+        chars_total_str = f"{total_chars_all:,}"
+        
         print(
             f"Overall: "
             f"{progress_bar(overall_percent)}  "
-            f"{total_chars_processed}/{total_chars_all} chars  "
-            f"Elapsed: {format_time(elapsed_total)}  "
-            f"ETA: {format_time(eta_seconds)}  "
+            f"{chars_processed_str:>8}/{chars_total_str:<8} chars  "
+            f"Elapsed: {format_time(elapsed_total):>9}  "
+            f"ETA: {format_time(eta_seconds):>9}  "
             f"@ {format_finish_time(eta_seconds)}"
         )
     else:
@@ -1352,7 +1365,8 @@ def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, np
     print("📋 FINAL SUMMARY")
     print("=" * 70)
 
-    print(f"Processed {total_jobs} files. Total characters: {total_chars_processed}")
+    print(f"Processed {total_jobs:,} files.")
+    print(f"Total characters: {total_chars_processed:,}")
 
     if avg_time_per_char:
         print(f"Average generation time per character: {avg_time_per_char:.4f}s")
@@ -1360,11 +1374,11 @@ def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, np
     total_skipped = sum(s["skipped"] for s in npc_stats.values())
     if total_skipped:
         skipped_details = ", ".join(
-            f"{voice}: {stats['skipped']}"
+            f"{voice}: {stats['skipped']:,}"
             for voice, stats in npc_stats.items()
             if stats["skipped"] > 0
         )
-        print(f"Skipped already generated: {total_skipped} ({skipped_details})")
+        print(f"Skipped already generated: {total_skipped:,} ({skipped_details})")
 
     print("=" * 70)
     print("✅ Done.")
