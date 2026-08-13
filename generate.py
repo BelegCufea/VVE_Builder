@@ -56,7 +56,7 @@ FORCE_GENERATED_FILENAMES = False    # If True, always use generated; if False, 
 RESREF_PREFIX = "TS"                 # 2-character prefix for generated resrefs
 
 # Generation memory
-SKIP_ALREADY_GENERATED = False       # If True, skip lines already generated (based on generation-memory.json)
+SKIP_ALREADY_GENERATED = True       # If True, skip lines already generated (based on generation-memory.json)
 GENERATION_MEMORY_PATH = r"generation-memory.json"
 #endregion Configuration
 
@@ -790,34 +790,113 @@ def convert_to_ogg(input_path, output_path=None, quality=2):
 #endregion Audio Processing
 
 #region UI/Progress Display
-def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, npc_name, voice_name,  chars):
+def format_overall_line(total_chars_processed, total_chars_all, total_jobs, idx,
+                        overall_regressor, avg_time_per_char, elapsed_total):
     """
-    Background thread function for updating the console progress bar.
+    Build the Overall progress line string without printing it.
 
-    Runs in a separate thread to provide real-time progress updates while
-    a TTS generation is in progress. The thread updates the console every
-    0.5 seconds with the current status.
+    Constructs a single-line status summary that shows global generation
+    progress across all jobs. The returned string is designed to be kept
+    as the permanent last line of the console while individual jobs run,
+    giving the user a continuous view of overall completion, elapsed time,
+    and estimated finish time.
 
-    The progress calculation estimates completion based on elapsed time
-    versus estimated duration, showing a percentage bar and time remaining
-    even before the generation completes.
+    Calculation logic:
+        - Percentage is based on characters processed versus total characters.
+        - ETA is predicted with linear regression when enough historical data
+          exists (len(overall_regressor) > 1). Otherwise it falls back to a
+          simple average-time-per-character estimate.
+        - When insufficient data is available the function returns a static
+          "Overall: processing..." placeholder.
 
     Args:
-        stop_event (threading.Event): Event to signal when the thread
-            should terminate (generation completed or failed).
+        total_chars_processed (int): Characters successfully generated so far.
+        total_chars_all (int): Total characters across all selected jobs.
+        total_jobs (int): Total number of jobs in the current run.
+        idx (int): Number of jobs already completed (0-based for remaining
+            calculation). Used to weight the intercept term of the regression.
+        overall_regressor (Regression): Accumulated (chars, time) samples used
+            for slope/intercept prediction of remaining work.
+        avg_time_per_char (float or None): Running average seconds per character.
+            None on the first job before any data exists.
+        elapsed_total (float): Wall-clock seconds since the start of the whole
+            generation batch.
+
+    Returns:
+        str: A fully formatted Overall line ready to be written to stdout,
+            or the placeholder "Overall: processing..." when statistics are
+            not yet available.
+    """
+    if avg_time_per_char is not None and total_chars_all > 0:
+        remaining_chars = total_chars_all - total_chars_processed
+
+        if len(overall_regressor) > 1:
+            eta_seconds = (overall_regressor.slope() * remaining_chars
+                           + overall_regressor.intercept() * (total_jobs - idx))
+        else:
+            eta_seconds = remaining_chars * avg_time_per_char if remaining_chars > 0 else 0
+
+        overall_percent = (total_chars_processed / total_chars_all) * 100
+        chars_processed_str = f"{total_chars_processed:,}"
+        chars_total_str = f"{total_chars_all:,}"
+
+        return (
+            f"Overall: "
+            f"{progress_bar(overall_percent)}  "
+            f"{chars_processed_str:>8}/{chars_total_str:<8} chars  "
+            f"Elapsed: {format_time(elapsed_total):>9}  "
+            f"ETA: {format_time(eta_seconds):>9}  "
+            f"@ {format_finish_time(eta_seconds)}"
+        )
+    return "Overall: processing..."
+
+
+def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
+                    npc_name, voice_name, chars, overall_line):
+    """
+    Background thread that maintains a two-line live progress display.
+
+    While a single TTS generation is running this worker continuously updates
+    two console lines:
+
+        [job progress bar]          <-- rewritten every 0.5 s
+        Overall: ...                <-- always kept as the LAST line
+
+    The job line shows the current file, a percentage bar based on elapsed
+    versus estimated time, character count, and NPC name. The Overall line
+    (supplied by the caller) remains permanently at the bottom so the user
+    can always see global progress and ETA without scrolling.
+
+    Implementation notes:
+        - On the first iteration both lines are printed normally so the
+          Overall line becomes the final visible line.
+        - Subsequent iterations use ANSI cursor movement (\033[2A, \033[K)
+          to rewrite the two lines in place without scrolling the terminal.
+        - When stop_event is set the worker clears both lines and repositions
+          the cursor so the main thread can print the permanent ✅ summary
+          cleanly on the same screen real-estate.
+
+    Args:
+        stop_event (threading.Event): Event that signals the thread to exit
+            (generation completed or failed).
         job_idx (int): Current job number (1-indexed) in the queue.
         total_jobs (int): Total number of jobs to process.
         filename (str): The filename being generated (for display).
         estimated_sec (float): Estimated duration for this job in seconds.
         npc_name (str): The NPC name being processed (for display).
-        chars (int): The number of characters in the text (for display).
+        voice_name (str): Voice profile name; shown in parentheses only when
+            it differs from npc_name.
+        chars (int): Number of characters in the text being generated.
+        overall_line (str): Pre-formatted Overall progress string that must
+            stay as the last line of the display.
 
     Note:
-        The thread is daemonized and will exit cleanly when the stop_event
-        is set. The function writes directly to stdout and clears the line
-        when done to avoid cluttering the console output.
+        The thread is daemonized and will exit cleanly when stop_event is set.
+        It assumes a terminal that understands basic ANSI escape sequences
+        for cursor movement and line clearing.
     """
     start_time = time.time()
+    first = True
 
     while not stop_event.is_set():
         elapsed = time.time() - start_time
@@ -830,29 +909,45 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, np
         bar = progress_bar(percent)
         time_str = f"{format_time(elapsed)} / {format_time(estimated_sec)}"
 
-        # Build the progress message with fixed widths
-        message = (
-            f"\r[{job_idx:>3}/{total_jobs:>3}] "
+        # Job progress line
+        job_msg = (
+            f"[{job_idx:>3}/{total_jobs:>3}] "
             f"{filename:<10}  "
             f"{bar}  "
             f"{time_str:>18}  "
             f"({chars:>4} chars)  "
             f"{npc_name:<20}"
         )
-        
-        # Only show voice if it's different from npc_name
         if voice_name != npc_name:
-            message += f" ({voice_name})"
+            job_msg += f" ({voice_name})"
 
-        # Overwrite the current line with updated progress
-        sys.stdout.write(message)
-        sys.stdout.flush()
+        if first:
+            # First draw: print both lines so Overall becomes the last line
+            sys.stdout.write(job_msg + "\n")
+            sys.stdout.write(overall_line + "\n")
+            sys.stdout.flush()
+            first = False
+        else:
+            # Subsequent draws: move up 2 lines, rewrite both, leave cursor
+            # after the Overall line so it stays last.
+            sys.stdout.write("\033[2A")              # up to job line
+            sys.stdout.write("\r\033[K" + job_msg)  # clear + rewrite job
+            sys.stdout.write("\n")
+            sys.stdout.write("\r\033[K" + overall_line)  # clear + rewrite Overall
+            sys.stdout.write("\n")
+            sys.stdout.flush()
 
         time.sleep(0.5)
 
-    # Clear the line when the generation finishes
-    sys.stdout.write('\r' + ' ' * 120 + '\r')
-    sys.stdout.flush()
+    # Job finished: clear the two progress lines so the caller can print the ✅ summary
+    if not first:
+        sys.stdout.write("\033[2A")      # up to job line
+        sys.stdout.write("\r\033[K")     # clear job line
+        sys.stdout.write("\n")
+        sys.stdout.write("\r\033[K")     # clear Overall line
+        sys.stdout.write("\n")
+        sys.stdout.write("\033[2A")      # go back up so next print starts on the cleared job line
+        sys.stdout.flush()
 
 
 def print_pregeneration_summary(npc_stats, profile_map):
@@ -1188,12 +1283,16 @@ def estimate_generation_time(regressor, chars):
     return 10.0  # Initial guess when no historical data
 
 
-def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filename, text, profile_id, regressor, generation_memory):
+def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filename, text,
+                           profile_id, regressor, generation_memory, overall_line):
     """
     Execute a single TTS generation job.
 
     Handles the complete lifecycle of one generation: submitting the request,
     waiting for completion, downloading the audio, and converting to Ogg Vorbis.
+
+    The progress_worker keeps the job progress line and the Overall line
+    (passed in as overall_line) visible, with Overall always last.
 
     Args:
         idx (int): Current job index (1-based).
@@ -1206,6 +1305,7 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
         profile_id (int): Voice profile ID.
         regressor (Regression): Regression for time estimation.
         generation_memory (dict): Generation memory for recording completion.
+        overall_line (str): Pre-formatted Overall progress string to keep as last line.
 
     Returns:
         tuple: (success, elapsed_time, audio_duration, chars_processed)
@@ -1215,10 +1315,11 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     estimated_sec = estimate_generation_time(regressor, chars)
     stop_event = threading.Event()
 
-    # Start progress bar thread (use npc_name for display)
+    # Start progress bar thread – it will draw job line + Overall line
     worker = threading.Thread(
         target=progress_worker,
-        args=(stop_event, idx, total_jobs, filename, estimated_sec, npc_name, voice_name, chars)
+        args=(stop_event, idx, total_jobs, filename, estimated_sec,
+              npc_name, voice_name, chars, overall_line)
     )
     worker.daemon = True
     worker.start()
@@ -1233,11 +1334,9 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
         final_event = wait_for_completion(gen_id) or {}
         elapsed = time.time() - start_time
 
-        # Stop the progress thread
+        # Stop the progress thread (it clears the two lines for us)
         stop_event.set()
-        worker.join(timeout=0.5)
-        sys.stdout.write('\r' + ' ' * 120 + '\r')
-        sys.stdout.flush()
+        worker.join(timeout=1.0)
 
         if final_event.get("status") == "completed":
             audio_duration = final_event.get("duration", 0.0)
@@ -1276,9 +1375,7 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
 
     except Exception as e:
         stop_event.set()
-        worker.join(timeout=0.5)
-        sys.stdout.write('\r' + ' ' * 80 + '\r')
-        sys.stdout.flush()
+        worker.join(timeout=1.0)
         print(f"[{idx}/{total_jobs}] ❌ {filename} error: {e}")
 
     return success, elapsed, audio_duration, chars
@@ -1472,29 +1569,29 @@ def main():
         if not profile_id:
             print(f"⏭️ Skipping {filename}: Voice '{voice_name}' not found.")
             continue
-        
-        # Process the generation job
+
+        # Snapshot Overall line (static for the duration of this job)
+        elapsed_total = time.time() - total_start_time
+        overall_line = format_overall_line(
+            total_chars_processed, total_chars_all, total_jobs, idx - 1,
+            overall_regressor, avg_time_per_char, elapsed_total
+        )
+
+        # Process the generation job (worker keeps job line + Overall as last line)
         success, elapsed, audio_duration, chars = process_generation_job(
             idx, total_jobs, strref, display_name, voice_name, filename, text,
-            profile_id, regressor, generation_memory
+            profile_id, regressor, generation_memory, overall_line
         )
-        
+
         if success:
             # Update statistics
             regressor.push(chars, elapsed)
             total_chars_processed += chars
             avg_time_per_char = (time.time() - total_start_time) / total_chars_processed
             overall_regressor.push(chars, elapsed)
-            
-            # Print job summary
+
+            # Print permanent job summary (the two progress lines were already cleared)
             print_job_summary(idx, total_jobs, filename, chars, elapsed, audio_duration, display_name, voice_name)
-        
-        # Print overall progress
-        elapsed_total = time.time() - total_start_time
-        print_overall_progress(
-            total_chars_processed, total_chars_all, total_jobs, idx,
-            overall_regressor, avg_time_per_char, elapsed_total
-        )
 
     # 8. Final summary
     print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
