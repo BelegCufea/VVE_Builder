@@ -12,13 +12,13 @@ from datetime import datetime, timedelta
 
 #region Configuration
 # Voicebox API Configuration
-BASE_URL = "http://10.0.50.5:17600" # VoiceBox API - http://localhost:17493 for local server, or remote URL for remote server
+BASE_URL = "http://10.0.50.5:17600"    # VoiceBox API - http://localhost:17493 for local server, or remote URL for remote server
 ENGINE = "qwen"
 MODEL_SIZE = "0.6B"
 
 # Audio Conversion Configuration
-CONVERT_TO_OGG = True               # convert WAV to Ogg Vorbis after download
-OGG_QUALITY = 4                     # libvorbis quality
+CONVERT_TO_OGG = True                  # convert WAV to Ogg Vorbis after download
+OGG_QUALITY = 4                        # libvorbis quality
 
 # File Paths
 CSV_PATH = r"dialog-report.csv"
@@ -26,7 +26,7 @@ PATCHER_CONFIG_PATH = r"patcher-config.json"
 OUTPUT_DIR = r"output"
 
 # Generation Limits and filters
-LIMIT = 0                           # set to 0 to process all
+LIMIT = 0                              # set to 0 to process all
 # Process only these voices
 TARGET_VOICES = [                   
     # "Jaheira",
@@ -39,11 +39,11 @@ VOICE_SUBSTITUTIONS = {
     # "Drizzt Do'Urden": "Drizzt",
     "Nym Khalazza": "BG1 Narrator"
 }
-FILENAME_PATTERN = r"^TS"          # regex pattern for filename (column 6)
+FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
 
 # STRREF Filtering
-USE_STRREF_FILTER = True              # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
-STRREF_FILTER_FILE = r"strrefs.json"  # JSON file with list of strrefs to process
+USE_STRREF_FILTER = True               # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
+STRREF_FILTER_FILE = r"strrefs.json"   # JSON file with list of strrefs to process
 
 # Voice Fallback Configuration
 USE_VOICE_FALLBACK = True
@@ -52,12 +52,16 @@ FALLBACK_VOICE_FEMALE = "BG3 Narrator"
 FALLBACK_VOICE_NEUTRAL = "Description Narrator"
 
 # Filename Generation
-FORCE_GENERATED_FILENAMES = False    # If True, always use generated; if False, use CSV fallback
-RESREF_PREFIX = "TS"                 # 2-character prefix for generated resrefs
+FORCE_GENERATED_FILENAMES = False      # If True, always use generated; if False, use CSV fallback
+RESREF_PREFIX = "TS"                   # 2-character prefix for generated resrefs
 
 # Generation memory
-SKIP_ALREADY_GENERATED = True       # If True, skip lines already generated (based on generation-memory.json)
+SKIP_ALREADY_GENERATED = True          # If True, skip lines already generated (based on generation-memory.json)
 GENERATION_MEMORY_PATH = r"generation-memory.json"
+
+# Logging
+LOG_ENABLED = True
+LOG_FILE_PATH = r"generation.log"
 #endregion Configuration
 
 #region Utility Functions
@@ -287,6 +291,152 @@ def generate_resref(strref, prefix="TS"):
     # Return as uppercase
     return (prefix + suffix).upper()
 #endregion Utility Functions
+
+#region Logging
+def init_log_file(log_path, total_jobs, total_chars_all):
+    """
+    Initialize the log file with a header and job summary.
+
+    Creates a new log file or overwrites an existing one, writing a header
+    with the start timestamp and summary information about the total jobs
+    and characters to be processed. This provides context for the log entries
+    that will follow.
+
+    Args:
+        log_path (str): Filesystem path to the log file.
+        total_jobs (int): Total number of jobs to process.
+        total_chars_all (int): Total characters across all jobs.
+
+    Returns:
+        bool: True if the log file was initialized successfully,
+            False if an error occurred.
+
+    Note:
+        The function will create the directory structure if it doesn't exist.
+        If the file cannot be created, it returns False and the caller
+        should consider disabling logging.
+    """
+    try:
+        # Ensure the directory exists
+        log_dir = os.path.dirname(log_path)
+        if log_dir and not os.path.exists(log_dir):
+            os.makedirs(log_dir, exist_ok=True)
+        
+        with open(log_path, "w", encoding="utf-8") as f:
+            f.write(f"# TTS Generation Log - Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write(f"# Total jobs: {total_jobs}, Total chars: {total_chars_all}\n")
+            f.write("#" + "=" * 70 + "\n\n")
+        return True
+    except Exception:
+        return False
+
+
+def write_log_entry(log_path, idx, total_jobs, strref, filename, npc_name, voice_name, 
+                    chars, elapsed, audio_duration, success, error_msg=None):
+    """
+    Write a formatted log entry for a completed generation job to a log file.
+
+    Appends a single line to the specified log file containing all relevant
+    information about a TTS generation job. The log line includes a timestamp,
+    job status, STRREF, filename, NPC name, character count, generation time,
+    and audio duration.
+
+    The log format is designed to be both human-readable and easily parsable
+    for post-processing or analysis. Each log entry is a single line with
+    space-separated fields.
+
+    Args:
+        log_path (str): Filesystem path to the log file. If the file doesn't
+            exist, it will be created.
+        idx (int): Current job index (1-based) in the processing queue.
+        total_jobs (int): Total number of jobs to process.
+        strref (str): The STRREF identifier being generated.
+        filename (str): The output filename (without extension).
+        npc_name (str): The NPC name associated with this voice line.
+        voice_name (str): The voice profile name used for generation.
+        chars (int): Number of characters in the generated text.
+        elapsed (float): Time taken for generation in seconds.
+        audio_duration (float): Duration of the generated audio in seconds.
+        success (bool): True if generation succeeded, False otherwise.
+        error_msg (str, optional): If success is False, an error message
+            describing what went wrong. Defaults to None.
+
+    Returns:
+        None: This function has no return value.
+
+    Note:
+        The function silently handles write errors (e.g., permission denied,
+        disk full) to prevent logging failures from crashing the main
+        generation process. Any errors are suppressed and ignored.
+
+    Example log line:
+        [2026-08-13 14:30:10] [  1/114] SUCCESS  STRREF: 47566  File: TS001GY6
+        NPC: Aerie                Chars:   85  Gen:  10.15s  Audio:  1.20s
+    """
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    
+    # Use the same formatter for consistency
+    line = format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                             audio_duration, npc_name, voice_name, success, error_msg)
+    
+    # Remove emoji for log file and add timestamp
+    line = line.replace("✅ ", "SUCCESS  ").replace("❌ ", "FAILED   ")
+    log_line = f"[{timestamp}] {line}"
+    
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write(log_line + "\n")
+    except Exception:
+        # Suppress logging errors to prevent crashes
+        pass
+
+def write_final_log_summary(log_path, total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
+    """
+    Write a final summary to the log file after all jobs are processed.
+
+    Appends a summary section to the log file with overall statistics
+    including total files processed, total characters, average time per
+    character, and skipped files per NPC. This provides a complete
+    picture of the entire generation run.
+
+    Args:
+        log_path (str): Filesystem path to the log file.
+        total_jobs (int): Total number of jobs processed.
+        total_chars_processed (int): Total characters processed.
+        avg_time_per_char (float): Average generation time per character.
+        npc_stats (dict): Statistics dictionary per NPC, containing
+            "skipped" counts.
+
+    Returns:
+        None: This function has no return value.
+
+    Note:
+        The function silently handles write errors to prevent crashes.
+    """
+    try:
+        with open(log_path, "a", encoding="utf-8") as f:
+            f.write("\n" + "#" + "=" * 70 + "\n")
+            f.write(f"# FINAL SUMMARY\n")
+            f.write(f"# Processed: {total_jobs} files\n")
+            f.write(f"# Total characters: {total_chars_processed}\n")
+            if avg_time_per_char:
+                f.write(f"# Average time per character: {avg_time_per_char:.4f}s\n")
+            
+            total_skipped = sum(s["skipped"] for s in npc_stats.values())
+            if total_skipped:
+                f.write(f"# Skipped already generated: {total_skipped}\n")
+                skipped_details = ", ".join(
+                    f"{voice}: {stats['skipped']}"
+                    for voice, stats in npc_stats.items()
+                    if stats["skipped"] > 0
+                )
+                f.write(f"#   {skipped_details}\n")
+            
+            f.write(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
+            f.write("#" + "=" * 70 + "\n")
+    except Exception:
+        pass
+#endregion Logging
 
 #region Voice Profile Management
 def get_voice_profile_name(npc_name, gender=None, profile_map=None):
@@ -852,8 +1002,8 @@ def format_overall_line(total_chars_processed, total_chars_all, total_jobs, idx,
 
 
 def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
-                    npc_name, voice_name, chars, overall_line):
-    """
+                    npc_name, voice_name, chars, overall_line, strref):
+    r"""
     Background thread that maintains a two-line live progress display.
 
     While a single TTS generation is running this worker continuously updates
@@ -889,6 +1039,7 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
         chars (int): Number of characters in the text being generated.
         overall_line (str): Pre-formatted Overall progress string that must
             stay as the last line of the display.
+        strref (str): The STRREF identifier being generated.
 
     Note:
         The thread is daemonized and will exit cleanly when stop_event is set.
@@ -909,10 +1060,10 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
         bar = progress_bar(percent)
         time_str = f"{format_time(elapsed)} / {format_time(estimated_sec)}"
 
-        # Job progress line
+        # Job progress line with STRREF - keep Grok's formatting
         job_msg = (
             f"[{job_idx:>3}/{total_jobs:>3}] "
-            f"{filename:<10}  "
+            f"{strref:>6}/{filename:<10}  "
             f"{bar}  "
             f"{time_str:>18}  "
             f"({chars:>4} chars)  "
@@ -1319,7 +1470,7 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     worker = threading.Thread(
         target=progress_worker,
         args=(stop_event, idx, total_jobs, filename, estimated_sec,
-              npc_name, voice_name, chars, overall_line)
+              npc_name, voice_name, chars, overall_line, strref)
     )
     worker.daemon = True
     worker.start()
@@ -1381,7 +1532,54 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     return success, elapsed, audio_duration, chars
 
 
-def print_job_summary(idx, total_jobs, filename, chars, elapsed, audio_duration, npc_name, voice_name):
+def format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration, npc_name, voice_name, success=True, error_msg=None):
+    """
+    Format a job summary line for both console output and logging.
+
+    Creates a consistent formatted string containing all job information.
+    The same format is used for both the console print and the log file,
+    ensuring consistency between output streams.
+
+    Args:
+        idx (int): Current job index (1-based).
+        total_jobs (int): Total number of jobs.
+        strref (str): STRREF identifier.
+        filename (str): Output filename.
+        chars (int): Number of characters in the text.
+        elapsed (float): Generation time in seconds.
+        audio_duration (float): Duration of generated audio in seconds.
+        npc_name (str): NPC name.
+        voice_name (str): Voice profile name used.
+        success (bool, optional): Whether generation succeeded. Defaults to True.
+        error_msg (str, optional): Error message if failed. Defaults to None.
+
+    Returns:
+        str: Formatted job summary line.
+    """
+    realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
+    voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
+    status = "✅ " if success else "❌ "
+    
+    line = (
+        f"[{idx:>3}/{total_jobs:>3}] "
+        f"{status}"
+        f"Strref: {strref:>6}  "
+        f"File: {filename:<10}  "
+        f"Chars: {chars:>4}  "
+        f"Gen: {elapsed:>6.2f}s  "
+        f"Audio: {audio_duration:>5.2f}s  "
+        f"Speed: {realtime_speed:>5.1f}%  "
+        f"Npc: {npc_name:<20}"
+        f"{voice_part}"
+    )
+    
+    if not success and error_msg:
+        line += f"  Error: {error_msg}"
+    
+    return line
+
+
+def print_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration, npc_name, voice_name, success=True, error_msg=None):
     """
     Print a formatted summary for a completed generation job.
 
@@ -1394,20 +1592,12 @@ def print_job_summary(idx, total_jobs, filename, chars, elapsed, audio_duration,
         audio_duration (float): Duration of generated audio in seconds.
         npc_name (str): NPC name.
         voice_name (str): Voice profile name used.
+        success (bool, optional): Whether generation succeeded. Defaults to True.
+        error_msg (str, optional): Error message if failed. Defaults to None.
     """
-    realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
-    voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
-    
-    # Format with fixed widths for alignment
-    print(
-        f"[{idx:>3}/{total_jobs:>3}] ✅ {filename:<10}  "
-        f"({chars:>4} chars)  "
-        f"Gen: {elapsed:>6.2f}s  "
-        f"Audio: {audio_duration:>5.2f}s  "
-        f"Speed: {realtime_speed:>5.1f}%  "
-        f"NPC: {npc_name:<20}"
-        f"{voice_part}"
-    )
+    line = format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                             audio_duration, npc_name, voice_name, success, error_msg)
+    print(line)
 
 
 def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, idx, overall_regressor, avg_time_per_char, elapsed_total):   
@@ -1555,6 +1745,16 @@ def main():
         print("No jobs to process. Exiting.")
         return
 
+    # Initialize logging if enabled
+    global LOG_ENABLED
+
+    if LOG_ENABLED:
+        if init_log_file(LOG_FILE_PATH, total_jobs, total_chars_all):
+            print(f"📝 Logging enabled: {LOG_FILE_PATH}")
+        else:
+            print(f"⚠️ Could not initialize log file: {LOG_FILE_PATH}")
+            LOG_ENABLED = False
+
     print("\nStarting generation...\n")
 
     # 7. Process all generation jobs
@@ -1577,7 +1777,7 @@ def main():
             overall_regressor, avg_time_per_char, elapsed_total
         )
 
-        # Process the generation job (worker keeps job line + Overall as last line)
+        # Process the generation job
         success, elapsed, audio_duration, chars = process_generation_job(
             idx, total_jobs, strref, display_name, voice_name, filename, text,
             profile_id, regressor, generation_memory, overall_line
@@ -1590,11 +1790,34 @@ def main():
             avg_time_per_char = (time.time() - total_start_time) / total_chars_processed
             overall_regressor.push(chars, elapsed)
 
-            # Print permanent job summary (the two progress lines were already cleared)
-            print_job_summary(idx, total_jobs, filename, chars, elapsed, audio_duration, display_name, voice_name)
+            # Print job summary
+            print_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                            audio_duration, display_name, voice_name, success=True)
+            
+            # Write to log
+            if LOG_ENABLED:
+                write_log_entry(LOG_FILE_PATH, idx, total_jobs, strref, filename, 
+                              display_name, voice_name, chars, elapsed, audio_duration, success=True)
+
+        else:
+            # Handle failure
+            error_msg = "Generation failed"
+            print_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                            audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
+            
+            if LOG_ENABLED:
+                write_log_entry(LOG_FILE_PATH, idx, total_jobs, strref, filename, 
+                              display_name, voice_name, chars, elapsed, audio_duration, 
+                              success=False, error_msg=error_msg)           
 
     # 8. Final summary
     print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
+
+    # Save final log summary if logging is enabled
+    if LOG_ENABLED:
+        write_final_log_summary(LOG_FILE_PATH, total_jobs, total_chars_processed, 
+                               avg_time_per_char, npc_stats)
+        print(f"📝 Log saved to: {LOG_FILE_PATH}")
 
 if __name__ == "__main__":
     main()

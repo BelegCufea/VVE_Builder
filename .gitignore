@@ -1,1 +1,4 @@
 output/
+*.log
+generation-memory.json
+strrefs.json
