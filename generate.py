@@ -37,13 +37,13 @@ TARGET_VOICES = [
 # If an NPC is not listed here, its name is used as the voice profile name.
 VOICE_SUBSTITUTIONS = {
     # "Drizzt Do'Urden": "Drizzt",
-    # "Nym Khalazza": "BG1 Narrator",
+    "Nym Khalazza": "BG1 Narrator"
 }
 FILENAME_PATTERN = r"^TS"          # regex pattern for filename (column 6)
 
 # STRREF Filtering
-STRREF_FILTER_FILE = r"strrefs.json"  # JSON file with list of strrefs to process
 USE_STRREF_FILTER = True              # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
+STRREF_FILTER_FILE = r"strrefs.json"  # JSON file with list of strrefs to process
 
 # Voice Fallback Configuration
 USE_VOICE_FALLBACK = True
@@ -56,7 +56,7 @@ FORCE_GENERATED_FILENAMES = False    # If True, always use generated; if False, 
 RESREF_PREFIX = "TS"                 # 2-character prefix for generated resrefs
 
 # Generation memory
-SKIP_ALREADY_GENERATED = True
+SKIP_ALREADY_GENERATED = False       # If True, skip lines already generated (based on generation-memory.json)
 GENERATION_MEMORY_PATH = r"generation-memory.json"
 #endregion Configuration
 
@@ -790,7 +790,7 @@ def convert_to_ogg(input_path, output_path=None, quality=2):
 #endregion Audio Processing
 
 #region UI/Progress Display
-def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, npc_name, chars):
+def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, npc_name, voice_name,  chars):
     """
     Background thread function for updating the console progress bar.
 
@@ -818,7 +818,6 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, np
         when done to avoid cluttering the console output.
     """
     start_time = time.time()
-    voice = get_voice_profile_name(npc_name)
 
     while not stop_event.is_set():
         elapsed = time.time() - start_time
@@ -835,8 +834,8 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, np
         message = f"\r[{job_idx}/{total_jobs}] {filename}  {bar}  {time_str}  ({chars} chars)  {npc_name}"
         
         # Only show voice if it's different from npc_name (avoids visual clutter)
-        if voice != npc_name:
-            message += f" ({voice})"
+        if voice_name != npc_name:
+            message += f" ({voice_name})"
 
         # Overwrite the current line with updated progress
         sys.stdout.write(message)
@@ -926,7 +925,7 @@ def print_pregeneration_summary(npc_stats, profile_map):
     valid_chars = 0
 
     for npc_name, stats in npc_stats.items():
-        profile_name = get_voice_profile_name(npc_name)
+        profile_name = stats.get("voice_name", npc_name)
         has_profile = profile_name in profile_map
         profile_str = f"✅ {profile_name}" if has_profile else "❌ Missing"
         total = stats["total"]
@@ -1064,17 +1063,6 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
             print(f"Loaded {len(strref_filter)} STRREFs from filter file.")
         else:
             print("⚠️ No STRREFs loaded from filter file. Processing all rows.")
-    
-    # Pre-populate targeted NPCs (only if not using STRREF filter)
-    if target_voices and not use_strref_filter:
-        for npc_name in target_voices:
-            npc_stats[npc_name] = {
-                "voice_name": get_voice_profile_name(npc_name, profile_map=profile_map),
-                "total": 0,
-                "skipped": 0,
-                "to_generate": 0,
-                "chars": 0
-            }
     
     try:
         with open(csv_path, "r", encoding="utf-8") as f:
@@ -1223,7 +1211,7 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     # Start progress bar thread (use npc_name for display)
     worker = threading.Thread(
         target=progress_worker,
-        args=(stop_event, idx, total_jobs, filename, estimated_sec, npc_name, chars)
+        args=(stop_event, idx, total_jobs, filename, estimated_sec, npc_name, voice_name, chars)
     )
     worker.daemon = True
     worker.start()
