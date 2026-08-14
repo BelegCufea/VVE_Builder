@@ -31,22 +31,25 @@ LIMIT = 0                              # set to 0 to process all
 TARGET_VOICES = [                   
     # "Jaheira",
     # "Edwin",
-    # "Nym Khalazza"
+    "Neera",
+    "Bodhi",
+    "Elhan"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
 VOICE_SUBSTITUTIONS = {
     # "Drizzt Do'Urden": "Drizzt",
-    "Nym Khalazza": "BG1 Narrator"
+    "Nym Khalazza": "BG1 Narrator",
+    "Armored Figure": "Sarevok"
 }
 FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
 
 # STRREF Filtering
-USE_STRREF_FILTER = True               # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
+USE_STRREF_FILTER = False              # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
 STRREF_FILTER_FILE = r"strrefs.json"   # JSON file with list of strrefs to process
 
 # Voice Fallback Configuration
-USE_VOICE_FALLBACK = True
+USE_VOICE_FALLBACK = False
 FALLBACK_VOICE_MALE = "BG1 Narrator"
 FALLBACK_VOICE_FEMALE = "BG3 Narrator"
 FALLBACK_VOICE_NEUTRAL = "Description Narrator"
@@ -297,10 +300,12 @@ def init_log_file(log_path, total_jobs, total_chars_all):
     """
     Initialize the log file with a header and job summary.
 
-    Creates a new log file or overwrites an existing one, writing a header
-    with the start timestamp and summary information about the total jobs
-    and characters to be processed. This provides context for the log entries
-    that will follow.
+    If the log file doesn't exist, creates a new one with a header.
+    If it already exists, appends a separator and new batch header
+    to clearly distinguish this run from previous ones.
+
+    This allows multiple batch runs to be logged in the same file
+    with clear separation between sessions.
 
     Args:
         log_path (str): Filesystem path to the log file.
@@ -322,7 +327,7 @@ def init_log_file(log_path, total_jobs, total_chars_all):
         if log_dir and not os.path.exists(log_dir):
             os.makedirs(log_dir, exist_ok=True)
         
-        with open(log_path, "w", encoding="utf-8") as f:
+        with open(log_path, "a", encoding="utf-8") as f:
             f.write(f"# TTS Generation Log - Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
             f.write(f"# Total jobs: {total_jobs}, Total chars: {total_chars_all}\n")
             f.write("#" + "=" * 70 + "\n\n")
@@ -433,7 +438,7 @@ def write_final_log_summary(log_path, total_jobs, total_chars_processed, avg_tim
                 f.write(f"#   {skipped_details}\n")
             
             f.write(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("#" + "=" * 70 + "\n")
+            f.write("#" + "=" * 70 + "\n\n")
     except Exception:
         pass
 #endregion Logging
@@ -1048,6 +1053,7 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
     """
     start_time = time.time()
     first = True
+    job_width = len(str(total_jobs))
 
     while not stop_event.is_set():
         elapsed = time.time() - start_time
@@ -1062,7 +1068,7 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
 
         # Job progress line with STRREF - keep Grok's formatting
         job_msg = (
-            f"[{job_idx:>3}/{total_jobs:>3}] "
+            f"[{job_idx:>{job_width}}/{total_jobs:>{job_width}}] "
             f"{strref:>6}/{filename:<10}  "
             f"{bar}  "
             f"{time_str:>18}  "
@@ -1559,9 +1565,10 @@ def format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_
     realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
     voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
     status = "✅ " if success else "❌ "
+    job_width = len(str(total_jobs))
     
     line = (
-        f"[{idx:>3}/{total_jobs:>3}] "
+        f"[{idx:>{job_width}}/{total_jobs:>{job_width}}] "
         f"{status}"
         f"Strref: {strref:>6}  "
         f"File: {filename:<10}  "
