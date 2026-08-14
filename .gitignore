@@ -1,4 +1,5 @@
 output/
+profiles/
 *.log
 generation-memory.json
 strrefs.json
