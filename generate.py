@@ -422,35 +422,9 @@ def write_final_log_summary(log_path, total_jobs, total_chars_processed, avg_tim
         The function silently handles write errors to prevent crashes.
     """
     try:
+        summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, for_log=True)
         with open(log_path, "a", encoding="utf-8") as f:
-            f.write("\n" + "#" + "=" * 70 + "\n")
-            f.write(f"# FINAL SUMMARY\n")
-            f.write(f"# Processed: {total_jobs} files\n")
-            f.write(f"# Total characters: {total_chars_processed}\n")
-            if avg_time_per_char:
-                f.write(f"# Average time per character: {avg_time_per_char:.4f}s\n")
-
-            total_done = sum(s["done"] for s in npc_stats.values())
-            if total_done:
-                done_details = ", ".join(
-                    f"{voice}: {stats['done']:,}"
-                    for voice, stats in npc_stats.items()
-                    if stats["done"] > 0
-                )
-                print(f"Skipped already generated: {total_done:,} ({done_details})")                      
-            
-            total_skipped = sum(s["skipped"] for s in npc_stats.values())
-            if total_skipped:
-                f.write(f"# Skipped already generated: {total_skipped}\n")
-                skipped_details = ", ".join(
-                    f"{voice}: {stats['skipped']}"
-                    for voice, stats in npc_stats.items()
-                    if stats["skipped"] > 0
-                )
-                f.write(f"#   {skipped_details}\n")
-            
-            f.write(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write("#" + "=" * 70 + "\n\n")
+            f.write(summary)
     except Exception:
         pass
 #endregion Logging
@@ -1730,6 +1704,71 @@ def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, i
         print("Overall: processing...")
 
 
+def format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
+    """
+    Format the final summary as a string for both console and log output.
+
+    Builds a complete summary string including:
+    - Total files processed
+    - Total characters processed
+    - Average time per character
+    - Already generated files (if any)
+    - Missing voices (if any)
+
+    Args:
+        total_jobs (int): Total number of jobs processed.
+        total_chars_processed (int): Total characters processed.
+        avg_time_per_char (float): Average generation time per character.
+        npc_stats (dict): Statistics dictionary per NPC.
+
+    Returns:
+        str: Formatted summary string ready for console or log output.
+    """
+    # Extract statistics
+    total_done = 0
+    total_skipped = 0
+    done_summary = {}
+    skipped_summary = {}
+
+    for voice, stats in npc_stats.items():
+        done = stats.get("done", 0)
+        skipped = stats.get("skipped", 0)
+        
+        if done > 0:
+            total_done += done
+            done_summary[voice] = done
+        
+        if skipped > 0:
+            total_skipped += skipped
+            skipped_summary[voice] = skipped
+
+    # Build the summary string (single content for both console and log)
+    lines = []
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("FINAL SUMMARY")
+    lines.append("=" * 70)
+    lines.append(f"Processed: {total_jobs:,} files")
+    lines.append(f"Total characters: {total_chars_processed:,}")
+    
+    if avg_time_per_char:
+        lines.append(f"Average time per character: {avg_time_per_char:.4f}s")
+
+    if total_done:
+        done_details = ", ".join(f"{voice}: {count:,}" for voice, count in done_summary.items())
+        lines.append(f"Skipped already generated: {total_done:,} ({done_details})")
+
+    if total_skipped:
+        skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
+        lines.append(f"Skipped missing voices: {total_skipped:,} ({skipped_details})")
+
+    lines.append(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 70)
+    lines.append("")
+
+    return "\n".join(lines)
+
+
 def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
     """
     Print the final summary after all jobs are processed.
@@ -1740,35 +1779,8 @@ def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, np
         avg_time_per_char (float): Average time per character.
         npc_stats (dict): Statistics dictionary per NPC.
     """
-    print("\n" + "=" * 70)
-    print("📋 FINAL SUMMARY")
-    print("=" * 70)
-
-    print(f"Processed {total_jobs:,} files.")
-    print(f"Total characters: {total_chars_processed:,}")
-
-    if avg_time_per_char:
-        print(f"Average generation time per character: {avg_time_per_char:.4f}s")
-
-    total_done = sum(s["done"] for s in npc_stats.values())
-    if total_done:
-        done_details = ", ".join(
-            f"{voice}: {stats['done']:,}"
-            for voice, stats in npc_stats.items()
-            if stats["done"] > 0
-        )
-        print(f"Skipped already generated: {total_done:,} ({done_details})")        
-
-    total_skipped = sum(s["skipped"] for s in npc_stats.values())
-    if total_skipped:
-        skipped_details = ", ".join(
-            f"{voice}: {stats['skipped']:,}"
-            for voice, stats in npc_stats.items()
-            if stats["skipped"] > 0
-        )
-        print(f"Skipped missing: {total_skipped:,} ({skipped_details})")
-
-    print("=" * 70)
+    summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, for_log=False)
+    print(summary)
     print("✅ Done.")
 #endregion Generation Execution
 
@@ -1916,8 +1928,7 @@ def main():
 
     # Save final log summary if logging is enabled
     if LOG_ENABLED:
-        write_final_log_summary(LOG_FILE_PATH, total_jobs, total_chars_processed, 
-                               avg_time_per_char, npc_stats)
+        write_final_log_summary(LOG_FILE_PATH, total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
         print(f"📝 Log saved to: {LOG_FILE_PATH}")
 
 if __name__ == "__main__":
