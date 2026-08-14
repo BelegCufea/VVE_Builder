@@ -422,7 +422,7 @@ def write_final_log_summary(log_path, total_jobs, total_chars_processed, avg_tim
         The function silently handles write errors to prevent crashes.
     """
     try:
-        summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, for_log=True)
+        summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
         with open(log_path, "a", encoding="utf-8") as f:
             f.write(summary)
     except Exception:
@@ -1779,7 +1779,7 @@ def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, np
         avg_time_per_char (float): Average time per character.
         npc_stats (dict): Statistics dictionary per NPC.
     """
-    summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, for_log=False)
+    summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
     print(summary)
     print("✅ Done.")
 #endregion Generation Execution
