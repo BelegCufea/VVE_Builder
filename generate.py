@@ -31,9 +31,9 @@ LIMIT = 0                              # set to 0 to process all
 TARGET_VOICES = [                   
     # "Jaheira",
     # "Edwin",
-    "Neera",
-    "Bodhi",
-    "Elhan"
+    # "Neera",
+    # "Bodhi",
+    # "Elhan"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
@@ -65,6 +65,9 @@ GENERATION_MEMORY_PATH = r"generation-memory.json"
 # Logging
 LOG_ENABLED = True
 LOG_FILE_PATH = r"generation.log"
+
+# Pre-generation Summary Options
+COMPACT_SUMMARY = True                 # If True, only show NPCs with valid voices; if False, show all
 #endregion Configuration
 
 #region Utility Functions
@@ -410,7 +413,7 @@ def write_final_log_summary(log_path, total_jobs, total_chars_processed, avg_tim
         total_chars_processed (int): Total characters processed.
         avg_time_per_char (float): Average generation time per character.
         npc_stats (dict): Statistics dictionary per NPC, containing
-            "skipped" counts.
+            "done" and "skipped" counts.
 
     Returns:
         None: This function has no return value.
@@ -426,6 +429,15 @@ def write_final_log_summary(log_path, total_jobs, total_chars_processed, avg_tim
             f.write(f"# Total characters: {total_chars_processed}\n")
             if avg_time_per_char:
                 f.write(f"# Average time per character: {avg_time_per_char:.4f}s\n")
+
+            total_done = sum(s["done"] for s in npc_stats.values())
+            if total_done:
+                done_details = ", ".join(
+                    f"{voice}: {stats['done']:,}"
+                    for voice, stats in npc_stats.items()
+                    if stats["done"] > 0
+                )
+                print(f"Skipped already generated: {total_done:,} ({done_details})")                      
             
             total_skipped = sum(s["skipped"] for s in npc_stats.values())
             if total_skipped:
@@ -1114,12 +1126,25 @@ def print_pregeneration_summary(npc_stats, profile_map):
     Displays a formatted table showing for each NPC:
     - The voice profile that will be used (with validation)
     - Total lines to process
-    - Lines skipped (already generated)
-    - Lines remaining to generate
+    - Lines already generated (Done)
+    - Lines with missing voices (Missing)
+    - Lines remaining to generate (To Gen)
     - Total character count
 
     The summary helps users verify that all configured voices exist before
     starting the potentially long generation process.
+
+    If COMPACT_SUMMARY is True, only NPCs with valid voices are shown in the
+    detailed table, and missing voices are summarized in a single line at the end.
+    If COMPACT_SUMMARY is False, all NPCs are shown including those with
+    missing voices (marked with "❌ Missing").
+
+    Column definitions:
+        - Total: Total number of rows for this NPC
+        - Done: Rows already generated (from generation-memory.json)
+        - Missing: Rows skipped because no valid voice profile exists
+        - To Gen: Rows that will be generated now
+        - Characters: Total characters across all rows for this NPC
 
     Args:
         npc_stats (dict): Statistics dictionary for each NPC, structured as:
@@ -1127,7 +1152,8 @@ def print_pregeneration_summary(npc_stats, profile_map):
                 "NPC Name": {
                     "voice_name": str,
                     "total": int,
-                    "skipped": int,
+                    "done": int,
+                    "missing": int,
                     "to_generate": int,
                     "chars": int
                 }
@@ -1139,9 +1165,11 @@ def print_pregeneration_summary(npc_stats, profile_map):
         The table includes a "VALID TOTAL" row showing only NPCs with
         existing voice profiles, and a "TOTAL" row showing all NPCs
         (including those with missing profiles that will be skipped).
-        Missing profiles are marked with "❌ Missing" in the table.
-    """   
-    print("\n" + "=" * 100)
+        Missing profiles are marked with "❌ Missing" in the table when
+        COMPACT_SUMMARY is False, or summarized in a single line when True.
+    """
+    line_length = 108
+    print("\n" + "=" * line_length)
     print("📊 PRE-GENERATION VOICE SUMMARY")
     
     # Show fallback status
@@ -1167,56 +1195,108 @@ def print_pregeneration_summary(npc_stats, profile_map):
     else:
         print(f"   🔧 Filenames: CSV with base36 fallback (prefix: {RESREF_PREFIX})")
     
-    print("=" * 100)
+    print("=" * line_length)
 
-    header = f"{'NPC Name':<28} {'Profile':<30} {'Total':>7} {'Skipped':>9} {'To Gen':>8} {'Characters':>12}"
+    header = f"{'NPC Name':<28} {'Profile':<30} {'Total':>7} {'Done':>8} {'Missing':>9} {'To Gen':>8} {'Chars':>12}"
     print(header)
-    print("-" * 100)
+    print("-" * line_length)
 
     grand_total = 0
+    grand_done = 0
     grand_skipped = 0
     grand_to_gen = 0
     grand_chars = 0
 
     valid_total = 0
+    valid_done = 0
     valid_skipped = 0
     valid_to_gen = 0
     valid_chars = 0
+    
+    missing_npcs = []
+    missing_chars_total = 0
+    missing_done_total = 0
+    missing_skipped_total = 0
 
     for npc_name, stats in npc_stats.items():
         profile_name = stats.get("voice_name", npc_name)
         has_profile = profile_name in profile_map
-        profile_str = f"✅ {profile_name}" if has_profile else "❌ Missing"
         total = stats["total"]
+        done = stats["done"]
         skipped = stats["skipped"]
         to_gen = stats["to_generate"]
         chars = stats["chars"]
 
         grand_total += total
+        grand_done += done
         grand_skipped += skipped
         grand_to_gen += to_gen
         grand_chars += chars
 
         if has_profile:
             valid_total += total
+            valid_done += done
             valid_skipped += skipped
             valid_to_gen += to_gen
             valid_chars += chars
+            
+            # Print valid NPCs (always show these)
+            profile_str = f"✅ {profile_name}"
+            print(
+                f"{npc_name:<28} "
+                f"{profile_str:<29} "
+                f"{total:>7,} "
+                f"{done:>8,} "
+                f"{skipped:>9,} "
+                f"{to_gen:>8,} "
+                f"{chars:>12,}"
+            )
+        else:
+            # Track missing NPCs for summary
+            missing_npcs.append(npc_name)
+            missing_chars_total += chars
+            missing_done_total += done
+            missing_skipped_total += skipped
+            
+            # Only print missing NPCs if COMPACT_SUMMARY is False
+            if not COMPACT_SUMMARY:
+                profile_str = "❌ Missing"
+                print(
+                    f"{npc_name:<28} "
+                    f"{profile_str:<29} "
+                    f"{total:>7,} "
+                    f"{done:>8,} "
+                    f"{skipped:>9,} "
+                    f"{to_gen:>8,} "
+                    f"{chars:>12,}"
+                )
 
+    print("-" * line_length)
+    
+    # Print summary for missing voices if there are any
+    if missing_npcs and COMPACT_SUMMARY:
+        missing_total = grand_total - valid_total
+        missing_done = grand_done - valid_done
+        missing_skipped = grand_skipped - valid_skipped
+        
         print(
-            f"{npc_name:<28} "
-            f"{profile_str:<29} "
-            f"{total:>7,} "
-            f"{skipped:>9,} "
-            f"{to_gen:>8,} "
-            f"{chars:>12,}"
+            f"{'❌ MISSING VOICES':<27} "
+            f"{'(summary)':<30} "
+            f"{missing_total:>7,} "
+            f"{missing_done:>8,} "
+            f"{missing_skipped:>9,} "
+            f"{0:>8,} "
+            f"{missing_chars_total:>12,}"
         )
+        print("-" * line_length)
 
-    print("-" * 100)
+    
+    # Print totals
     print(
         f"{'VALID TOTAL':<28} "
         f"{'':<30} "
         f"{valid_total:>7,} "
+        f"{valid_done:>8,} "
         f"{valid_skipped:>9,} "
         f"{valid_to_gen:>8,} "
         f"{valid_chars:>12,}"
@@ -1225,11 +1305,12 @@ def print_pregeneration_summary(npc_stats, profile_map):
         f"{'TOTAL':<28} "
         f"{'':<30} "
         f"{grand_total:>7,} "
+        f"{grand_done:>8,} "
         f"{grand_skipped:>9,} "
         f"{grand_to_gen:>8,} "
         f"{grand_chars:>12,}"
     )
-    print("=" * 100 + "\n")   
+    print("=" * line_length + "\n")   
 
 #endregion UI/Progress Display
 
@@ -1370,38 +1451,42 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                 # Get voice profile with fallback - pass profile_map for validation
                 voice_name = get_voice_profile_name(npc_name, gender, profile_map)
 
-                # Skip rows where no valid voice was found
-                if voice_name is None:
-                    print(f"⚠️ STRREF {strref}: No valid voice found for '{npc_name or 'Descriptions'}' (gender: {gender or 'unknown'})")
-                    continue
-
-                # Also skip if voice_name doesn't exist in profile_map (shouldn't happen with proper fallback)
-                if profile_map is not None and voice_name not in profile_map:
-                    print(f"⚠️ STRREF {strref}: Voice '{voice_name}' not found on server for '{npc_name or 'Descriptions'}'")
-                    continue
-                
                 # Use npc_name for stats, or "Descriptions" if empty
                 display_name = npc_name if npc_name else "Descriptions"
                 
-                # Initialize NPC stats
+                # Initialize NPC stats (ALWAYS, even if voice is missing)
                 if display_name not in npc_stats:
                     npc_stats[display_name] = {
-                        "voice_name": voice_name,
+                        "voice_name": voice_name if voice_name else "MISSING",
                         "total": 0,
-                        "skipped": 0,
+                        "done": 0,              # Already generated
+                        "skipped": 0,           # Missing voices
                         "to_generate": 0,
                         "chars": 0
                     }
                 
                 npc_stats[display_name]["total"] += 1
+                npc_stats[display_name]["chars"] += len(text)
                 
-                # Skip already generated if enabled
-                if skip_generated and is_already_generated(generation_memory, display_name, strref):
+                # Check if voice is missing
+                if voice_name is None:
+                    # Count as skipped (missing voice)
+                    npc_stats[display_name]["skipped"] += 1
+                    continue
+
+                # Check if voice_name exists in profile_map
+                if profile_map is not None and voice_name not in profile_map:
+                    # Count as skipped (voice not on server)
                     npc_stats[display_name]["skipped"] += 1
                     continue
                 
+                # Skip already generated if enabled
+                if skip_generated and is_already_generated(generation_memory, display_name, strref):
+                    npc_stats[display_name]["done"] += 1
+                    continue
+                
+                # This row passed all filters - add to generation queue
                 npc_stats[display_name]["to_generate"] += 1
-                npc_stats[display_name]["chars"] += len(text)
                 
                 # Preprocess text
                 text = preprocess_text(text, patcher_config) if patcher_config else text
@@ -1665,6 +1750,15 @@ def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, np
     if avg_time_per_char:
         print(f"Average generation time per character: {avg_time_per_char:.4f}s")
 
+    total_done = sum(s["done"] for s in npc_stats.values())
+    if total_done:
+        done_details = ", ".join(
+            f"{voice}: {stats['done']:,}"
+            for voice, stats in npc_stats.items()
+            if stats["done"] > 0
+        )
+        print(f"Skipped already generated: {total_done:,} ({done_details})")        
+
     total_skipped = sum(s["skipped"] for s in npc_stats.values())
     if total_skipped:
         skipped_details = ", ".join(
@@ -1672,7 +1766,7 @@ def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, np
             for voice, stats in npc_stats.items()
             if stats["skipped"] > 0
         )
-        print(f"Skipped already generated: {total_skipped:,} ({skipped_details})")
+        print(f"Skipped missing: {total_skipped:,} ({skipped_details})")
 
     print("=" * 70)
     print("✅ Done.")
