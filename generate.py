@@ -33,13 +33,13 @@ OUTPUT_DIR = r"output"
 
 # Generation Limits and filters
 LIMIT = 0                              # set to 0 to process all
-# Process only these voices
+# Process only these voices, leaving empty will process all voices.
 TARGET_VOICES = [                   
     # "Jaheira",
     # "Edwin",
     # "Neera",
     # "Bodhi",
-    "Elven Madman"
+    "Aesgareth"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
@@ -48,6 +48,8 @@ VOICE_SUBSTITUTIONS = {
     "Nym Khalazza": "BG1 Narrator",
     "Armored Figure": "Sarevok"
 }
+
+# Filter for which lines to process based on the CSV sound filename (column 6).
 FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
 
 # STRREF Filtering
@@ -1660,12 +1662,7 @@ def timeout_monitor(stop_event, gen_id, timeout_sec, idx, start_time):
     while not stop_event.is_set():
         elapsed = time.time() - start_time
         if elapsed > timeout_sec:
-            print(f"\n⏱️ Job {idx}: Timeout exceeded ({format_time(timeout_sec)}) - cancelling...")
             success, message = cancel_generation(gen_id)
-            if success:
-                print(f"   ✅ {message}")
-            else:
-                print(f"   ⚠️ {message}")
             break
         time.sleep(1.0)
 
@@ -1793,10 +1790,6 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
 
             success = True
 
-        else:
-            error = final_event.get("error", "unknown") if final_event else "unknown"
-            print(f"[{idx}/{total_jobs}] ❌ {filename} failed: {error}")
-
     except Exception as e:
         # If there was an error and we had a gen_id, try to cancel it
         if gen_id:
@@ -1811,7 +1804,6 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
         
         stop_event.set()
         worker.join(timeout=1.0)
-        print(f"[{idx}/{total_jobs}] ❌ {filename} error: {e}")
 
     return success, elapsed, audio_duration, chars
 
@@ -1852,7 +1844,7 @@ def format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_
         f"File: {filename:<10}  "
         f"Chars: {chars:>4}  "
         f"Gen: {elapsed:>6.2f}s  "
-        f"Audio: {audio_duration:>5.2f}s  "
+        f"Audio: {audio_duration:>6.2f}s  "
         f"Speed: {realtime_speed:>5.1f}%  "
         f"Npc: {npc_name:<20}"
         f"{voice_part}"
@@ -2103,7 +2095,7 @@ def main():
     for idx, (strref, display_name, voice_name, filename, text) in enumerate(selected_rows, start=1):
         profile_id = profile_map.get(voice_name)
         if not profile_id:
-            print(f"⏭️ Skipping {filename}: Voice '{voice_name}' not found.")
+            print(f"⏭️ Skipping {strref}/{filename}: Voice '{voice_name}' not found.")
             continue
 
         # Snapshot Overall line (static for the duration of this job)
