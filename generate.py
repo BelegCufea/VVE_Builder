@@ -16,6 +16,12 @@ BASE_URL = "http://10.0.50.5:17600"    # VoiceBox API - http://localhost:17493 f
 ENGINE = "qwen"
 MODEL_SIZE = "0.6B"
 
+# Generation Timeout Safeguards
+ENABLE_TIMEOUT_SAFEGUARD = True        # Enable/disable timeout protection
+TIMEOUT_MAX_SECONDS = 600              # Hard maximum: 10 minutes (600 seconds)
+TIMEOUT_MULTIPLIER = 3.0               # Cancel if actual time > estimated * multiplier
+TIMEOUT_MIN_ESTIMATES = 10             # Minimum jobs before using estimated time
+
 # Audio Conversion Configuration
 CONVERT_TO_OGG = True                  # convert WAV to Ogg Vorbis after download
 OGG_QUALITY = 4                        # libvorbis quality
@@ -1608,6 +1614,33 @@ def estimate_generation_time(regressor, chars):
     return 10.0  # Initial guess when no historical data
 
 
+def cancel_generation(gen_id):
+    """
+    Cancel a queued or running generation on the Voicebox server.
+
+    Sends a POST request to the /generate/{generation_id}/cancel endpoint
+    to stop the generation if it's still running.
+
+    Args:
+        gen_id (str): The generation ID to cancel.
+
+    Returns:
+        tuple: (success, message)
+            - success (bool): True if cancellation was successful, False otherwise.
+            - message (str): Status message describing the result.
+    """
+    try:
+        cancel_url = f"{BASE_URL}/generate/{gen_id}/cancel"
+        resp = requests.post(cancel_url)
+        
+        if resp.status_code == 200:
+            return True, "Cancellation successful"
+        else:
+            return False, f"Cancellation returned: {resp.status_code}"
+    except Exception as e:
+        return False, f"Cancellation error: {e}"
+
+
 def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filename, text,
                            profile_id, regressor, generation_memory, overall_line):
     """
@@ -1618,6 +1651,9 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
 
     The progress_worker keeps the job progress line and the Overall line
     (passed in as overall_line) visible, with Overall always last.
+
+    If ENABLE_TIMEOUT_SAFEGUARD is True, the job will be cancelled if it exceeds
+    the timeout threshold (either hard maximum or multiplier of estimated time).
 
     Args:
         idx (int): Current job index (1-based).
@@ -1640,7 +1676,19 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     estimated_sec = estimate_generation_time(regressor, chars)
     stop_event = threading.Event()
 
-    # Start progress bar thread – it will draw job line + Overall line
+    # Calculate timeout threshold
+    timeout_sec = None
+    if ENABLE_TIMEOUT_SAFEGUARD:
+        # Always use hard maximum
+        timeout_sec = TIMEOUT_MAX_SECONDS
+        
+        # Use estimated time if we have enough data
+        if len(regressor) >= TIMEOUT_MIN_ESTIMATES:
+            estimated_timeout = estimated_sec * TIMEOUT_MULTIPLIER
+            # Use the more conservative (smaller) timeout
+            timeout_sec = min(timeout_sec, estimated_timeout)
+            
+     # Start progress bar thread – it will draw job line + Overall line
     worker = threading.Thread(
         target=progress_worker,
         args=(stop_event, idx, total_jobs, filename, estimated_sec,
@@ -1653,17 +1701,49 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     success = False
     elapsed = 0
     audio_duration = 0
+    timed_out = False
+    gen_id = None
+    final_event = None
 
     try:
         gen_id = submit_generation(profile_id, text, ENGINE, MODEL_SIZE)
-        final_event = wait_for_completion(gen_id) or {}
+        
+        # Poll for completion with timeout checking
+        poll_interval = 1.0  # Check every second
+        
+        while True:
+            # Check if we should cancel due to timeout
+            elapsed = time.time() - start_time
+            
+            if timeout_sec is not None and elapsed > timeout_sec:
+                # Timeout exceeded - cancel the generation
+                print(f"\n⏱️ Job {idx}: Timeout exceeded ({format_time(timeout_sec)}) - cancelling...")
+                
+                success, message = cancel_generation(gen_id)
+                if success:
+                    print(f"   ✅ {message}")
+                else:
+                    print(f"   ⚠️ {message}")
+                
+                timed_out = True
+                final_event = {"status": "failed", "error": f"Timeout after {format_time(elapsed)}"}
+                break
+            
+            # Check if generation is complete
+            final_event = wait_for_completion(gen_id)
+            if final_event and final_event.get("status") in ("completed", "failed"):
+                break
+            
+            # Small delay before next poll
+            time.sleep(poll_interval)
+
         elapsed = time.time() - start_time
 
         # Stop the progress thread (it clears the two lines for us)
         stop_event.set()
         worker.join(timeout=1.0)
 
-        if final_event.get("status") == "completed":
+        if final_event and final_event.get("status") == "completed":
             audio_duration = final_event.get("duration", 0.0)
 
             # Create output directory if it doesn't exist
@@ -1695,10 +1775,17 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
             success = True
 
         else:
-            error = final_event.get("error", "unknown")
+            error = "Timeout" if timed_out else (final_event.get("error", "unknown") if final_event else "unknown")
             print(f"[{idx}/{total_jobs}] ❌ {filename} failed: {error}")
 
     except Exception as e:
+        # If there was an error and we had a gen_id, try to cancel it
+        if gen_id:
+            try:
+                cancel_generation(gen_id)
+            except Exception:
+                pass  # Ignore cancellation errors during exception handling
+        
         stop_event.set()
         worker.join(timeout=1.0)
         print(f"[{idx}/{total_jobs}] ❌ {filename} error: {e}")
