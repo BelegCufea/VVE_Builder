@@ -39,7 +39,7 @@ TARGET_VOICES = [
     # "Edwin",
     # "Neera",
     # "Bodhi",
-    "Aesgareth"
+    "Imprisoned One"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.

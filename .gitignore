@@ -1,5 +1,8 @@
 output/
 profiles/
+extracted/
+weidu/*.tp2
+weidu/export/
 *.log
 generation-memory.json
 strrefs*.json
