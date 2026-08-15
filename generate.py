@@ -1079,7 +1079,7 @@ def format_overall_line(total_chars_processed, total_chars_all, total_jobs, idx,
     return "Overall: processing..."
 
 
-def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
+def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, timeout_sec,
                     npc_name, voice_name, chars, overall_line, strref):
     r"""
     Background thread that maintains a two-line live progress display.
@@ -1111,6 +1111,7 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
         total_jobs (int): Total number of jobs to process.
         filename (str): The filename being generated (for display).
         estimated_sec (float): Estimated duration for this job in seconds.
+        timeout_sec (float): Maximum allowed duration for this job in seconds.
         npc_name (str): The NPC name being processed (for display).
         voice_name (str): Voice profile name; shown in parentheses only when
             it differs from npc_name.
@@ -1137,16 +1138,16 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec,
             percent = 0
 
         bar = progress_bar(percent)
-        time_str = f"{format_time(elapsed)} / {format_time(estimated_sec)}"
+        time_str = f"{format_time(elapsed)} / {format_time(estimated_sec)} (max: {format_time(timeout_sec)})"
 
         # Job progress line with STRREF - keep Grok's formatting
         job_msg = (
             f"[{job_idx:>{job_width}}/{total_jobs:>{job_width}}] "
-            f"{strref:>6}/{filename:<10}  "
+            f"{strref}/{filename}  "
             f"{bar}  "
-            f"{time_str:>18}  "
-            f"({chars:>4} chars)  "
-            f"{npc_name:<20}"
+            f"{time_str}  "
+            f"({chars} chars)  "
+            f"{npc_name}"
         )
         if voice_name != npc_name:
             job_msg += f" ({voice_name})"
@@ -1714,13 +1715,13 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
         # Use estimated time if we have enough data
         if len(regressor) >= TIMEOUT_MIN_ESTIMATES:
             estimated_timeout = estimated_sec * TIMEOUT_MULTIPLIER
-            # Use the less conservative (smaller) timeout
-            timeout_sec = max(timeout_sec, estimated_timeout)
+            # Use the more conservative (smaller) timeout
+            timeout_sec = min(timeout_sec, estimated_timeout)
 
     # Start progress bar thread – it will draw job line + Overall line
     worker = threading.Thread(
         target=progress_worker,
-        args=(stop_event, idx, total_jobs, filename, estimated_sec,
+        args=(stop_event, idx, total_jobs, filename, estimated_sec, timeout_sec,
               npc_name, voice_name, chars, overall_line, strref)
     )
     worker.daemon = True
