@@ -18,7 +18,7 @@ This will:
 import json
 import os
 import glob
-from datetime import datetime
+import shutil
 
 # ============================================================
 # Configuration
@@ -99,13 +99,24 @@ def merge_memory_files(file_list, verbose=True):
 
 
 def backup_file(file_path):
-    """Create a backup of the file if it exists."""
+    """
+    Create a backup copy of the file if it exists.
+
+    Creates a copy of the file with BACKUP_SUFFIX appended to the filename.
+    The original file remains unchanged.
+
+    Args:
+        file_path (str): Path to the file to backup.
+
+    Returns:
+        bool: True if backup was created successfully, False otherwise.
+    """
     if not os.path.exists(file_path):
         return False
     
     backup_path = file_path + BACKUP_SUFFIX
     try:
-        os.rename(file_path, backup_path)
+        shutil.copy2(file_path, backup_path)  # copy2 preserves metadata
         return True
     except Exception:
         return False
@@ -137,11 +148,11 @@ def main():
         print(f"  - {f}")
     print()
 
-    # Backup existing output file if it exists
+    # Backup existing output file if it exists (COPY, don't rename)
     if os.path.exists(OUTPUT_FILE):
         print(f"📦 Creating backup: {OUTPUT_FILE}{BACKUP_SUFFIX}")
         if backup_file(OUTPUT_FILE):
-            print(f"   ✅ Backup created")
+            print(f"   ✅ Backup created (original preserved)")
         else:
             print(f"   ⚠️ Could not create backup")
         print()
@@ -150,7 +161,7 @@ def main():
     print("📊 Merging files...")
     merged, loaded_count, total_strrefs = merge_memory_files(files)
 
-    # Save the merged file
+    # Save the merged file (overwrites the original)
     print(f"💾 Saving merged data to: {OUTPUT_FILE}")
     with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=4)
@@ -177,7 +188,6 @@ def main():
     
     print("=" * 60)
     print("✅ Done!")
-
 
 if __name__ == "__main__":
     import sys
