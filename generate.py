@@ -39,7 +39,7 @@ TARGET_VOICES = [
     # "Edwin",
     # "Neera",
     # "Bodhi",
-    # "Elhan"
+    "Elven Madman"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
@@ -759,6 +759,33 @@ def wait_for_completion(gen_id):
                     break
 
     return final_event
+
+
+def cancel_generation(gen_id):
+    """
+    Cancel a queued or running generation on the Voicebox server.
+
+    Sends a POST request to the /generate/{generation_id}/cancel endpoint
+    to stop the generation if it's still running.
+
+    Args:
+        gen_id (str): The generation ID to cancel.
+
+    Returns:
+        tuple: (success, message)
+            - success (bool): True if cancellation was successful, False otherwise.
+            - message (str): Status message describing the result.
+    """
+    try:
+        cancel_url = f"{BASE_URL}/generate/{gen_id}/cancel"
+        resp = requests.post(cancel_url)
+        
+        if resp.status_code == 200:
+            return True, "Cancellation successful"
+        else:
+            return False, f"Cancellation returned: {resp.status_code}"
+    except Exception as e:
+        return False, f"Cancellation error: {e}"
 
 
 def download_audio(gen_id, output_path):
@@ -1614,31 +1641,32 @@ def estimate_generation_time(regressor, chars):
     return 10.0  # Initial guess when no historical data
 
 
-def cancel_generation(gen_id):
+def timeout_monitor(stop_event, gen_id, timeout_sec, idx, start_time):
     """
-    Cancel a queued or running generation on the Voicebox server.
-
-    Sends a POST request to the /generate/{generation_id}/cancel endpoint
-    to stop the generation if it's still running.
-
+    Monitor thread that checks for timeout and cancels the generation if exceeded.
+    
+    Runs in a separate thread and periodically checks if the generation has
+    exceeded its time limit. If it has, it sends a cancellation request.
+    
     Args:
+        stop_event (threading.Event): Event to signal when generation completes.
         gen_id (str): The generation ID to cancel.
-
-    Returns:
-        tuple: (success, message)
-            - success (bool): True if cancellation was successful, False otherwise.
-            - message (str): Status message describing the result.
+        timeout_sec (float): Timeout in seconds.
+        idx (int): Job index for logging.
+        start_time (float): Timestamp when the job started.
     """
-    try:
-        cancel_url = f"{BASE_URL}/generate/{gen_id}/cancel"
-        resp = requests.post(cancel_url)
-        
-        if resp.status_code == 200:
-            return True, "Cancellation successful"
-        else:
-            return False, f"Cancellation returned: {resp.status_code}"
-    except Exception as e:
-        return False, f"Cancellation error: {e}"
+    elapsed = 0
+    while not stop_event.is_set():
+        elapsed = time.time() - start_time
+        if elapsed > timeout_sec:
+            print(f"\n⏱️ Job {idx}: Timeout exceeded ({format_time(timeout_sec)}) - cancelling...")
+            success, message = cancel_generation(gen_id)
+            if success:
+                print(f"   ✅ {message}")
+            else:
+                print(f"   ⚠️ {message}")
+            break
+        time.sleep(1.0)
 
 
 def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filename, text,
@@ -1652,8 +1680,8 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     The progress_worker keeps the job progress line and the Overall line
     (passed in as overall_line) visible, with Overall always last.
 
-    If ENABLE_TIMEOUT_SAFEGUARD is True, the job will be cancelled if it exceeds
-    the timeout threshold (either hard maximum or multiplier of estimated time).
+    If ENABLE_TIMEOUT_SAFEGUARD is True, a separate monitor thread watches
+    the elapsed time and cancels the generation if it exceeds the threshold.
 
     Args:
         idx (int): Current job index (1-based).
@@ -1675,6 +1703,7 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     chars = len(text)
     estimated_sec = estimate_generation_time(regressor, chars)
     stop_event = threading.Event()
+    cancel_event = threading.Event()  # Signals that generation is done (for monitor)
 
     # Calculate timeout threshold
     timeout_sec = None
@@ -1685,10 +1714,10 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
         # Use estimated time if we have enough data
         if len(regressor) >= TIMEOUT_MIN_ESTIMATES:
             estimated_timeout = estimated_sec * TIMEOUT_MULTIPLIER
-            # Use the more conservative (smaller) timeout
-            timeout_sec = min(timeout_sec, estimated_timeout)
-            
-     # Start progress bar thread – it will draw job line + Overall line
+            # Use the less conservative (smaller) timeout
+            timeout_sec = max(timeout_sec, estimated_timeout)
+
+    # Start progress bar thread – it will draw job line + Overall line
     worker = threading.Thread(
         target=progress_worker,
         args=(stop_event, idx, total_jobs, filename, estimated_sec,
@@ -1701,41 +1730,30 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
     success = False
     elapsed = 0
     audio_duration = 0
-    timed_out = False
     gen_id = None
     final_event = None
+    monitor_thread = None
 
     try:
         gen_id = submit_generation(profile_id, text, ENGINE, MODEL_SIZE)
         
-        # Poll for completion with timeout checking
-        poll_interval = 1.0  # Check every second
+        # Start timeout monitor thread if timeout is enabled
+        monitor_thread = None
+        if timeout_sec is not None:
+            monitor_thread = threading.Thread(
+                target=timeout_monitor,
+                args=(cancel_event, gen_id, timeout_sec, idx, start_time)
+            )
+            monitor_thread.daemon = True
+            monitor_thread.start()
+
+        # Wait for completion (blocking - uses SSE)
+        final_event = wait_for_completion(gen_id)
         
-        while True:
-            # Check if we should cancel due to timeout
-            elapsed = time.time() - start_time
-            
-            if timeout_sec is not None and elapsed > timeout_sec:
-                # Timeout exceeded - cancel the generation
-                print(f"\n⏱️ Job {idx}: Timeout exceeded ({format_time(timeout_sec)}) - cancelling...")
-                
-                success, message = cancel_generation(gen_id)
-                if success:
-                    print(f"   ✅ {message}")
-                else:
-                    print(f"   ⚠️ {message}")
-                
-                timed_out = True
-                final_event = {"status": "failed", "error": f"Timeout after {format_time(elapsed)}"}
-                break
-            
-            # Check if generation is complete
-            final_event = wait_for_completion(gen_id)
-            if final_event and final_event.get("status") in ("completed", "failed"):
-                break
-            
-            # Small delay before next poll
-            time.sleep(poll_interval)
+        # Signal that generation is done (stop timeout monitor)
+        cancel_event.set()
+        if monitor_thread:
+            monitor_thread.join(timeout=0.5)
 
         elapsed = time.time() - start_time
 
@@ -1775,7 +1793,7 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
             success = True
 
         else:
-            error = "Timeout" if timed_out else (final_event.get("error", "unknown") if final_event else "unknown")
+            error = final_event.get("error", "unknown") if final_event else "unknown"
             print(f"[{idx}/{total_jobs}] ❌ {filename} failed: {error}")
 
     except Exception as e:
@@ -1785,6 +1803,10 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
                 cancel_generation(gen_id)
             except Exception:
                 pass  # Ignore cancellation errors during exception handling
+        
+        cancel_event.set()
+        if monitor_thread:
+            monitor_thread.join(timeout=0.5)
         
         stop_event.set()
         worker.join(timeout=1.0)
@@ -2026,7 +2048,7 @@ def main():
         generation_memory,
         SKIP_ALREADY_GENERATED,
         LIMIT,
-        profile_map,  # <-- Pass profile_map here
+        profile_map,
         USE_STRREF_FILTER,
         STRREF_FILTER_FILE,
         FORCE_GENERATED_FILENAMES

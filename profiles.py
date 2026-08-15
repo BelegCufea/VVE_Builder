@@ -289,8 +289,8 @@ def main():
     importer = VoiceBoxImporter(API_BASE_URL)
     
     result = importer.scan_and_import(
-        voices_dir=voices_dir,
-        output_dir=output_dir,
+        voices_dir=str(voices_dir),
+        output_dir=str(output_dir),
         auto_import=AUTO_IMPORT,
         skip_existing=SKIP_EXISTING
     )
