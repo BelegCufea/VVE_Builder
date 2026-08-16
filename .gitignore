@@ -1,6 +1,7 @@
 output/
 profiles/
 extracted/
+voices_prep/
 weidu/*.tp2
 weidu/export/
 *.log
