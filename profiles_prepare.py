@@ -17,7 +17,7 @@ import shutil
 import logging
 
 # Configuration
-MIN_DURATION = 15.0  # Minimum duration in seconds (sum of samples)
+MIN_DURATION = 10.0  # Minimum duration in seconds (sum of samples)
 MAX_DURATION = 30.0  # Maximum duration in seconds (single sample file)
 TS_PATTERN = r'^TS'  # TS (Text-to-Speech) pattern - entries matching this pattern need regeneration
 WEIDU_PATH = r"./weidu/weidu.exe"
@@ -411,6 +411,19 @@ class VoiceSampleProcessor:
                 f.write(entry.text)
         
         return True
+
+    def can_create_file(self, path: Path) -> bool:
+        """
+        Check if a file can be created at the given path.
+        Returns True if the file can be created, False otherwise.
+        """
+        try:
+            # Try to create the file (fail if it already exists)
+            path.touch(exist_ok=False)
+            path.unlink()  # Clean up immediately
+            return True
+        except OSError:
+            return False
     
     def process_all(self) -> None:
         """Process all character groups"""
@@ -422,6 +435,7 @@ class VoiceSampleProcessor:
         skipped_count = 0
         no_samples_count = 0
         blacklisted_count = 0
+        invalid_filename_count = 0
         
         for real_name, entries in self.entries_by_realname.items():
             # Check if blacklisted
@@ -439,6 +453,13 @@ class VoiceSampleProcessor:
             if not has_samples:
                 no_samples_count += 1
                 continue
+
+            # Check if we can create a file with this RealName
+            test_path = VOICES_PREP_DIR / f"{real_name}.WAV"
+            if not self.can_create_file(test_path):
+                logger.warning(f"❌ Skipping '{real_name}' - cannot create file (invalid filename or permissions)")
+                invalid_filename_count += 1
+                continue            
             
             # This character is eligible for processing
             characters_to_process.append((real_name, entries))
@@ -453,8 +474,9 @@ class VoiceSampleProcessor:
         logger.info(f"{'─'*50}")
         logger.info(f"  📊 Total characters with TS entries: {len(self.entries_by_realname)}")
         logger.info(f"  🚫 Blacklisted: {blacklisted_count}")
-        logger.info(f"  ⏭️  Already exist: {skipped_count}")
-        logger.info(f"  ⚠️  No source samples: {no_samples_count}")
+        logger.info(f"  ⏭️ Already exist: {skipped_count}")
+        logger.info(f"  ⚠️ No source samples: {no_samples_count}")
+        logger.info(f"  ❌ Invalid filenames: {invalid_filename_count}")        
         logger.info(f"  ✅ To process: {total_to_process}")
         logger.info(f"{'─'*50}")
         
