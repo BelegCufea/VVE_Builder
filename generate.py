@@ -88,8 +88,27 @@ COMPACT_SUMMARY = True                 # If True, only show NPCs with valid voic
 
 #region Logging
 def log_initialize():
-    """Initialize logging with file and console handlers"""
+    """
+    Initialize the logging system with dual output to file and console.
     
+    Sets up a logger that writes to two destinations:
+        - File: Full debug-level logs with timestamps (YYYY-MM-DD HH:MM:SS)
+        - Console: Clean info-level messages without timestamps (just the message)
+    
+    This dual-sink approach provides detailed logs for troubleshooting while
+    keeping the console output clean and readable during interactive use.
+    
+    The function also configures UTF-8 encoding for Windows console output
+    with line buffering to ensure proper display of Unicode characters
+    (like emojis and special symbols).
+    
+    Returns:
+        logging.Logger: Configured logger instance ready for use.
+    
+    Note:
+        The logger is initialized at module load time and stored in the
+        global variable `logger` for use throughout the application.
+    """
     # Ensure UTF-8 output on Windows
     if sys.platform == 'win32':
         sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
@@ -128,6 +147,29 @@ logger = log_initialize()
 
 
 def log_header(total_jobs, total_chars_all, header_messages):
+    """
+    Log a formatted header block containing initialization information.
+    
+    Creates a visually distinct header section in the log that summarizes
+    the configuration and setup state before generation begins. This helps
+    contextualize the log entries that follow and provides a quick reference
+    for what was configured.
+    
+    The header includes:
+        - Script name and start timestamp
+        - All collected initialization messages (profile count, config status)
+        - Total number of jobs and characters to process
+    
+    Args:
+        total_jobs (int): Total number of generation jobs to process.
+        total_chars_all (int): Total character count across all jobs.
+        header_messages (list): List of message strings collected during
+            initialization (e.g., "Loaded 88 voice profiles").
+    
+    Note:
+        The header is logged at INFO level and appears in both the console
+        and log file with a consistent format.
+    """    
     lines =  []
 
     lines.append("")
@@ -343,12 +385,12 @@ def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
 
 def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration, npc_name, voice_name, success=True, error_msg=None):
     """
-    Format a job summary line for both console output and logging.
-
-    Creates a consistent formatted string containing all job information.
-    The same format is used for both the console print and the log file,
-    ensuring consistency between output streams.
-
+    Log a job summary line to both console and file.
+    
+    Creates a consistent formatted string containing all job information
+    (STRREF, filename, timing, NPC name, etc.) and writes it using the
+    appropriate log level (INFO for success, WARNING for failure).
+    
     Args:
         idx (int): Current job index (1-based).
         total_jobs (int): Total number of jobs.
@@ -361,9 +403,10 @@ def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_dur
         voice_name (str): Voice profile name used.
         success (bool, optional): Whether generation succeeded. Defaults to True.
         error_msg (str, optional): Error message if failed. Defaults to None.
-
-    Returns:
-        str: Formatted job summary line.
+    
+    Note:
+        The summary line is formatted identically for both console and file
+        output to ensure consistency across both sinks.
     """
     realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
     voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
@@ -391,23 +434,25 @@ def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_dur
 
 def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
     """
-    Format the final summary as a string for both console and log output.
-
-    Builds a complete summary string including:
-    - Total files processed
-    - Total characters processed
-    - Average time per character
-    - Already generated files (if any)
-    - Missing voices (if any)
-
+    Log the final summary after all generation jobs complete.
+    
+    Writes a comprehensive summary section showing:
+        - Total files processed
+        - Total characters processed
+        - Average time per character
+        - Already generated files (if any)
+        - Missing voices (if any)
+        - Completion timestamp
+    
     Args:
         total_jobs (int): Total number of jobs processed.
         total_chars_processed (int): Total characters processed.
         avg_time_per_char (float): Average generation time per character.
         npc_stats (dict): Statistics dictionary per NPC.
-
-    Returns:
-        str: Formatted summary string ready for console or log output.
+    
+    Note:
+        The summary is logged at INFO level and helps provide a quick
+        overview of what was accomplished during the run.
     """
     # Extract statistics
     total_done = 0
@@ -1211,7 +1256,7 @@ def convert_to_ogg(input_path, output_path=None, quality=2):
         raise
 #endregion Audio Processing
 
-#region UI/Progress Display
+#region Progress Display
 def format_overall_line(total_chars_processed, total_chars_all, total_jobs, idx,
                         overall_regressor, avg_time_per_char, elapsed_total):
     """
@@ -1245,9 +1290,8 @@ def format_overall_line(total_chars_processed, total_chars_all, total_jobs, idx,
             generation batch.
 
     Returns:
-        str: A fully formatted Overall line ready to be written to stdout,
-            or the placeholder "Overall: processing..." when statistics are
-            not yet available.
+        str: A fully formatted Overall line, or the placeholder
+            "Overall: processing..." when statistics are not yet available.
     """
     if avg_time_per_char is not None and total_chars_all > 0:
         remaining_chars = total_chars_all - total_chars_processed
@@ -1315,9 +1359,9 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, ti
         strref (str): The STRREF identifier being generated.
 
     Note:
-        The thread is daemonized and will exit cleanly when stop_event is set.
-        It assumes a terminal that understands basic ANSI escape sequences
-        for cursor movement and line clearing.
+        This function is intended to be run as a daemon thread and does
+        not return a value. It updates the console in place using ANSI
+        escape sequences and exits when stop_event is set.
     """
     start_time = time.time()
     first = True
@@ -1373,7 +1417,7 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, ti
         sys.stdout.write("\n")
         sys.stdout.write("\033[2A")      # go back up so next print starts on the cleared job line
         sys.stdout.flush()
-#endregion UI/Progress Display
+#endregion Progress Display
 
 #region CSV Processing
 def filter_and_sort_rows(selected_rows, profile_map):
@@ -1406,7 +1450,9 @@ def load_strref_filter(filter_file):
         filter_file (str): Path to the JSON file containing strref list.
         
     Returns:
-        set: Set of strref strings to process, or empty set if file not found.
+        tuple: (strref_set, messages)
+            - strref_set (set): Set of strref strings to process, or empty set
+            - messages (list): Informational messages collected during loading
     """
     messages = []
 
@@ -1453,7 +1499,10 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
         force_generated_filenames (bool): If True, always use generated; if False, use CSV with fallback.
         
     Returns:
-        tuple: (selected_rows, npc_stats)
+        tuple: (selected_rows, npc_stats, messages)
+            - selected_rows (list): List of (strref, display_name, voice_name, filename, text)
+            - npc_stats (dict): Statistics per NPC
+            - messages (list): Informational messages collected during processing
     """
     selected_rows = []
     npc_stats = {}
@@ -1493,7 +1542,7 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                     continue
                 
                 # Apply filename pattern filter (only if not using STRREF filter)
-                if not use_strref_filter and filename_pattern and not re.match(filename_pattern, csv_filename):
+                if not use_strref_filter and filename_pattern and csv_filename and not re.match(filename_pattern, csv_filename):
                     continue
                 
                 # Skip rows without text
