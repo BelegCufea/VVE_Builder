@@ -12,6 +12,8 @@ import struct
 import subprocess
 import shutil
 import csv
+import json
+from typing import Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -19,6 +21,8 @@ from pathlib import Path
 WEIDU_PATH = r"./weidu/weidu.exe"
 GAME_DIRECTORY = r"C:/Relax/BGEET"
 EXTRACT_DIR = r"./extracted"
+CSV_PATH = r"dialog-report.csv"
+PATCHER_CONFIG_PATH = r"patcher-config.json"
 TEXT_ENCODING = "utf-8"
 GENDER_MAP = {1: "M", 2: "F", 3: "O", 4: "N"}  # GENDER.IDS: MALE, FEMALE, OTHER, NEITHER
 # =======================================================
@@ -230,36 +234,195 @@ def iter_files_ci(directory: Path, extension: str):
 # ==================== STEP 5: build lookup tables ====================
 STRIP_COLOR_RE = re.compile(r"\^0x[0-9a-fA-F]{8}(.*?)\^-")
 
-def build_dlg_to_cre_info(extract_dir: Path, tlk: dict[int, TlkEntry]) -> dict[str, tuple[str, str]]:
-    """Maps DLG resref -> (real_name, gender_letter), resolved via owning CRE."""
-    result: dict[str, tuple[str, str]] = {}
+def load_patcher_config(config_path: Path) -> dict:
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
 
+def build_dlg_to_cre_info(
+    extract_dir: Path, 
+    tlk: dict[int, TlkEntry],
+    config: dict
+) -> dict[str, tuple[str, str]]:
+    """Maps DLG resref -> (real_name, gender_letter) with robust fallback resolution."""
+    result: dict[str, tuple[str, str]] = {}
+    
+    # Get the name replacements and gender overrides from config
+    name_replacements = config.get("creNameReplacements", {})
+    gender_overrides = config.get("genderOverrides", {})
+    
+    # Build list of all CRE basenames for indexing
+    cre_file_index = {file.stem.upper() for file in iter_files_ci(extract_dir, "cre")}
+    
+    # Build mapping from dialog_resref to CRE info
+    cre_dialog_map = {}
     for cre_file in iter_files_ci(extract_dir, "cre"):
         info = parse_cre(cre_file)
         if info is None or not info.dialog_resref:
             continue
-
-        name_strref = (
-            info.long_name_strref if info.long_name_strref >= 0 else info.short_name_strref
+        cre_dialog_map[info.dialog_resref] = cre_file.stem.upper()
+    
+    # ITERATE THROUGH DLG FILES, not CRE files
+    for dlg_file in iter_files_ci(extract_dir, "dlg"):
+        dlg_resref = dlg_file.stem.upper()
+        
+        # Find the CRE that owns this DLG
+        cre_basename = find_cre_file(
+            dlg_resref,  # Pass the DLG name, not the CRE's dialog_resref
+            cre_dialog_map,
+            cre_file_index,
+            name_replacements
         )
+        
+        if cre_basename is None:
+            continue
+            
+        # Get the CRE info
+        cre_info = parse_cre(extract_dir / f"{cre_basename}.cre")
+        if cre_info is None:
+            continue
+            
+        # Apply gender override if exists
+        gender = GENDER_MAP.get(cre_info.gender_byte, "")
+        if cre_info.filename in gender_overrides:
+            gender = gender_overrides[cre_info.filename]
+        
+        # Get name from TLK
+        name_strref = cre_info.long_name_strref if cre_info.long_name_strref >= 0 else cre_info.short_name_strref
         name = ""
         if name_strref >= 0 and name_strref in tlk:
             raw_text = tlk[name_strref].text
             name = STRIP_COLOR_RE.sub(r"\1", raw_text).strip()
-
-        gender = GENDER_MAP.get(info.gender_byte, "")
-        result[info.dialog_resref] = (name, gender)
-
+        
+        # Map the DLG to the CRE info
+        result[dlg_resref] = (name, gender)
+    
     return result
 
+def build_dlg_to_cre_index(extract_dir: Path) -> dict[str, str]:
+    """Builds authoritative mapping from CRE's embedded Dialog resref to CRE basename."""
+    index = {}
+    
+    for cre_file in iter_files_ci(extract_dir, "cre"):
+        # Read the dialog resref directly from the CRE binary
+        dlg_ref = read_cre_dialog_resref(cre_file)
+        if dlg_ref:
+            # TryAdd equivalent - first one wins
+            if dlg_ref not in index:
+                index[dlg_ref] = cre_file.stem.upper()
+    
+    return index
+
+def read_cre_dialog_resref(path: Path) -> Optional[str]:
+    """Read the Dialog resref from a CRE file (offset 0x02cc)."""
+    try:
+        data = path.read_bytes()
+        if len(data) < 0x02cc + 8:
+            return None
+            
+        signature = data[0:4]
+        version = data[4:8]
+        if signature != b"CRE ":
+            return None
+        if version not in (b"V1.0", b"V1  "):
+            return None
+            
+        # Read 8-byte resref field at offset 0x02cc
+        dialog_resref_raw = data[0x02cc:0x02cc + 8]
+        dialog_resref = dialog_resref_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").upper()
+        return dialog_resref if dialog_resref else None
+    except:
+        return None
+
+def find_cre_file(
+    dialog_resref: str,
+    dlg_to_cre_index: dict[str, str],
+    cre_file_index: set[str],
+    name_replacements: dict[str, str]
+) -> Optional[str]:
+    """
+    Find the CRE file that owns this dialog using the same fallback logic as the C# code.
+    """
+    base_name = dialog_resref.upper()
+    
+    # Highest priority: authoritative match via CRE's embedded dialog ref
+    if base_name in dlg_to_cre_index:
+        return dlg_to_cre_index[base_name]
+    
+    # Apply name replacements from config before any other stripping (using regex!)
+    for pattern, replacement in name_replacements.items():
+        base_name = re.sub(pattern, replacement, base_name, flags=re.IGNORECASE)
+    
+    # Helper to try resolving cascade
+    def try_resolve_cascade(current: str) -> Optional[str]:
+        # 1. Try direct match
+        if current in cre_file_index:
+            return current
+        
+        # 2. Strip trailing digits and try
+        no_digits = re.sub(r'\d+$', '', current)
+        if no_digits in cre_file_index:
+            return no_digits
+        
+        # 3. Strip trailing 'A' or 'E' and try
+        if no_digits and no_digits[-1] in ('A', 'E'):
+            no_digits_no_suffix = no_digits[:-1]
+            if no_digits_no_suffix in cre_file_index:
+                return no_digits_no_suffix
+        
+        # 4. Wildcard Fallback
+        for cre_name in sorted(cre_file_index):
+            if cre_name.startswith(no_digits):
+                return cre_name
+        
+        return None
+    
+    # Try original name after replacements
+    match = try_resolve_cascade(base_name)
+    if match:
+        return match
+    
+    # Strip trailing underscore
+    if base_name and base_name[-1] == '_':
+        base_name = base_name[:-1]
+        match = try_resolve_cascade(base_name)
+        if match:
+            return match
+    
+    # Strip "BD" or "TB" prefix
+    if base_name.startswith(("BD", "TB")):
+        base_name = base_name[2:]
+        match = try_resolve_cascade(base_name)
+        if match:
+            return match
+    
+    # Strip "B" prefix
+    if base_name and base_name[0] == 'B':
+        base_name = base_name[1:]
+        match = try_resolve_cascade(base_name)
+        if match:
+            return match
+    
+    # Strip trailing 'J', 'P', 'B', 'S', or 'D' suffix
+    if base_name and base_name[-1] in ('J', 'P', 'B', 'S', 'D'):
+        base_name = base_name[:-1]
+        match = try_resolve_cascade(base_name)
+        if match:
+            return match
+    
+    # Strip first digit and everything after it
+    stripped_digits = re.sub(r'\d.*$', '', base_name)
+    if stripped_digits != base_name:
+        match = try_resolve_cascade(stripped_digits)
+        if match:
+            return match
+    
+    return None
 
 # ==================== STEP 6: report generation ====================
 
 def sound_wav_placeholder(sound_resref: str) -> str:
-    # TODO: check <sound_resref>.WAV under the game's override directory.
-    # Skipped for now per current requirements.
-    return ""
-
+    override_path = Path(GAME_DIRECTORY) / "override" / f"{sound_resref}.wav"
+    return str(override_path.exists())
 
 def write_dialog_report(
     out_path: Path,
@@ -317,7 +480,6 @@ def write_dialog_report(
 
 def main() -> None:
     weidu_path = Path(WEIDU_PATH).resolve()
-    weidu_dir = weidu_path.parent
     game_dir = Path(GAME_DIRECTORY).resolve()
     extract_dir = Path(EXTRACT_DIR).resolve()
 
@@ -346,12 +508,20 @@ def main() -> None:
     else:
         print("No dialogf.tlk found — gender fallback via TLK divergence unavailable")
 
+    config_path = Path(PATCHER_CONFIG_PATH)
+    if config_path.exists():
+        config = load_patcher_config(config_path)
+        print(f"Loaded patcher config from {config_path}")
+    else:
+        print("Warning: patcher-config.json not found, using defaults")
+        config = {"creNameReplacements": {}, "genderOverrides": {}}        
+
     print("Parsing DLG binaries for strref ownership ...")
     strref_info = scan_dlg_files_for_strrefs(extract_dir)
     print(f"Found {len(strref_info)} distinct strrefs referenced across DLG files")
 
     print("Building DLG -> CRE lookup ...")
-    dlg_to_cre_info = build_dlg_to_cre_info(extract_dir, tlk)
+    dlg_to_cre_info = build_dlg_to_cre_info(extract_dir, tlk, config)
     print(f"Resolved {len(dlg_to_cre_info)} DLG resrefs to a speaking CRE")
 
     out_path = extract_dir / "dialog-report.csv"
