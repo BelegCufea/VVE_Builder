@@ -48,13 +48,13 @@ TARGET_VOICES = [
     # "Edwin",
     # "Neera",
     # "Bodhi",
-    "Torsin de Lancie"
+    # "Torsin de Lancie"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
 VOICE_SUBSTITUTIONS = {
     # "Drizzt Do'Urden": "Drizzt",
-    "Nym Khalazza": "BG1 Narrator",
+    "Harper": "Jaheira",
     "Armored Figure": "Sarevok"
 }
 
@@ -62,7 +62,7 @@ VOICE_SUBSTITUTIONS = {
 FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
 
 # STRREF Filtering
-USE_STRREF_FILTER = True              # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
+USE_STRREF_FILTER = False             # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
 STRREF_FILTER_FILE = r"strrefs.json"   # JSON file with list of strrefs to process
 
 # Voice Fallback Configuration
@@ -80,7 +80,7 @@ SKIP_ALREADY_GENERATED = True          # If True, skip lines already generated (
 GENERATION_MEMORY_PATH = r"generation-memory.json"
 
 # Logging
-LOG_FILE_PATH = r"logs/generation.log"
+LOG_FILE_PATH = r"logs/generate.log"
 
 # Pre-generation Summary Options
 COMPACT_SUMMARY = True                 # If True, only show NPCs with valid voices; if False, show all
@@ -185,7 +185,7 @@ def log_header(total_jobs, total_chars_all, header_messages):
     logger.info(summary)
 
 
-def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
+def log_pregeneration_summary(npc_stats, profile_map):
     """
     Format the pre-generation summary as a string for both console and log output.
 
@@ -200,10 +200,12 @@ def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
     The summary helps users verify that all configured voices exist before
     starting the potentially long generation process.
 
-    If COMPACT_SUMMARY is True, only NPCs with valid voices are shown in the
-    detailed table, and missing voices are summarized in a single line at the end.
-    If COMPACT_SUMMARY is False, all NPCs are shown including those with
-    missing voices (marked with "❌ Missing").
+    If COMPACT_SUMMARY is True:
+        - Only NPCs with valid voices AND pending work are shown in detail
+        - NPCs with missing voices are summarized in a single line
+        - NPCs with valid voices but nothing to generate are summarized in a single line
+    If COMPACT_SUMMARY is False:
+        - All NPCs are shown including those with missing voices (marked with "❌ Missing")
 
     Column definitions:
         - Total: Total number of rows for this NPC
@@ -285,6 +287,12 @@ def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
     missing_chars_total = 0
     missing_done_total = 0
     missing_skipped_total = 0
+    
+    # Track NPCs with valid voices but nothing to generate
+    done_npcs = []
+    done_chars_total = 0
+    done_done_total = 0
+    done_skipped_total = 0
 
     for npc_name, stats in npc_stats.items():
         profile_name = stats.get("voice_name", npc_name)
@@ -308,17 +316,28 @@ def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
             valid_to_gen += to_gen
             valid_chars += chars
             
-            # Format valid NPCs (always show these)
-            profile_str = f"✅ {profile_name}"
-            lines.append(
-                f"{npc_name:<28} "
-                f"{profile_str:<29} "
-                f"{total:>7,} "
-                f"{done:>8,} "
-                f"{skipped:>9,} "
-                f"{to_gen:>8,} "
-                f"{chars:>12,}"
-            )
+            # Check if we should show this NPC in detail
+            # Show if: (COMPACT_SUMMARY is False) OR (we have work to generate)
+            show_in_detail = (not COMPACT_SUMMARY) or (to_gen > 0)
+            
+            if show_in_detail:
+                # Format valid NPCs
+                profile_str = f"✅ {profile_name}"
+                lines.append(
+                    f"{npc_name:<28} "
+                    f"{profile_str:<29} "
+                    f"{total:>7,} "
+                    f"{done:>8,} "
+                    f"{skipped:>9,} "
+                    f"{to_gen:>8,} "
+                    f"{chars:>12,}"
+                )
+            else:
+                # Track NPCs with valid voices but nothing to generate (only when COMPACT_SUMMARY is True)
+                done_npcs.append(npc_name)
+                done_chars_total += chars
+                done_done_total += done
+                done_skipped_total += skipped
         else:
             # Track missing NPCs for summary
             missing_npcs.append(npc_name)
@@ -341,7 +360,7 @@ def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
 
     lines.append("-" * line_length)
     
-    # Print summary for missing voices if there are any
+    # Print summary for missing voices if there are any (only when COMPACT_SUMMARY is True)
     if missing_npcs and COMPACT_SUMMARY:
         missing_total = grand_total - valid_total
         missing_done = grand_done - valid_done
@@ -356,6 +375,25 @@ def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
             f"{0:>8,} "
             f"{missing_chars_total:>12,}"
         )
+    
+    # Print summary for NPCs with nothing to generate (only when COMPACT_SUMMARY is True)
+    if done_npcs and COMPACT_SUMMARY:
+        done_total = 0
+        for name in done_npcs:
+            done_total += npc_stats[name]["total"]
+        
+        lines.append(
+            f"{'✅ ALREADY DONE':<27} "
+            f"{'(summary)':<30} "
+            f"{done_total:>7,} "
+            f"{done_done_total:>8,} "
+            f"{done_skipped_total:>9,} "
+            f"{0:>8,} "
+            f"{done_chars_total:>12,}"
+        )
+    
+    # Add separator if we had any summary lines
+    if (missing_npcs and COMPACT_SUMMARY) or (done_npcs and COMPACT_SUMMARY):
         lines.append("-" * line_length)
 
     # Print totals
@@ -440,8 +478,8 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
         - Total files processed
         - Total characters processed
         - Average time per character
-        - Already generated files (if any)
-        - Missing voices (if any)
+        - Already generated files (detailed if COMPACT_SUMMARY is False)
+        - Missing voices (detailed if COMPACT_SUMMARY is False)
         - Completion timestamp
     
     Args:
@@ -451,8 +489,8 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
         npc_stats (dict): Statistics dictionary per NPC.
     
     Note:
-        The summary is logged at INFO level and helps provide a quick
-        overview of what was accomplished during the run.
+        The summary is logged at INFO level. When COMPACT_SUMMARY is True,
+        only totals are shown. When False, detailed breakdowns are included.
     """
     # Extract statistics
     total_done = 0
@@ -472,7 +510,7 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
             total_skipped += skipped
             skipped_summary[voice] = skipped
 
-    # Build the summary string (single content for both console and log)
+    # Build the summary string
     lines = []
     lines.append("")
     lines.append("=" * 70)
@@ -484,13 +522,25 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
     if avg_time_per_char:
         lines.append(f"Average time per character: {avg_time_per_char:.4f}s")
 
+    # Show "already generated" details based on COMPACT_SUMMARY
     if total_done:
-        done_details = ", ".join(f"{voice}: {count:,}" for voice, count in done_summary.items())
-        lines.append(f"Skipped already generated: {total_done:,} ({done_details})")
+        if COMPACT_SUMMARY:
+            # Compact mode: just the total
+            lines.append(f"Skipped already generated: {total_done:,} files")
+        else:
+            # Full mode: show all details
+            done_details = ", ".join(f"{voice}: {count:,}" for voice, count in done_summary.items())
+            lines.append(f"Skipped already generated: {total_done:,} ({done_details})")
 
+    # Show "missing voices" details based on COMPACT_SUMMARY
     if total_skipped:
-        skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
-        lines.append(f"Skipped missing voices: {total_skipped:,} ({skipped_details})")
+        if COMPACT_SUMMARY:
+            # Compact mode: just the total
+            lines.append(f"Skipped missing voices: {total_skipped:,} files")
+        else:
+            # Full mode: show all details
+            skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
+            lines.append(f"Skipped missing voices: {total_skipped:,} ({skipped_details})")
 
     lines.append(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 70)
@@ -1536,15 +1586,20 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                 if use_strref_filter and strref_filter:
                     if strref not in strref_filter:
                         continue
+
+                # STRREF filter overrides all other filters when enabled
+                # When disabled, we fall back to voice and filename filtering
+                if not use_strref_filter and not npc_name:
+                    continue                    
                 
                 # Apply voice filter (only if not using STRREF filter)
                 if not use_strref_filter and target_voices and npc_name not in target_voices:
                     continue
                 
-                # Apply filename pattern filter (only if not using STRREF filter)
-                if not use_strref_filter and filename_pattern and csv_filename and not re.match(filename_pattern, csv_filename):
+                # Apply filename pattern filter
+                if filename_pattern and csv_filename and not re.match(filename_pattern, csv_filename):
                     continue
-                
+
                 # Skip rows without text
                 if not text:
                     continue
@@ -1560,7 +1615,6 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                     else:
                         # CSV filename is empty or invalid - generate one
                         filename = generate_resref(strref, RESREF_PREFIX)
-                        logger.warning(f"⚠️ STRREF {strref}: CSV filename empty or invalid, using generated: {filename}")
                 
                 # Get voice profile with fallback - pass profile_map for validation
                 voice_name = get_voice_profile_name(npc_name, gender, profile_map)
