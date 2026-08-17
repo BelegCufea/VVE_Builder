@@ -127,6 +127,22 @@ def log_initialize():
 logger = log_initialize()
 
 
+def log_header(total_jobs, total_chars_all, header_messages):
+    lines =  []
+
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("Voice over Generation")
+    lines.append(f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 70)
+    lines.extend(header_messages)
+    lines.append(f"Total jobs: {total_jobs}, Total chars: {total_chars_all}")
+    lines.append("=" * 70)
+
+    summary = "\n".join(lines)
+    logger.info(summary)
+
+
 def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
     """
     Format the pre-generation summary as a string for both console and log output.
@@ -1392,26 +1408,28 @@ def load_strref_filter(filter_file):
     Returns:
         set: Set of strref strings to process, or empty set if file not found.
     """
+    messages = []
+
     if not os.path.exists(filter_file):
-        logger.warning(f"⚠️ STRREF filter file not found: {filter_file}")
-        logger.info("   Processing all rows (no filter).")
-        return set()
+        messages.append(f"⚠️ STRREF filter file not found: {filter_file}")
+        messages.append("   Processing all rows (no filter).")
+        return set(), messages
     
     try:
         with open(filter_file, "r", encoding="utf-8") as f:
             data = json.load(f)
         
         if not isinstance(data, list):
-            logger.warning(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
-            return set()
+            messages.append(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
+            return set(), messages
         
         # Convert to set of strings for fast lookup
-        return {str(item) for item in data}
+        return {str(item) for item in data}, messages
     
     except Exception as e:
-        logger.warning(f"⚠️ Could not load STRREF filter: {e}")
-        logger.info("   Processing all rows (no filter).")
-        return set()
+        messages.append(f"⚠️ Could not load STRREF filter: {e}")
+        messages.append("   Processing all rows (no filter).")
+        return set(), messages
 
 
 def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_config, 
@@ -1440,14 +1458,16 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
     selected_rows = []
     npc_stats = {}
     strref_filter = set()
+    messages = []
     
     # Load STRREF filter if enabled
     if use_strref_filter:
-        strref_filter = load_strref_filter(strref_filter_file)
+        strref_filter, filter_messages = load_strref_filter(strref_filter_file)
+        messages.extend(filter_messages)
         if strref_filter:
-            logger.info(f"Loaded {len(strref_filter)} STRREFs from filter file.")
+            messages.append(f"Loaded {len(strref_filter)} STRREFs from filter file.")
         else:
-            logger.warning("⚠️ No STRREFs loaded from filter file. Processing all rows.")
+            messages.append("⚠️ No STRREFs loaded from filter file. Processing all rows.")
     
     try:
         with open(csv_path, "r", encoding="utf-8") as f:
@@ -1546,7 +1566,7 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
         logger.error(f"❌ Error reading CSV: {e}")
         sys.exit(1)
     
-    return selected_rows, npc_stats
+    return selected_rows, npc_stats, messages
 #endregion CSV Processing
 
 #region Generation Execution
@@ -1751,31 +1771,33 @@ def main():
     6. Process each generation job with progress feedback
     7. Display final summary
     """
+    header_messages = []
+
     # 1. Load profiles
     try:
         profile_map = get_all_profiles()
-        logger.info(f"Loaded {len(profile_map)} voice profiles.")
+        header_messages.append(f"Loaded {len(profile_map)} voice profiles.")
     except Exception as e:
-        logger.error(f"Failed to fetch profiles: {e}")
+        logger.error(f"❌ Failed to fetch profiles: {e}")
         sys.exit(1)
 
     # 2. Load patcher config (optional - generation continues without it)
     try:
         patcher_config = load_patcher_config(PATCHER_CONFIG_PATH)
-        logger.info("Loaded patcher config.")
+        header_messages.append("Loaded patcher config.")
     except Exception as e:
         patcher_config = None
-        logger.warning(f"Could not load patcher config: {e}")
+        header_messages.append(f"⚠️ Could not load patcher config: {e}")
 
     # 3. Load generation memory to skip already processed files
     generation_memory = load_generation_memory(GENERATION_MEMORY_PATH)
     if SKIP_ALREADY_GENERATED:
-        logger.info("Loaded generation memory. Already generated files will be skipped.")
+        header_messages.append("Already generated files will be skipped.")
     else:
-        logger.info("Generation memory loaded. Skipping already generated files is disabled.")
+        header_messages.append("Skipping already generated files is disabled.")
 
     # 4. Read CSV, filter, and select rows
-    selected_rows, npc_stats = load_and_filter_csv(
+    selected_rows, npc_stats, filter_messages = load_and_filter_csv(
         CSV_PATH,
         TARGET_VOICES,
         FILENAME_PATTERN,
@@ -1789,29 +1811,31 @@ def main():
         FORCE_GENERATED_FILENAMES
     )
 
-    # 5. Pre-generation summary
-    log_pregeneration_summary(npc_stats, profile_map)
+    header_messages.extend(filter_messages)
 
-    # 6. Filter out rows with missing profiles and sort for processing
     selected_rows = filter_and_sort_rows(selected_rows, profile_map)
     total_jobs = len(selected_rows)
 
-    total_chars_all = sum(len(text) for _, _, _, _, text in selected_rows)  # text is now at index 4
+    total_chars_all = sum(len(text) for _, _, _, _, text in selected_rows)
 
-    # Show filename mode in output
     if FORCE_GENERATED_FILENAMES:
         filename_mode = "FORCED generated (base36)"
     else:
         filename_mode = "CSV with base36 fallback"
 
-    logger.info(f"Selected {total_jobs} rows. Total characters: {total_chars_all}")
-    logger.info(f"Filename mode: {filename_mode}")
+    header_messages.append(f"Selected {total_jobs} rows. Total characters: {total_chars_all}")
+    header_messages.append(f"Filename mode: {filename_mode}")
+
+    log_header(total_jobs, total_chars_all, header_messages)
 
     if total_jobs == 0:
         logger.info("No jobs to process. Exiting.")
         return
 
-    # 7. Process all generation jobs
+    # 5. Pre-generation summary
+    log_pregeneration_summary(npc_stats, profile_map)
+
+    # 6. Process all generation jobs
     total_chars_processed = 0
     total_start_time = time.time()
     avg_time_per_char = None
@@ -1854,7 +1878,7 @@ def main():
             log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
                             audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
 
-    # 8. Final summary
+    # 7. Final summary
     log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
 
 if __name__ == "__main__":
