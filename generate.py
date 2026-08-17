@@ -1,14 +1,23 @@
+#!/usr/bin/env python3
+"""
+TTS Voice Generation Tool for Infinity Engine Games
+Processes dialog-report.csv and generates voice lines using Voicebox TTS API
+"""
+
 import csv
 import json
 import os
 import re
 import subprocess
 import sys
+import io
 import threading
 import time
 import requests
+import logging
 from runstats import Regression
 from datetime import datetime, timedelta
+from pathlib import Path
 
 #region Configuration
 # Voicebox API Configuration
@@ -71,12 +80,364 @@ SKIP_ALREADY_GENERATED = True          # If True, skip lines already generated (
 GENERATION_MEMORY_PATH = r"generation-memory.json"
 
 # Logging
-LOG_ENABLED = True
 LOG_FILE_PATH = r"logs/generation.log"
 
 # Pre-generation Summary Options
 COMPACT_SUMMARY = True                 # If True, only show NPCs with valid voices; if False, show all
 #endregion Configuration
+
+#region Logging
+def log_initialize():
+    """Initialize logging with file and console handlers"""
+    
+    # Ensure UTF-8 output on Windows
+    if sys.platform == 'win32':
+        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8', line_buffering=True)
+        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8', line_buffering=True)
+
+    log_dir = Path(LOG_FILE_PATH).parent
+    log_dir.mkdir(parents=True, exist_ok=True)
+    logger = logging.getLogger()
+    if logger.hasHandlers():
+        logger.handlers.clear()
+    logger.setLevel(logging.INFO)
+
+    # File handler - full format with timestamp
+    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+    file_handler.setLevel(logging.DEBUG)  # Log everything to file
+    file_formatter = logging.Formatter(
+        '%(asctime)s - %(levelname)s - %(message)s',
+        datefmt='%Y-%m-%d %H:%M:%S'
+    )
+    file_handler.setFormatter(file_formatter)
+    logger.addHandler(file_handler)
+
+    # Console handler - INFO and above
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.INFO)  # Only INFO and above to console
+    console_formatter = logging.Formatter('%(message)s')
+    console_handler.setFormatter(console_formatter)
+    logger.addHandler(console_handler)
+
+    logger.propagate = False
+
+    return logger
+
+# Initialize logger at module level
+logger = log_initialize()
+
+
+def log_pregeneration_summary(npc_stats, profile_map, for_log=False):
+    """
+    Format the pre-generation summary as a string for both console and log output.
+
+    Builds a complete summary table showing:
+    - Voice profile status (valid or missing)
+    - Total lines per NPC
+    - Already generated (Done)
+    - Missing voices (Missing)
+    - Remaining to generate (To Gen)
+    - Total character count
+
+    The summary helps users verify that all configured voices exist before
+    starting the potentially long generation process.
+
+    If COMPACT_SUMMARY is True, only NPCs with valid voices are shown in the
+    detailed table, and missing voices are summarized in a single line at the end.
+    If COMPACT_SUMMARY is False, all NPCs are shown including those with
+    missing voices (marked with "❌ Missing").
+
+    Column definitions:
+        - Total: Total number of rows for this NPC
+        - Done: Rows already generated (from generation-memory.json)
+        - Missing: Rows skipped because no valid voice profile exists
+        - To Gen: Rows that will be generated now
+        - Characters: Total characters across all rows for this NPC
+
+    Args:
+        npc_stats (dict): Statistics dictionary for each NPC, structured as:
+            {
+                "NPC Name": {
+                    "voice_name": str,
+                    "total": int,
+                    "done": int,
+                    "missing": int,
+                    "to_generate": int,
+                    "chars": int
+                }
+            }
+        profile_map (dict): Voice profile map from get_all_profiles(),
+            mapping profile names to their IDs.
+
+    Note:
+        The table includes a "VALID TOTAL" row showing only NPCs with
+        existing voice profiles, and a "TOTAL" row showing all NPCs
+        (including those with missing profiles that will be skipped).
+        Missing profiles are marked with "❌ Missing" in the table when
+        COMPACT_SUMMARY is False, or summarized in a single line when True.
+    """
+    line_length = 108
+    lines = []
+    
+    lines.append("\n" + "=" * line_length)
+    lines.append("📊 PRE-GENERATION VOICE SUMMARY")
+    
+    # Show fallback status
+    if USE_VOICE_FALLBACK:
+        lines.append(f"   🔄 Voice fallback ENABLED: M->{FALLBACK_VOICE_MALE}, F->{FALLBACK_VOICE_FEMALE}, NEUTRAL->{FALLBACK_VOICE_NEUTRAL}")
+    else:
+        lines.append("   ⛔ Voice fallback DISABLED")
+    
+    # Show strref filter status
+    if USE_STRREF_FILTER:
+        try:
+            with open(STRREF_FILTER_FILE, "r") as f:
+                count = len(json.load(f))
+            lines.append(f"   📋 STRREF filter ENABLED: {count} STRREFs from {STRREF_FILTER_FILE}")
+        except:
+            lines.append(f"   📋 STRREF filter ENABLED (file: {STRREF_FILTER_FILE})")
+    else:
+        lines.append("   📋 STRREF filter DISABLED")
+    
+    # Show filename generation status
+    if FORCE_GENERATED_FILENAMES:
+        lines.append(f"   🔧 Filenames: FORCED generated (base36) with prefix: {RESREF_PREFIX}")
+    else:
+        lines.append(f"   🔧 Filenames: CSV with base36 fallback (prefix: {RESREF_PREFIX})")
+    
+    lines.append("=" * line_length)
+
+    header = f"{'NPC Name':<28} {'Profile':<30} {'Total':>7} {'Done':>8} {'Missing':>9} {'To Gen':>8} {'Chars':>12}"
+    lines.append(header)
+    lines.append("-" * line_length)
+
+    grand_total = 0
+    grand_done = 0
+    grand_skipped = 0
+    grand_to_gen = 0
+    grand_chars = 0
+
+    valid_total = 0
+    valid_done = 0
+    valid_skipped = 0
+    valid_to_gen = 0
+    valid_chars = 0
+    
+    missing_npcs = []
+    missing_chars_total = 0
+    missing_done_total = 0
+    missing_skipped_total = 0
+
+    for npc_name, stats in npc_stats.items():
+        profile_name = stats.get("voice_name", npc_name)
+        has_profile = profile_name in profile_map
+        total = stats["total"]
+        done = stats["done"]
+        skipped = stats["skipped"]
+        to_gen = stats["to_generate"]
+        chars = stats["chars"]
+
+        grand_total += total
+        grand_done += done
+        grand_skipped += skipped
+        grand_to_gen += to_gen
+        grand_chars += chars
+
+        if has_profile:
+            valid_total += total
+            valid_done += done
+            valid_skipped += skipped
+            valid_to_gen += to_gen
+            valid_chars += chars
+            
+            # Format valid NPCs (always show these)
+            profile_str = f"✅ {profile_name}"
+            lines.append(
+                f"{npc_name:<28} "
+                f"{profile_str:<29} "
+                f"{total:>7,} "
+                f"{done:>8,} "
+                f"{skipped:>9,} "
+                f"{to_gen:>8,} "
+                f"{chars:>12,}"
+            )
+        else:
+            # Track missing NPCs for summary
+            missing_npcs.append(npc_name)
+            missing_chars_total += chars
+            missing_done_total += done
+            missing_skipped_total += skipped
+            
+            # Only print missing NPCs if COMPACT_SUMMARY is False
+            if not COMPACT_SUMMARY:
+                profile_str = "❌ Missing"
+                lines.append(
+                    f"{npc_name:<28} "
+                    f"{profile_str:<29} "
+                    f"{total:>7,} "
+                    f"{done:>8,} "
+                    f"{skipped:>9,} "
+                    f"{to_gen:>8,} "
+                    f"{chars:>12,}"
+                )
+
+    lines.append("-" * line_length)
+    
+    # Print summary for missing voices if there are any
+    if missing_npcs and COMPACT_SUMMARY:
+        missing_total = grand_total - valid_total
+        missing_done = grand_done - valid_done
+        missing_skipped = grand_skipped - valid_skipped
+        
+        lines.append(
+            f"{'❌ MISSING VOICES':<27} "
+            f"{'(summary)':<30} "
+            f"{missing_total:>7,} "
+            f"{missing_done:>8,} "
+            f"{missing_skipped:>9,} "
+            f"{0:>8,} "
+            f"{missing_chars_total:>12,}"
+        )
+        lines.append("-" * line_length)
+
+    # Print totals
+    lines.append(
+        f"{'VALID TOTAL':<28} "
+        f"{'':<30} "
+        f"{valid_total:>7,} "
+        f"{valid_done:>8,} "
+        f"{valid_skipped:>9,} "
+        f"{valid_to_gen:>8,} "
+        f"{valid_chars:>12,}"
+    )
+    lines.append(
+        f"{'TOTAL':<28} "
+        f"{'':<30} "
+        f"{grand_total:>7,} "
+        f"{grand_done:>8,} "
+        f"{grand_skipped:>9,} "
+        f"{grand_to_gen:>8,} "
+        f"{grand_chars:>12,}"
+    )
+    lines.append("=" * line_length + "\n")
+    
+    summary = "\n".join(lines)
+    logger.info(summary)
+
+
+def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration, npc_name, voice_name, success=True, error_msg=None):
+    """
+    Format a job summary line for both console output and logging.
+
+    Creates a consistent formatted string containing all job information.
+    The same format is used for both the console print and the log file,
+    ensuring consistency between output streams.
+
+    Args:
+        idx (int): Current job index (1-based).
+        total_jobs (int): Total number of jobs.
+        strref (str): STRREF identifier.
+        filename (str): Output filename.
+        chars (int): Number of characters in the text.
+        elapsed (float): Generation time in seconds.
+        audio_duration (float): Duration of generated audio in seconds.
+        npc_name (str): NPC name.
+        voice_name (str): Voice profile name used.
+        success (bool, optional): Whether generation succeeded. Defaults to True.
+        error_msg (str, optional): Error message if failed. Defaults to None.
+
+    Returns:
+        str: Formatted job summary line.
+    """
+    realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
+    voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
+    status = "✅" if success else "❌"
+    job_width = len(str(total_jobs))
+    
+    line = (
+        f"[{idx:>{job_width}}/{total_jobs:>{job_width}}] "
+        f"{status} "
+        f"Strref: {strref:>6}  "
+        f"File: {filename:<10}  "
+        f"Chars: {chars:>4}  "
+        f"Gen: {elapsed:>6.2f}s  "
+        f"Audio: {audio_duration:>6.2f}s  "
+        f"Speed: {realtime_speed:>5.1f}%  "
+        f"Npc: {npc_name:<20}"
+        f"{voice_part}"
+    )
+    
+    if not success and error_msg:
+        line += f"  Error: {error_msg}"
+    
+    logging.log(logging.INFO if success else logging.WARNING, line)
+
+
+def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
+    """
+    Format the final summary as a string for both console and log output.
+
+    Builds a complete summary string including:
+    - Total files processed
+    - Total characters processed
+    - Average time per character
+    - Already generated files (if any)
+    - Missing voices (if any)
+
+    Args:
+        total_jobs (int): Total number of jobs processed.
+        total_chars_processed (int): Total characters processed.
+        avg_time_per_char (float): Average generation time per character.
+        npc_stats (dict): Statistics dictionary per NPC.
+
+    Returns:
+        str: Formatted summary string ready for console or log output.
+    """
+    # Extract statistics
+    total_done = 0
+    total_skipped = 0
+    done_summary = {}
+    skipped_summary = {}
+
+    for voice, stats in npc_stats.items():
+        done = stats.get("done", 0)
+        skipped = stats.get("skipped", 0)
+        
+        if done > 0:
+            total_done += done
+            done_summary[voice] = done
+        
+        if skipped > 0:
+            total_skipped += skipped
+            skipped_summary[voice] = skipped
+
+    # Build the summary string (single content for both console and log)
+    lines = []
+    lines.append("")
+    lines.append("=" * 70)
+    lines.append("FINAL SUMMARY")
+    lines.append("=" * 70)
+    lines.append(f"Processed: {total_jobs:,} files")
+    lines.append(f"Total characters: {total_chars_processed:,}")
+    
+    if avg_time_per_char:
+        lines.append(f"Average time per character: {avg_time_per_char:.4f}s")
+
+    if total_done:
+        done_details = ", ".join(f"{voice}: {count:,}" for voice, count in done_summary.items())
+        lines.append(f"Skipped already generated: {total_done:,} ({done_details})")
+
+    if total_skipped:
+        skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
+        lines.append(f"Skipped missing voices: {total_skipped:,} ({skipped_details})")
+
+    lines.append(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("=" * 70)
+    lines.append("")
+
+    summary = "\n".join(lines)
+    logging.info(summary)
+#endregion Logging
 
 #region Utility Functions
 def format_time(seconds):
@@ -306,157 +667,6 @@ def generate_resref(strref, prefix="TS"):
     return (prefix + suffix).upper()
 #endregion Utility Functions
 
-#region Logging
-def init_log_file(log_path, total_jobs, total_chars_all):
-    """
-    Initialize the log file with a header and job summary.
-
-    If the log file doesn't exist, creates a new one with a header.
-    If it already exists, appends a separator and new batch header
-    to clearly distinguish this run from previous ones.
-
-    This allows multiple batch runs to be logged in the same file
-    with clear separation between sessions.
-
-    Args:
-        log_path (str): Filesystem path to the log file.
-        total_jobs (int): Total number of jobs to process.
-        total_chars_all (int): Total characters across all jobs.
-
-    Returns:
-        bool: True if the log file was initialized successfully,
-            False if an error occurred.
-
-    Note:
-        The function will create the directory structure if it doesn't exist.
-        If the file cannot be created, it returns False and the caller
-        should consider disabling logging.
-    """
-    try:
-        # Ensure the directory exists
-        log_dir = os.path.dirname(log_path)
-        if log_dir and not os.path.exists(log_dir):
-            os.makedirs(log_dir, exist_ok=True)
-        
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(f"# TTS Generation Log - Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-            f.write(f"# Total jobs: {total_jobs}, Total chars: {total_chars_all}\n")
-            f.write("#" + "=" * 70 + "\n\n")
-        return True
-    except Exception:
-        return False
-
-
-def write_pregeneration_summary_to_log(log_path, npc_stats, profile_map):
-    """
-    Write the pre-generation summary to the log file.
-
-    Args:
-        log_path (str): Filesystem path to the log file.
-        npc_stats (dict): Statistics dictionary for each NPC.
-        profile_map (dict): Voice profile map from get_all_profiles().
-
-    Returns:
-        None: This function has no return value.
-    """
-    try:
-        summary = format_pregeneration_summary(npc_stats, profile_map)
-        summary = strip_icons(summary)  # <-- Strip icons here
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(summary)
-    except Exception:
-        pass    
-
-
-def write_log_entry(log_path, idx, total_jobs, strref, filename, npc_name, voice_name, 
-                    chars, elapsed, audio_duration, success, error_msg=None):
-    """
-    Write a formatted log entry for a completed generation job to a log file.
-
-    Appends a single line to the specified log file containing all relevant
-    information about a TTS generation job. The log line includes a timestamp,
-    job status, STRREF, filename, NPC name, character count, generation time,
-    and audio duration.
-
-    The log format is designed to be both human-readable and easily parsable
-    for post-processing or analysis. Each log entry is a single line with
-    space-separated fields.
-
-    Args:
-        log_path (str): Filesystem path to the log file. If the file doesn't
-            exist, it will be created.
-        idx (int): Current job index (1-based) in the processing queue.
-        total_jobs (int): Total number of jobs to process.
-        strref (str): The STRREF identifier being generated.
-        filename (str): The output filename (without extension).
-        npc_name (str): The NPC name associated with this voice line.
-        voice_name (str): The voice profile name used for generation.
-        chars (int): Number of characters in the generated text.
-        elapsed (float): Time taken for generation in seconds.
-        audio_duration (float): Duration of the generated audio in seconds.
-        success (bool): True if generation succeeded, False otherwise.
-        error_msg (str, optional): If success is False, an error message
-            describing what went wrong. Defaults to None.
-
-    Returns:
-        None: This function has no return value.
-
-    Note:
-        The function silently handles write errors (e.g., permission denied,
-        disk full) to prevent logging failures from crashing the main
-        generation process. Any errors are suppressed and ignored.
-
-    Example log line:
-        [2026-08-13 14:30:10] [  1/114] SUCCESS  STRREF: 47566  File: TS001GY6
-        NPC: Aerie                Chars:   85  Gen:  10.15s  Audio:  1.20s
-    """
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    line = format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
-                             audio_duration, npc_name, voice_name, success, error_msg)
-    
-    # Strip icons for log file
-    line = strip_icons(line)
-    log_line = f"[{timestamp}] {line}"
-    
-    try:
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(log_line + "\n")
-    except Exception:
-        pass
-
-def write_final_log_summary(log_path, total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
-    """
-    Write a final summary to the log file after all jobs are processed.
-
-    Appends a summary section to the log file with overall statistics
-    including total files processed, total characters, average time per
-    character, and skipped files per NPC. This provides a complete
-    picture of the entire generation run.
-
-    Args:
-        log_path (str): Filesystem path to the log file.
-        total_jobs (int): Total number of jobs processed.
-        total_chars_processed (int): Total characters processed.
-        avg_time_per_char (float): Average generation time per character.
-        npc_stats (dict): Statistics dictionary per NPC, containing
-            "done" and "skipped" counts.
-
-    Returns:
-        None: This function has no return value.
-
-    Note:
-        The function silently handles write errors to prevent crashes.
-    """
-    try:
-        summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
-        summary = strip_icons(summary)  # <-- Strip icons here
-        with open(log_path, "a", encoding="utf-8") as f:
-            f.write(summary)
-    except Exception:
-        pass
-#endregion Logging
-
 #region Voice Profile Management
 def get_voice_profile_name(npc_name, gender=None, profile_map=None):
     r"""
@@ -583,14 +793,14 @@ def load_generation_memory(memory_path):
             data = json.load(f)
 
         if not isinstance(data, dict):
-            print("⚠️ Generation memory is not a JSON object. Starting with empty memory.")
+            logger.warning("⚠️ Generation memory is not a JSON object. Starting with empty memory.")
             return {}
 
         return data
 
     except Exception as e:
-        print(f"⚠️ Could not load generation memory: {e}")
-        print("   Starting with empty memory.")
+        logger.warning(f"⚠️ Could not load generation memory: {e}")
+        logger.info("   Starting with empty memory.")
         return {}
 
 
@@ -819,40 +1029,6 @@ def download_audio(gen_id, output_path):
 #endregion TTS API Client
 
 #region Text Processing
-def strip_icons(text):
-    """
-    Remove emojis and special Unicode characters from a string for log output.
-
-    Replaces common emojis with plain text equivalents to ensure clean
-    log files that display properly in any text viewer.
-
-    Args:
-        text (str): Text containing emojis/special characters.
-
-    Returns:
-        str: Text with emojis replaced by plain text equivalents.
-    """
-    replacements = {
-        "✅": "OK",
-        "❌": "--",
-        "📊": "",
-        "📋": "",
-        "🔧": "",
-        "🔄": "",
-        "⛔": "",
-        "⚠️": "",
-        "🎙️": "",
-        "📝": "",
-        "🗂️": "",
-        "💾": "",
-        "⌛": "",
-    }
-    
-    for emoji, replacement in replacements.items():
-        text = text.replace(emoji, replacement)
-    
-    return text
-
 def load_patcher_config(config_path):
     """
     Load the patcher configuration from a JSON file.
@@ -1015,7 +1191,7 @@ def convert_to_ogg(input_path, output_path=None, quality=2):
     try:
         subprocess.run(cmd, check=True, capture_output=True)
     except subprocess.CalledProcessError as e:
-        print(f"ffmpeg stderr:\n{e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else e.stderr}")
+        logger.error(f"ffmpeg stderr:\n{e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else e.stderr}")
         raise
 #endregion Audio Processing
 
@@ -1181,256 +1357,6 @@ def progress_worker(stop_event, job_idx, total_jobs, filename, estimated_sec, ti
         sys.stdout.write("\n")
         sys.stdout.write("\033[2A")      # go back up so next print starts on the cleared job line
         sys.stdout.flush()
-
-
-def format_pregeneration_summary(npc_stats, profile_map, for_log=False):
-    """
-    Format the pre-generation summary as a string for both console and log output.
-
-    Builds a complete summary table showing:
-    - Voice profile status (valid or missing)
-    - Total lines per NPC
-    - Already generated (Done)
-    - Missing voices (Missing)
-    - Remaining to generate (To Gen)
-    - Total character count
-
-    The summary helps users verify that all configured voices exist before
-    starting the potentially long generation process.
-
-    If COMPACT_SUMMARY is True, only NPCs with valid voices are shown in the
-    detailed table, and missing voices are summarized in a single line at the end.
-    If COMPACT_SUMMARY is False, all NPCs are shown including those with
-    missing voices (marked with "❌ Missing").
-
-    Column definitions:
-        - Total: Total number of rows for this NPC
-        - Done: Rows already generated (from generation-memory.json)
-        - Missing: Rows skipped because no valid voice profile exists
-        - To Gen: Rows that will be generated now
-        - Characters: Total characters across all rows for this NPC
-
-    Args:
-        npc_stats (dict): Statistics dictionary for each NPC, structured as:
-            {
-                "NPC Name": {
-                    "voice_name": str,
-                    "total": int,
-                    "done": int,
-                    "missing": int,
-                    "to_generate": int,
-                    "chars": int
-                }
-            }
-        profile_map (dict): Voice profile map from get_all_profiles(),
-            mapping profile names to their IDs.
-
-    Note:
-        The table includes a "VALID TOTAL" row showing only NPCs with
-        existing voice profiles, and a "TOTAL" row showing all NPCs
-        (including those with missing profiles that will be skipped).
-        Missing profiles are marked with "❌ Missing" in the table when
-        COMPACT_SUMMARY is False, or summarized in a single line when True.
-    """
-    line_length = 108
-    lines = []
-    
-    lines.append("\n" + "=" * line_length)
-    lines.append("📊 PRE-GENERATION VOICE SUMMARY")
-    
-    # Show fallback status
-    if USE_VOICE_FALLBACK:
-        lines.append(f"   🔄 Voice fallback ENABLED: M->{FALLBACK_VOICE_MALE}, F->{FALLBACK_VOICE_FEMALE}, NEUTRAL->{FALLBACK_VOICE_NEUTRAL}")
-    else:
-        lines.append("   ⛔ Voice fallback DISABLED")
-    
-    # Show strref filter status
-    if USE_STRREF_FILTER:
-        try:
-            with open(STRREF_FILTER_FILE, "r") as f:
-                count = len(json.load(f))
-            lines.append(f"   📋 STRREF filter ENABLED: {count} STRREFs from {STRREF_FILTER_FILE}")
-        except:
-            lines.append(f"   📋 STRREF filter ENABLED (file: {STRREF_FILTER_FILE})")
-    else:
-        lines.append("   📋 STRREF filter DISABLED")
-    
-    # Show filename generation status
-    if FORCE_GENERATED_FILENAMES:
-        lines.append(f"   🔧 Filenames: FORCED generated (base36) with prefix: {RESREF_PREFIX}")
-    else:
-        lines.append(f"   🔧 Filenames: CSV with base36 fallback (prefix: {RESREF_PREFIX})")
-    
-    lines.append("=" * line_length)
-
-    header = f"{'NPC Name':<28} {'Profile':<30} {'Total':>7} {'Done':>8} {'Missing':>9} {'To Gen':>8} {'Chars':>12}"
-    lines.append(header)
-    lines.append("-" * line_length)
-
-    grand_total = 0
-    grand_done = 0
-    grand_skipped = 0
-    grand_to_gen = 0
-    grand_chars = 0
-
-    valid_total = 0
-    valid_done = 0
-    valid_skipped = 0
-    valid_to_gen = 0
-    valid_chars = 0
-    
-    missing_npcs = []
-    missing_chars_total = 0
-    missing_done_total = 0
-    missing_skipped_total = 0
-
-    for npc_name, stats in npc_stats.items():
-        profile_name = stats.get("voice_name", npc_name)
-        has_profile = profile_name in profile_map
-        total = stats["total"]
-        done = stats["done"]
-        skipped = stats["skipped"]
-        to_gen = stats["to_generate"]
-        chars = stats["chars"]
-
-        grand_total += total
-        grand_done += done
-        grand_skipped += skipped
-        grand_to_gen += to_gen
-        grand_chars += chars
-
-        if has_profile:
-            valid_total += total
-            valid_done += done
-            valid_skipped += skipped
-            valid_to_gen += to_gen
-            valid_chars += chars
-            
-            # Format valid NPCs (always show these)
-            profile_str = f"✅ {profile_name}"
-            lines.append(
-                f"{npc_name:<28} "
-                f"{profile_str:<29} "
-                f"{total:>7,} "
-                f"{done:>8,} "
-                f"{skipped:>9,} "
-                f"{to_gen:>8,} "
-                f"{chars:>12,}"
-            )
-        else:
-            # Track missing NPCs for summary
-            missing_npcs.append(npc_name)
-            missing_chars_total += chars
-            missing_done_total += done
-            missing_skipped_total += skipped
-            
-            # Only print missing NPCs if COMPACT_SUMMARY is False
-            if not COMPACT_SUMMARY:
-                profile_str = "❌ Missing"
-                lines.append(
-                    f"{npc_name:<28} "
-                    f"{profile_str:<29} "
-                    f"{total:>7,} "
-                    f"{done:>8,} "
-                    f"{skipped:>9,} "
-                    f"{to_gen:>8,} "
-                    f"{chars:>12,}"
-                )
-
-    lines.append("-" * line_length)
-    
-    # Print summary for missing voices if there are any
-    if missing_npcs and COMPACT_SUMMARY:
-        missing_total = grand_total - valid_total
-        missing_done = grand_done - valid_done
-        missing_skipped = grand_skipped - valid_skipped
-        
-        lines.append(
-            f"{'❌ MISSING VOICES':<27} "
-            f"{'(summary)':<30} "
-            f"{missing_total:>7,} "
-            f"{missing_done:>8,} "
-            f"{missing_skipped:>9,} "
-            f"{0:>8,} "
-            f"{missing_chars_total:>12,}"
-        )
-        lines.append("-" * line_length)
-
-    # Print totals
-    lines.append(
-        f"{'VALID TOTAL':<28} "
-        f"{'':<30} "
-        f"{valid_total:>7,} "
-        f"{valid_done:>8,} "
-        f"{valid_skipped:>9,} "
-        f"{valid_to_gen:>8,} "
-        f"{valid_chars:>12,}"
-    )
-    lines.append(
-        f"{'TOTAL':<28} "
-        f"{'':<30} "
-        f"{grand_total:>7,} "
-        f"{grand_done:>8,} "
-        f"{grand_skipped:>9,} "
-        f"{grand_to_gen:>8,} "
-        f"{grand_chars:>12,}"
-    )
-    lines.append("=" * line_length + "\n")
-    
-    return "\n".join(lines)
-
-
-def print_pregeneration_summary(npc_stats, profile_map):
-    """
-    Print a structured summary of files to generate per NPC/voice.
-
-    Displays a formatted table showing for each NPC:
-    - The voice profile that will be used (with validation)
-    - Total lines to process
-    - Lines already generated (Done)
-    - Lines with missing voices (Missing)
-    - Lines remaining to generate (To Gen)
-    - Total character count
-
-    The summary helps users verify that all configured voices exist before
-    starting the potentially long generation process.
-
-    If COMPACT_SUMMARY is True, only NPCs with valid voices are shown in the
-    detailed table, and missing voices are summarized in a single line at the end.
-    If COMPACT_SUMMARY is False, all NPCs are shown including those with
-    missing voices (marked with "❌ Missing").
-
-    Column definitions:
-        - Total: Total number of rows for this NPC
-        - Done: Rows already generated (from generation-memory.json)
-        - Missing: Rows skipped because no valid voice profile exists
-        - To Gen: Rows that will be generated now
-        - Characters: Total characters across all rows for this NPC
-
-    Args:
-        npc_stats (dict): Statistics dictionary for each NPC, structured as:
-            {
-                "NPC Name": {
-                    "voice_name": str,
-                    "total": int,
-                    "done": int,
-                    "missing": int,
-                    "to_generate": int,
-                    "chars": int
-                }
-            }
-        profile_map (dict): Voice profile map from get_all_profiles(),
-            mapping profile names to their IDs.
-
-    Note:
-        The table includes a "VALID TOTAL" row showing only NPCs with
-        existing voice profiles, and a "TOTAL" row showing all NPCs
-        (including those with missing profiles that will be skipped).
-        Missing profiles are marked with "❌ Missing" in the table when
-        COMPACT_SUMMARY is False, or summarized in a single line when True.
-    """
-    summary = format_pregeneration_summary(npc_stats, profile_map, for_log=False)
-    print(summary)
 #endregion UI/Progress Display
 
 #region CSV Processing
@@ -1467,8 +1393,8 @@ def load_strref_filter(filter_file):
         set: Set of strref strings to process, or empty set if file not found.
     """
     if not os.path.exists(filter_file):
-        print(f"⚠️ STRREF filter file not found: {filter_file}")
-        print("   Processing all rows (no filter).")
+        logger.warning(f"⚠️ STRREF filter file not found: {filter_file}")
+        logger.info("   Processing all rows (no filter).")
         return set()
     
     try:
@@ -1476,15 +1402,15 @@ def load_strref_filter(filter_file):
             data = json.load(f)
         
         if not isinstance(data, list):
-            print(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
+            logger.warning(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
             return set()
         
         # Convert to set of strings for fast lookup
         return {str(item) for item in data}
     
     except Exception as e:
-        print(f"⚠️ Could not load STRREF filter: {e}")
-        print("   Processing all rows (no filter).")
+        logger.warning(f"⚠️ Could not load STRREF filter: {e}")
+        logger.info("   Processing all rows (no filter).")
         return set()
 
 
@@ -1519,9 +1445,9 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
     if use_strref_filter:
         strref_filter = load_strref_filter(strref_filter_file)
         if strref_filter:
-            print(f"Loaded {len(strref_filter)} STRREFs from filter file.")
+            logger.info(f"Loaded {len(strref_filter)} STRREFs from filter file.")
         else:
-            print("⚠️ No STRREFs loaded from filter file. Processing all rows.")
+            logger.warning("⚠️ No STRREFs loaded from filter file. Processing all rows.")
     
     try:
         with open(csv_path, "r", encoding="utf-8") as f:
@@ -1565,7 +1491,7 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                     else:
                         # CSV filename is empty or invalid - generate one
                         filename = generate_resref(strref, RESREF_PREFIX)
-                        print(f"⚠️ STRREF {strref}: CSV filename empty or invalid, using generated: {filename}")
+                        logger.warning(f"⚠️ STRREF {strref}: CSV filename empty or invalid, using generated: {filename}")
                 
                 # Get voice profile with fallback - pass profile_map for validation
                 voice_name = get_voice_profile_name(npc_name, gender, profile_map)
@@ -1617,7 +1543,7 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                     break
     
     except Exception as e:
-        print(f"❌ Error reading CSV: {e}")
+        logger.error(f"❌ Error reading CSV: {e}")
         sys.exit(1)
     
     return selected_rows, npc_stats
@@ -1804,195 +1730,11 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
         
         stop_event.set()
         worker.join(timeout=1.0)
+        
+        # Log the error
+        logger.error(f"❌ Generation failed for {filename}: {e}")
 
     return success, elapsed, audio_duration, chars
-
-
-def format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration, npc_name, voice_name, success=True, error_msg=None):
-    """
-    Format a job summary line for both console output and logging.
-
-    Creates a consistent formatted string containing all job information.
-    The same format is used for both the console print and the log file,
-    ensuring consistency between output streams.
-
-    Args:
-        idx (int): Current job index (1-based).
-        total_jobs (int): Total number of jobs.
-        strref (str): STRREF identifier.
-        filename (str): Output filename.
-        chars (int): Number of characters in the text.
-        elapsed (float): Generation time in seconds.
-        audio_duration (float): Duration of generated audio in seconds.
-        npc_name (str): NPC name.
-        voice_name (str): Voice profile name used.
-        success (bool, optional): Whether generation succeeded. Defaults to True.
-        error_msg (str, optional): Error message if failed. Defaults to None.
-
-    Returns:
-        str: Formatted job summary line.
-    """
-    realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
-    voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
-    status = "✅ " if success else "❌ "
-    job_width = len(str(total_jobs))
-    
-    line = (
-        f"[{idx:>{job_width}}/{total_jobs:>{job_width}}] "
-        f"{status}"
-        f"Strref: {strref:>6}  "
-        f"File: {filename:<10}  "
-        f"Chars: {chars:>4}  "
-        f"Gen: {elapsed:>6.2f}s  "
-        f"Audio: {audio_duration:>6.2f}s  "
-        f"Speed: {realtime_speed:>5.1f}%  "
-        f"Npc: {npc_name:<20}"
-        f"{voice_part}"
-    )
-    
-    if not success and error_msg:
-        line += f"  Error: {error_msg}"
-    
-    return line
-
-
-def print_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration, npc_name, voice_name, success=True, error_msg=None):
-    """
-    Print a formatted summary for a completed generation job.
-
-    Args:
-        idx (int): Current job index (1-based).
-        total_jobs (int): Total number of jobs.
-        filename (str): Filename of the generated file.
-        chars (int): Number of characters in the text.
-        elapsed (float): Generation time in seconds.
-        audio_duration (float): Duration of generated audio in seconds.
-        npc_name (str): NPC name.
-        voice_name (str): Voice profile name used.
-        success (bool, optional): Whether generation succeeded. Defaults to True.
-        error_msg (str, optional): Error message if failed. Defaults to None.
-    """
-    line = format_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
-                             audio_duration, npc_name, voice_name, success, error_msg)
-    print(line)
-
-
-def print_overall_progress(total_chars_processed, total_chars_all, total_jobs, idx, overall_regressor, avg_time_per_char, elapsed_total):   
-    """
-    Print the overall progress bar and ETA.
-
-    Args:
-        total_chars_processed (int): Characters processed so far.
-        total_chars_all (int): Total characters to process.
-        total_jobs (int): Total number of jobs.
-        idx (int): Current job index (1-based).
-        overall_regressor (Regression): Regression for overall time estimation.
-        avg_time_per_char (float): Average time per character.
-    """
-    if avg_time_per_char is not None:
-        remaining_chars = (total_chars_all - total_chars_processed)
-        
-        if len(overall_regressor) > 1:
-            eta_seconds = overall_regressor.slope() * remaining_chars + overall_regressor.intercept() * (total_jobs - idx)
-        else:
-            eta_seconds = remaining_chars * avg_time_per_char if remaining_chars > 0 else 0
-
-        overall_percent = (total_chars_processed / total_chars_all) * 100
-
-        # Format with thousands separators and fixed widths
-        chars_processed_str = f"{total_chars_processed:,}"
-        chars_total_str = f"{total_chars_all:,}"
-        
-        print(
-            f"Overall: "
-            f"{progress_bar(overall_percent)}  "
-            f"{chars_processed_str:>8}/{chars_total_str:<8} chars  "
-            f"Elapsed: {format_time(elapsed_total):>9}  "
-            f"ETA: {format_time(eta_seconds):>9}  "
-            f"@ {format_finish_time(eta_seconds)}"
-        )
-    else:
-        print("Overall: processing...")
-
-
-def format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
-    """
-    Format the final summary as a string for both console and log output.
-
-    Builds a complete summary string including:
-    - Total files processed
-    - Total characters processed
-    - Average time per character
-    - Already generated files (if any)
-    - Missing voices (if any)
-
-    Args:
-        total_jobs (int): Total number of jobs processed.
-        total_chars_processed (int): Total characters processed.
-        avg_time_per_char (float): Average generation time per character.
-        npc_stats (dict): Statistics dictionary per NPC.
-
-    Returns:
-        str: Formatted summary string ready for console or log output.
-    """
-    # Extract statistics
-    total_done = 0
-    total_skipped = 0
-    done_summary = {}
-    skipped_summary = {}
-
-    for voice, stats in npc_stats.items():
-        done = stats.get("done", 0)
-        skipped = stats.get("skipped", 0)
-        
-        if done > 0:
-            total_done += done
-            done_summary[voice] = done
-        
-        if skipped > 0:
-            total_skipped += skipped
-            skipped_summary[voice] = skipped
-
-    # Build the summary string (single content for both console and log)
-    lines = []
-    lines.append("")
-    lines.append("=" * 70)
-    lines.append("FINAL SUMMARY")
-    lines.append("=" * 70)
-    lines.append(f"Processed: {total_jobs:,} files")
-    lines.append(f"Total characters: {total_chars_processed:,}")
-    
-    if avg_time_per_char:
-        lines.append(f"Average time per character: {avg_time_per_char:.4f}s")
-
-    if total_done:
-        done_details = ", ".join(f"{voice}: {count:,}" for voice, count in done_summary.items())
-        lines.append(f"Skipped already generated: {total_done:,} ({done_details})")
-
-    if total_skipped:
-        skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
-        lines.append(f"Skipped missing voices: {total_skipped:,} ({skipped_details})")
-
-    lines.append(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    lines.append("=" * 70)
-    lines.append("")
-
-    return "\n".join(lines)
-
-
-def print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
-    """
-    Print the final summary after all jobs are processed.
-
-    Args:
-        total_jobs (int): Total number of jobs processed.
-        total_chars_processed (int): Total characters processed.
-        avg_time_per_char (float): Average time per character.
-        npc_stats (dict): Statistics dictionary per NPC.
-    """
-    summary = format_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
-    print(summary)
-    print("✅ Done.")
 #endregion Generation Execution
 
 # ---------- Main ----------
@@ -2012,25 +1754,25 @@ def main():
     # 1. Load profiles
     try:
         profile_map = get_all_profiles()
-        print(f"Loaded {len(profile_map)} voice profiles.")
+        logger.info(f"Loaded {len(profile_map)} voice profiles.")
     except Exception as e:
-        print(f"❌ Failed to fetch profiles: {e}")
+        logger.error(f"Failed to fetch profiles: {e}")
         sys.exit(1)
 
     # 2. Load patcher config (optional - generation continues without it)
     try:
         patcher_config = load_patcher_config(PATCHER_CONFIG_PATH)
-        print("Loaded patcher config.")
+        logger.info("Loaded patcher config.")
     except Exception as e:
         patcher_config = None
-        print(f"⚠️ Could not load patcher config: {e}")
+        logger.warning(f"Could not load patcher config: {e}")
 
     # 3. Load generation memory to skip already processed files
     generation_memory = load_generation_memory(GENERATION_MEMORY_PATH)
     if SKIP_ALREADY_GENERATED:
-        print("Loaded generation memory. Already generated files will be skipped.")
+        logger.info("Loaded generation memory. Already generated files will be skipped.")
     else:
-        print("Generation memory loaded. Skipping already generated files is disabled.")
+        logger.info("Generation memory loaded. Skipping already generated files is disabled.")
 
     # 4. Read CSV, filter, and select rows
     selected_rows, npc_stats = load_and_filter_csv(
@@ -2047,8 +1789,8 @@ def main():
         FORCE_GENERATED_FILENAMES
     )
 
-    # 5. Display pre-generation summary
-    print_pregeneration_summary(npc_stats, profile_map)
+    # 5. Pre-generation summary
+    log_pregeneration_summary(npc_stats, profile_map)
 
     # 6. Filter out rows with missing profiles and sort for processing
     selected_rows = filter_and_sort_rows(selected_rows, profile_map)
@@ -2062,28 +1804,12 @@ def main():
     else:
         filename_mode = "CSV with base36 fallback"
 
-    print(f"Selected {total_jobs} rows. Total characters: {total_chars_all}")
-    print(f"Filename mode: {filename_mode}")
+    logger.info(f"Selected {total_jobs} rows. Total characters: {total_chars_all}")
+    logger.info(f"Filename mode: {filename_mode}")
 
     if total_jobs == 0:
-        print("No jobs to process. Exiting.")
+        logger.info("No jobs to process. Exiting.")
         return
-
-    # Initialize logging if enabled
-    global LOG_ENABLED
-
-    if LOG_ENABLED:
-        if init_log_file(LOG_FILE_PATH, total_jobs, total_chars_all):
-            print(f"📝 Logging enabled: {LOG_FILE_PATH}")
-        else:
-            print(f"⚠️ Could not initialize log file: {LOG_FILE_PATH}")
-            LOG_ENABLED = False
-
-    # Write pre-generation summary to log if logging is enabled
-    if LOG_ENABLED:
-        write_pregeneration_summary_to_log(LOG_FILE_PATH, npc_stats, profile_map)            
-
-    print("\nStarting generation...\n")
 
     # 7. Process all generation jobs
     total_chars_processed = 0
@@ -2095,7 +1821,7 @@ def main():
     for idx, (strref, display_name, voice_name, filename, text) in enumerate(selected_rows, start=1):
         profile_id = profile_map.get(voice_name)
         if not profile_id:
-            print(f"⏭️ Skipping {strref}/{filename}: Voice '{voice_name}' not found.")
+            logger.warning(f"Skipping {strref}/{filename}: Voice '{voice_name}' not found.")
             continue
 
         # Snapshot Overall line (static for the duration of this job)
@@ -2119,32 +1845,17 @@ def main():
             overall_regressor.push(chars, elapsed)
 
             # Print job summary
-            print_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+            log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
                             audio_duration, display_name, voice_name, success=True)
-            
-            # Write to log
-            if LOG_ENABLED:
-                write_log_entry(LOG_FILE_PATH, idx, total_jobs, strref, filename, 
-                              display_name, voice_name, chars, elapsed, audio_duration, success=True)
 
         else:
             # Handle failure
             error_msg = "Generation failed"
-            print_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+            log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
                             audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
-            
-            if LOG_ENABLED:
-                write_log_entry(LOG_FILE_PATH, idx, total_jobs, strref, filename, 
-                              display_name, voice_name, chars, elapsed, audio_duration, 
-                              success=False, error_msg=error_msg)           
 
     # 8. Final summary
-    print_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
-
-    # Save final log summary if logging is enabled
-    if LOG_ENABLED:
-        write_final_log_summary(LOG_FILE_PATH, total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
-        print(f"📝 Log saved to: {LOG_FILE_PATH}")
+    log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
 
 if __name__ == "__main__":
     main()
