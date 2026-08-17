@@ -23,11 +23,10 @@ TS_PATTERN = r'^TS'  # TS (Text-to-Speech) pattern - entries matching this patte
 WEIDU_PATH = r"./weidu/weidu.exe"
 GAME_DIRECTORY = r"C:/Relax/BGEET"
 CSV_PATH = r"dialog-report.csv"
-APP_DIR = Path.cwd()  # Directory where the script is running
-VOICES_PREP_DIR = APP_DIR / "voices_prep"
-VOICES_DIR = APP_DIR / "voices"
-LOG_DIR = APP_DIR / "logs"
-LOG_DIR.mkdir(parents=True, exist_ok=True)
+VOICES_PREP_DIR = "voices_prep"
+VOICES_DIR = "voices"
+LOG_FILE_PATH = r"./logs/profiles_prepare.log"
+BLACKLIST_FILE = r"./blacklist.txt"
 BLACKLIST = [
     # Add RealNames to skip processing
     # "Example1",
@@ -41,12 +40,15 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Setup logging - log to both console and file
+log_dir = Path(LOG_FILE_PATH).parent
+log_dir.mkdir(parents=True, exist_ok=True)
+log_file_path = Path(LOG_FILE_PATH)
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.FileHandler(LOG_DIR / "voice_sample_prep.log", encoding='utf-8'),
+        logging.FileHandler(log_file_path, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
@@ -183,7 +185,9 @@ class VoiceSampleProcessor:
 
     def scan_existing_voices(self) -> None:
         """Scan voices and voices_prep directories for existing files"""
-        for dir_path in [VOICES_DIR, VOICES_PREP_DIR]:
+        voices_dir = Path(VOICES_DIR)
+        voices_prep_dir = Path(VOICES_PREP_DIR)
+        for dir_path in [voices_dir, voices_prep_dir]:
             if dir_path.exists():
                 for file in dir_path.glob("*.wav"):
                     # Extract RealName from filename (without number suffix)
@@ -219,7 +223,7 @@ class VoiceSampleProcessor:
         Mass extract audio files for multiple entries.
         Returns dict mapping sound_res_ref to Path or None if extraction failed.
         """
-        extract_dir = VOICES_PREP_DIR / "extracted"
+        extract_dir = Path(VOICES_PREP_DIR) / "extracted"
         extract_dir.mkdir(parents=True, exist_ok=True)
         
         results = {}
@@ -369,24 +373,20 @@ class VoiceSampleProcessor:
     
     def create_sample_files(self, real_name: str, samples: List[Tuple], priority_used: int, total_duration: float, has_ts: bool) -> bool:
         """Create WAV and TXT files for the collected samples"""
-        VOICES_PREP_DIR.mkdir(parents=True, exist_ok=True)
+        voice_prep_dir = Path(VOICES_PREP_DIR)
         
         priority_labels = ["HIGH", "MEDIUM", "LOW"]
-        priority_text = priority_labels[priority_used] if priority_used is not None else "HIGH"
+        priority_text = f"{'⚠️ ' if priority_used > 0 else ''}{priority_labels[priority_used] if priority_used is not None else 'HIGH'}"
         
         # Build status message
-        status = "✅" if total_duration >= MIN_DURATION else "⚠️"
+        status = "✅ " if total_duration >= MIN_DURATION else "⚠️ "
         duration_status = f"{total_duration:.1f}s" + (f" (need {MIN_DURATION:.1f}s)" if total_duration < MIN_DURATION else "")
         
         # Build StrRef:SoundResRef pairs for logging
         sample_pairs = [f"{entry.str_ref}:{entry.sound_res_ref}({duration:.1f}s)" for entry, _, duration in samples]
         pairs_str = ", ".join(sample_pairs) if len(sample_pairs) <= 3 else f"{', '.join(sample_pairs[:3])}... ({len(sample_pairs)} total)"
         
-        # Log with appropriate level and include StrRef:SoundResRef pairs
-        if priority_used == 0:
-            logger.info(f"{status} {real_name}: {len(samples)} samples, {duration_status} [{priority_text} priority] [{pairs_str}]")
-        else:
-            logger.warning(f"{status} {real_name}: {len(samples)} samples, {duration_status} [⚠️ {priority_text} priority] [{pairs_str}]")
+        logger.log(logging.WARNING if priority_used > 0 or total_duration < MIN_DURATION else logging.INFO,  f"{status} {real_name}: {len(samples)} samples, {duration_status} [{priority_text} priority] [{pairs_str}]")
         
         # Detailed debug log for all samples
         if logger.isEnabledFor(logging.DEBUG):
@@ -402,11 +402,11 @@ class VoiceSampleProcessor:
                 base_name = f"{real_name} {idx + 1}"
             
             # Copy WAV file
-            wav_path = VOICES_PREP_DIR / f"{base_name}.WAV"
+            wav_path = voice_prep_dir / f"{base_name}.WAV"
             shutil.copy2(audio_path, wav_path)
             
             # Create TXT file with text
-            txt_path = VOICES_PREP_DIR / f"{base_name}.txt"
+            txt_path = voice_prep_dir / f"{base_name}.txt"
             with open(txt_path, 'w', encoding='utf-8') as f:
                 f.write(entry.text)
         
@@ -429,6 +429,8 @@ class VoiceSampleProcessor:
         """Process all character groups"""
         self.load_csv()
         self.scan_existing_voices()
+
+        voice_prep_dir = Path(VOICES_PREP_DIR)
         
         # Filter and prepare the list of characters to process
         characters_to_process = []
@@ -455,7 +457,7 @@ class VoiceSampleProcessor:
                 continue
 
             # Check if we can create a file with this RealName
-            test_path = VOICES_PREP_DIR / f"{real_name}.WAV"
+            test_path = voice_prep_dir / f"{real_name}.WAV"
             if not self.can_create_file(test_path):
                 logger.warning(f"❌ Skipping '{real_name}' - cannot create file (invalid filename or permissions)")
                 invalid_filename_count += 1
@@ -491,9 +493,15 @@ class VoiceSampleProcessor:
                 self.existing_voices.add(real_name)
         
         # Clean up extracted directory
-        extract_dir = VOICES_PREP_DIR / "extracted"
+        extract_dir = voice_prep_dir / "extracted"
         if extract_dir.exists():
-            shutil.rmtree(extract_dir)
+            try:
+                shutil.rmtree(extract_dir)
+                logger.debug("Cleaned up extracted directory")
+            except PermissionError:
+                logger.warning(f"⚠️ Could not delete {extract_dir} - permission denied (files may be in use)")
+            except Exception as e:
+                logger.warning(f"⚠️ Could not delete {extract_dir}: {e}")
         
         # Final summary
         logger.info(f"\n{'='*60}")
@@ -539,11 +547,13 @@ def main():
         logger.warning("Please update WEIDU_PATH to point to your weidu executable")
     
     # Create output directories
-    VOICES_PREP_DIR.mkdir(parents=True, exist_ok=True)
-    VOICES_DIR.mkdir(parents=True, exist_ok=True)
+    voices_dir = Path(VOICES_DIR)
+    voices_prep_dir = Path(VOICES_PREP_DIR)
+    voices_dir.mkdir(parents=True, exist_ok=True)
+    voices_prep_dir.mkdir(parents=True, exist_ok=True)
 
     # Load blacklist
-    blacklist_file = APP_DIR / "blacklist.txt"
+    blacklist_file = Path(blacklist_file) if (blacklist_file := Path(BLACKLIST_FILE)).exists() else None
     blacklist = load_blacklist(blacklist_file)
     
     # Process

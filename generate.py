@@ -39,9 +39,7 @@ TARGET_VOICES = [
     # "Edwin",
     # "Neera",
     # "Bodhi",
-    "Melissan",
-    "Guardian Telwyn",
-    "Prelate Wessalen"
+    "Torsin de Lancie"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
@@ -55,7 +53,7 @@ VOICE_SUBSTITUTIONS = {
 FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
 
 # STRREF Filtering
-USE_STRREF_FILTER = False              # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
+USE_STRREF_FILTER = True              # If False, falls back to TARGET_VOICES/FILENAME_PATTERN
 STRREF_FILTER_FILE = r"strrefs.json"   # JSON file with list of strrefs to process
 
 # Voice Fallback Configuration
@@ -74,7 +72,7 @@ GENERATION_MEMORY_PATH = r"generation-memory.json"
 
 # Logging
 LOG_ENABLED = True
-LOG_FILE_PATH = r"generation.log"
+LOG_FILE_PATH = r"logs/generation.log"
 
 # Pre-generation Summary Options
 COMPACT_SUMMARY = True                 # If True, only show NPCs with valid voices; if False, show all
