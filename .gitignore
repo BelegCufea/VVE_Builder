@@ -6,4 +6,5 @@ weidu/*.tp2
 weidu/export/
 *.log
 generation-memory.json
+profiles-audit-skipped.json
 strrefs*.json
