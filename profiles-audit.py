@@ -256,10 +256,6 @@ else:
 
 st.sidebar.markdown("---")
 
-# Filter controls
-hide_skipped = st.sidebar.checkbox("Hide Skipped NPCs", value=True)
-st.sidebar.markdown("---")
-
 # Statistics - compact display
 col1, col2 = st.sidebar.columns(2)
 with col1:
@@ -280,18 +276,22 @@ else:
     st.title("🔍 Infinity Engine Voice Auditor - Review Approved Voices")
 
 # Create two columns: left for NPC list (30%), right for samples (70%)
-left_col, right_col = st.columns([0.3, 0.7], gap="medium")
+left_col, right_col = st.columns([0.2, 0.8], gap="medium")
 
 # ============================================================================
 # LEFT COLUMN: NPC List
 # ============================================================================
 
 with left_col:
-    st.markdown("### 📋 NPC List")
+    # Title row with checkbox
+    title_col, checkbox_col = st.columns([2, 1])
+    with title_col:
+        st.markdown("#### 📋 NPC List")
+    with checkbox_col:
+        hide_skipped = st.checkbox("Hide Skipped", value=True, key="hide_skipped_main")
     
     # Search/filter input
-    search_term = st.text_input("🔍 Filter NPCs", placeholder="Type to filter...", key="npc_search")
-    
+    search_term = st.text_input("🔍 Filter NPCs", placeholder="Type to filter...", key="npc_search")    
     # Filter visible NPCs based on skip status and search
     visible_npcs = {}
     for name, samples in npcs.items():
