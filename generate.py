@@ -177,6 +177,15 @@ def log_header(total_jobs, total_chars_all, header_messages):
     lines.append("Voice over Generation")
     lines.append(f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 70)
+
+    if ENGINE and ENGINE.strip():
+        if MODEL_SIZE and MODEL_SIZE.strip():
+            lines.append(f"TTS Engine: {ENGINE} ({MODEL_SIZE})")
+        else:
+            lines.append(f"TTS Engine: {ENGINE}")
+    elif MODEL_SIZE and MODEL_SIZE.strip():
+        lines.append(f"Model Size: {MODEL_SIZE}")
+        
     lines.extend(header_messages)
     lines.append(f"Total jobs: {total_jobs}, Total chars: {total_chars_all}")
     lines.append("=" * 70)
