@@ -13,13 +13,15 @@ import subprocess
 import shutil
 import csv
 import json
+from datetime import datetime
 from typing import Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 
 # ==================== CONFIGURATION ====================
+GAME_DIRECTORY = r"C:/Relax/BGEET" 
+LANGUAGE = "en_US"
 WEIDU_PATH = r"./weidu/weidu.exe"
-GAME_DIRECTORY = r"C:/Relax/BGEET"
 EXTRACT_DIR = r"./extracted"
 CSV_PATH = r"dialog-report.csv"
 PATCHER_CONFIG_PATH = r"patcher-config.json"
@@ -50,6 +52,7 @@ COPY_EXISTING_REGEXP ~.*\\.cre~ ~{extract_dir}~
             tp2_path.name,
             "--game", str(game_dir),
             "--force-install", "0",
+            "--use-lang", str(LANGUAGE)
         ],
         cwd=weidu_dir,
         capture_output=True,
@@ -431,6 +434,14 @@ def write_dialog_report(
     strref_info: dict[int, dict],
     dlg_to_cre_info: dict[str, tuple[str, str]],
 ) -> None:
+    # Backup existing file if it exists
+    if out_path.exists():
+        timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
+        backup_path = out_path.parent / f"{out_path.stem}_{timestamp}{out_path.suffix}.bak"
+        shutil.copy2(out_path, backup_path)
+        print(f"Backed up existing report to: {backup_path}")
+    
+    # Write new report
     with out_path.open("w", encoding=TEXT_ENCODING, newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
@@ -480,6 +491,7 @@ def write_dialog_report(
 
 def main() -> None:
     weidu_path = Path(WEIDU_PATH).resolve()
+    weidu_dir = Path(WEIDU_PATH).resolve().parent
     game_dir = Path(GAME_DIRECTORY).resolve()
     extract_dir = Path(EXTRACT_DIR).resolve()
 
@@ -487,10 +499,10 @@ def main() -> None:
         raise FileNotFoundError(f"weidu.exe not found at {weidu_path}")
 
     print("Running WeiDU extraction (binary DLG + CRE) ...")
-    # run_weidu_extraction(weidu_path, weidu_dir, game_dir, extract_dir)
+    run_weidu_extraction(weidu_path, weidu_dir, game_dir, extract_dir)
 
     print("Copying any override-only DLG/CRE files ...")
-    # copy_override_files(game_dir, extract_dir)
+    copy_override_files(game_dir, extract_dir)
 
     dlg_files = list(iter_files_ci(extract_dir, "dlg"))
     cre_files = list(iter_files_ci(extract_dir, "cre"))
@@ -524,7 +536,7 @@ def main() -> None:
     dlg_to_cre_info = build_dlg_to_cre_info(extract_dir, tlk, config)
     print(f"Resolved {len(dlg_to_cre_info)} DLG resrefs to a speaking CRE")
 
-    out_path = extract_dir / "dialog-report.csv"
+    out_path = Path(CSV_PATH)
     write_dialog_report(out_path, tlk, tlk_f, strref_info, dlg_to_cre_info)
 
 

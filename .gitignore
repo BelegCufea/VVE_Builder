@@ -5,6 +5,7 @@ voices_prep/
 weidu/*.tp2
 weidu/export/
 *.log
+*.bak
 generation-memory*.json
 profiles-audit*.json
 strrefs*.json
