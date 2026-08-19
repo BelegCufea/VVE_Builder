@@ -23,7 +23,7 @@ from pathlib import Path
 # Voicebox API Configuration
 BASE_URL = "http://10.0.50.5:17600"    # VoiceBox API - http://localhost:17493 for local server, or remote URL for remote server
 ENGINE = "qwen"
-MODEL_SIZE = "0.6B"
+MODEL_SIZE = "1.7B"
 
 # Generation Timeout Safeguards
 ENABLE_TIMEOUT_SAFEGUARD = True        # Enable/disable timeout protection
