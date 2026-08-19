@@ -48,7 +48,7 @@ TARGET_VOICES = [
     # "Edwin",
     # "Neera",
     # "Bodhi",
-    # "Torsin de Lancie"
+    # "Gaelan Bayle"
 ]   
 # NPC name -> Voicebox profile substitution.
 # If an NPC is not listed here, its name is used as the voice profile name.
@@ -237,16 +237,33 @@ def log_pregeneration_summary(npc_stats, profile_map):
         Missing profiles are marked with "❌ Missing" in the table when
         COMPACT_SUMMARY is False, or summarized in a single line when True.
     """
-    # helper number formating
+    # formatting helpers
+    trunc = lambda text, width: (text[:width - 3] + "...") if len(text) > width else text
     fmt = lambda v, w: f"{v:{w},}" if v != 0 else ' ' * w
 
-    line_length = 108
+    class COL_WIDTH:
+        NPC = 28
+        PROFILE = 30
+        TOTAL = 7
+        DONE = 8
+        SKIPPED = 9
+        TO_GEN = 8
+        CHARS = 12
+
+    _widths = [v for k, v in COL_WIDTH.__dict__.items() if not k.startswith('__') and isinstance(v, int)]
+    LINE_LENGTH = sum(_widths) + len(_widths) - 1
+
     header_lines = []
     detail_lines = []
     totals_lines = []
     
-    header_lines.append("\n" + "=" * line_length)
+    header_lines.append("\n" + "=" * LINE_LENGTH)
     header_lines.append("📊 PRE-GENERATION VOICE SUMMARY")
+
+    if TARGET_VOICES:
+        header_lines.append(f"   🔍 Filter mode: TARGET_VOICES ({len(TARGET_VOICES)} NPCs)")
+    else:
+        header_lines.append("   📡 Scan mode: ALL lines (no TARGET_VOICES filter)")
     
     # Show fallback status
     if USE_VOICE_FALLBACK:
@@ -271,13 +288,21 @@ def log_pregeneration_summary(npc_stats, profile_map):
     else:
         header_lines.append(f"   🔧 Filenames: CSV with base36 fallback (prefix: {RESREF_PREFIX})")
     
-    header_lines.append("=" * line_length)
+    header_lines.append("=" * LINE_LENGTH)
 
     detail_lines.append("DETAILS")
-    detail_lines.append("=" * line_length)
-    table_header = f"{'NPC Name':<28} {'Profile':<30} {'Total':>7} {'Done':>8} {'Missing':>9} {'To Gen':>8} {'Chars':>12}"
+    detail_lines.append("=" * LINE_LENGTH)
+    table_header = (
+        f"{'NPC Name':<{COL_WIDTH.NPC}} "
+        f"{'Profile':<{COL_WIDTH.PROFILE}} "
+        f"{'Total':>{COL_WIDTH.TOTAL}} "
+        f"{'Done':>{COL_WIDTH.DONE}} "
+        f"{'Missing':>{COL_WIDTH.SKIPPED}} "
+        f"{'To Gen':>{COL_WIDTH.TO_GEN}} "
+        f"{'Chars':>{COL_WIDTH.CHARS}}"
+    )
     detail_lines.append(table_header)
-    detail_lines.append("-" * line_length)
+    detail_lines.append("-" * LINE_LENGTH)
 
     grand_total = 0
     grand_done = 0
@@ -347,73 +372,78 @@ def log_pregeneration_summary(npc_stats, profile_map):
         if show_in_detail:
             # Format valid NPCs
             detail_lines.append(
-                f"{npc_name:<28} "
-                f"{profile_str:<29} "
-                f"{total:>7,} "
-                f"{done:>8,} "
-                f"{skipped:>9,} "
-                f"{to_gen:>8,} "
-                f"{chars:>12,}"
+                f"{trunc(npc_name, COL_WIDTH.NPC):<{COL_WIDTH.NPC}} "
+                f"{trunc(profile_str, COL_WIDTH.PROFILE - 1):<{COL_WIDTH.PROFILE - 1}} "
+                f"{fmt(total, COL_WIDTH.TOTAL)} "
+                f"{fmt(done, COL_WIDTH.DONE)} "
+                f"{fmt(skipped, COL_WIDTH.SKIPPED)} "
+                f"{fmt(to_gen, COL_WIDTH.TO_GEN)} "
+                f"{fmt(chars, COL_WIDTH.CHARS)}"
             )
 
-
-
-    detail_lines.append("-" * line_length)
+    detail_lines.append("-" * LINE_LENGTH)
 
     # Build totals section
-    totals_table_header = f"{'TOTALS':<28} {'':<30} {'Total':>7} {'Done':>8} {'Missing':>9} {'To Gen':>8} {'Chars':>12}"
+    totals_table_header = (
+        f"{'TOTALS':<{COL_WIDTH.NPC}} "
+        f"{'':<{COL_WIDTH.PROFILE}} "
+        f"{'Total':>{COL_WIDTH.TOTAL}} "
+        f"{'Done':>{COL_WIDTH.DONE}} "
+        f"{'Missing':>{COL_WIDTH.SKIPPED}} "
+        f"{'To Gen':>{COL_WIDTH.TO_GEN}} "
+        f"{'Chars':>{COL_WIDTH.CHARS}}"
+    )
     totals_lines.append(totals_table_header)
-    totals_lines.append("-" * line_length)
+    totals_lines.append("-" * LINE_LENGTH)
     
     # Print summary for missing voices if there are any
     if missing_npcs:
         missing_total = missing_done_total + missing_skipped_total
         totals_lines.append(
-            f"{'❌ Missing voices':<27} "
-            f"{'(summary)':<30} "
-            f"{fmt(missing_total,7)} "
-            f"{fmt(missing_done_total,8)} "
-            f"{fmt(missing_skipped_total,9)} "
-            f"{fmt(0,8)} "
-            f"{fmt(missing_chars_total,12)}"
+            f"{'❌ Missing voices':<{COL_WIDTH.NPC - 1}} "
+            f"{'':<{COL_WIDTH.PROFILE}} "
+            f"{fmt(missing_total, COL_WIDTH.TOTAL)} "
+            f"{fmt(missing_done_total, COL_WIDTH.DONE)} "
+            f"{fmt(missing_skipped_total, COL_WIDTH.SKIPPED)} "
+            f"{fmt(0, COL_WIDTH.TO_GEN)} "
+            f"{fmt(missing_chars_total, COL_WIDTH.CHARS)}"
         )
     
     # Print summary for NPCs with nothing to generate
     if done_npcs:
         done_total = done_done_total + done_skipped_total
         totals_lines.append(
-            f"{'✅ Already done':<27} "
-            f"{'(summary)':<30} "
-            f"{fmt(done_total,7)} "
-            f"{fmt(done_done_total,8)} "
-            f"{fmt(done_skipped_total,9)} "
-            f"{fmt(0,8)} "
-            f"{fmt(done_chars_total,12)}"
+            f"{'✅ Already done':<{COL_WIDTH.NPC - 1}} "
+            f"{'':<{COL_WIDTH.PROFILE}} "
+            f"{fmt(done_total, COL_WIDTH.TOTAL)} "
+            f"{fmt(done_done_total, COL_WIDTH.DONE)} "
+            f"{fmt(done_skipped_total, COL_WIDTH.SKIPPED)} "
+            f"{fmt(0, COL_WIDTH.TO_GEN)} "
+            f"{fmt(done_chars_total, COL_WIDTH.CHARS)}"
         )
     
     totals_lines.append(
-        f"{'Generate':<28} "
-        f"{'':<30} "
-        f"{fmt(generate_total,7)} "
-        f"{fmt(0,8)} "
-        f"{fmt(0,9)} "
-        f"{fmt(generate_total,8)} "
-        f"{fmt(generate_chars,12)}"
+        f"{'🔄 Generate':<{COL_WIDTH.NPC - 1}} "
+        f"{'':<{COL_WIDTH.PROFILE}} "
+        f"{fmt(generate_total, COL_WIDTH.TOTAL)} "
+        f"{fmt(0, COL_WIDTH.DONE)} "
+        f"{fmt(0, COL_WIDTH.SKIPPED)} "
+        f"{fmt(generate_total, COL_WIDTH.TO_GEN)} "
+        f"{fmt(generate_chars, COL_WIDTH.CHARS)}"
     )
-    totals_lines.append("-" * line_length)
+    totals_lines.append("-" * LINE_LENGTH)
     totals_lines.append(
-        f"{'GRAND TOTAL':<28} "
-        f"{'':<30} "
-        f"{fmt(grand_total,7)} "
-        f"{fmt(grand_done,8)} "
-        f"{fmt(grand_skipped,9)} "
-        f"{fmt(grand_to_gen,8)} "
-        f"{fmt(grand_chars,12)}"
+        f"{'GRAND TOTAL':<{COL_WIDTH.NPC}} "
+        f"{'':<{COL_WIDTH.PROFILE}} "
+        f"{fmt(grand_total, COL_WIDTH.TOTAL)} "
+        f"{fmt(grand_done, COL_WIDTH.DONE)} "
+        f"{fmt(grand_skipped, COL_WIDTH.SKIPPED)} "
+        f"{fmt(grand_to_gen, COL_WIDTH.TO_GEN)} "
+        f"{fmt(grand_chars, COL_WIDTH.CHARS)}"
     )
-    totals_lines.append("=" * line_length + "\n")
+    totals_lines.append("=" * LINE_LENGTH + "\n")
 
     # Compose summary: header -> totals -> details
-    # This ensures totals are at the bottom of the console view
     summary = "\n".join(header_lines + totals_lines + detail_lines)
     
     # Single log call - logger handles both console and file
