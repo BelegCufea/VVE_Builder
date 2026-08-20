@@ -21,7 +21,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton, QComboBox,
     QScrollArea, QSplitter, QGroupBox, QFrame, QMessageBox, QStatusBar,
-    QTextEdit, QDialog, QDialogButtonBox, QFileDialog,
+    QTextEdit, QDialog, QProgressBar, QFileDialog,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -662,35 +662,97 @@ def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions:
 def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
     """
     Calculate how many CSV lines each NPC, gender, and system name affects.
+
+    Uses a single groupby pass (like build_hierarchy) instead of re-filtering
+    the whole DataFrame once per NPC and again once per gender - on a large
+    CSV (100k+ rows, thousands of NPCs) the old per-NPC filtering pattern
+    scaled as roughly rows * NPCs and could take tens of seconds; groupby
+    partitions the data once up front instead.
     """
     counts = {}
-    
-    for npc_name, npc_data in hierarchy.items():
-        npc_rows = df[df['RealName'] == npc_name]
-        total_lines = len(npc_rows)
-        
+    if df.empty:
+        return counts
+
+    df_clean = df.dropna(subset=['RealName'])
+    for npc_name, npc_df in df_clean.groupby('RealName', sort=False):
+        npc_data = hierarchy.get(npc_name)
+        if npc_data is None:
+            continue
+
+        total_lines = len(npc_df)
         counts[npc_name] = {
             'total_lines': total_lines,
             'genders': {}
         }
-        
-        for gender in npc_data.get('genders', {}).keys():
-            gender_rows = npc_rows[npc_rows['Gender'] == gender]
-            gender_count = len(gender_rows)
-            
+
+        gender_groups = npc_df.dropna(subset=['Gender']).groupby('Gender', sort=False)
+        for gender, gender_df in gender_groups:
+            if gender not in npc_data.get('genders', {}):
+                continue
+
+            gender_count = len(gender_df)
             counts[npc_name]['genders'][gender] = {
                 'total_lines': gender_count,
                 'sysnames': {}
             }
-            
+
+            # One value_counts() call covers every sysname for this
+            # NPC+gender, instead of a separate filter per sysname
+            sysname_counts = gender_df['SystemName'].value_counts()
             for sys in npc_data['genders'][gender].get('sysnames', []):
                 sysname = sys['name']
-                sys_rows = gender_rows[gender_rows['SystemName'] == sysname]
-                sys_count = len(sys_rows)
-                
-                counts[npc_name]['genders'][gender]['sysnames'][sysname] = sys_count
-    
+                counts[npc_name]['genders'][gender]['sysnames'][sysname] = int(
+                    sysname_counts.get(sysname, 0)
+                )
+
     return counts
+
+
+def calculate_covered_lines_for_npc(npc_data: Dict, npc_line_counts: Dict) -> int:
+    """
+    Count how many of an NPC's CSV lines are covered by a voice assignment,
+    following the same NPC -> Gender -> SystemName cascade as
+    _get_coverage_status (an assignment at a higher level covers everything
+    beneath it, so it isn't double-counted with a lower-level override).
+
+    Sourced entirely from the already-computed line_counts dict, not from
+    re-filtering the DataFrame - this keeps it cheap even on very large
+    datasets (170k+ rows), since the cost scales with the NPC's own number
+    of genders/sysnames rather than with the size of the CSV.
+    """
+    total_lines = npc_line_counts.get('total_lines', 0)
+
+    if npc_data.get('has_existing_voice', False):
+        return total_lines
+
+    # NPC-level assignment covers ALL lines (highest priority)
+    if npc_data['assigned_voice'] is not None:
+        return total_lines
+
+    covered = 0
+    if npc_data['genders']:
+        for gender, gender_data in npc_data['genders'].items():
+            gender_counts = npc_line_counts.get('genders', {}).get(gender, {})
+            gender_total = gender_counts.get('total_lines', 0)
+
+            if gender_data['assigned_voice'] is not None:
+                # A gender-level assignment covers all its sysnames' lines too
+                covered += gender_total
+            elif gender_data['sysnames']:
+                sys_counts = gender_counts.get('sysnames', {})
+                for sys in gender_data['sysnames']:
+                    if sys['assigned_voice'] is not None:
+                        covered += sys_counts.get(sys['name'], 0)
+
+    return covered
+
+
+def calculate_all_covered_lines(hierarchy: Dict, line_counts: Dict) -> Dict[str, int]:
+    """Covered-line count per NPC, for every NPC in the hierarchy."""
+    return {
+        name: calculate_covered_lines_for_npc(data, line_counts.get(name, {}))
+        for name, data in hierarchy.items()
+    }
 
 
 # ============================================================================
@@ -721,6 +783,8 @@ class VoiceProfileManager(QMainWindow):
         )
         
         self.line_counts = calculate_line_counts(self.df, self.hierarchy)
+        self.covered_lines_by_npc = calculate_all_covered_lines(self.hierarchy, self.line_counts)
+        self.total_lines_all = sum(v.get('total_lines', 0) for v in self.line_counts.values())
 
         self.npc_names = sorted(self.hierarchy.keys())
         self.selected_npc: Optional[str] = self.npc_names[0] if self.npc_names else None
@@ -759,12 +823,35 @@ class VoiceProfileManager(QMainWindow):
         self.stats_npc_level_label = QLabel()
         self.stats_gender_level_label = QLabel()
         self.stats_sys_level_label = QLabel()
+        self.stats_lines_covered_label = QLabel()
+
+        self.coverage_progress = QProgressBar()
+        self.coverage_progress.setRange(0, 100)
+        self.coverage_progress.setValue(0)
+        self.coverage_progress.setFixedHeight(12)
+        self.coverage_progress.setTextVisible(False)
+        self.coverage_progress.setStyleSheet("""
+            QProgressBar {
+                border: 1px solid #555;
+                border-radius: 6px;
+                background-color: #2d2d2d;
+            }
+            QProgressBar::chunk {
+                background-color: qlineargradient(x1: 0, y1: 0, x2: 1, y2: 0,
+                    stop: 0 #4CAF50,
+                    stop: 1 #8BC34A);
+                border-radius: 6px;
+            }
+        """)
+
         stats_layout.addRow("Total NPCs:", self.stats_total_label)
         stats_layout.addRow("Available Voices:", self.stats_voices_label)
         stats_layout.addRow("NPCs with Voice Files:", self.stats_existing_label)
         stats_layout.addRow("NPC-level assignments:", self.stats_npc_level_label)
         stats_layout.addRow("Gender-level assignments:", self.stats_gender_level_label)
         stats_layout.addRow("SysName-level assignments:", self.stats_sys_level_label)
+        stats_layout.addRow("Lines with voice assigned:", self.stats_lines_covered_label)
+        stats_layout.addRow("Coverage:", self.coverage_progress)
         left_layout.addWidget(stats_box)
 
         left_layout.addWidget(QLabel("📋 NPC List"))
@@ -823,7 +910,7 @@ class VoiceProfileManager(QMainWindow):
     # ------------------------------------------------------------------
     def _get_coverage_status(self, npc_name: str) -> Dict:
         """
-        Get coverage status for an NPC.
+        Get coverage status for an NPC using cached data.
         
         Returns:
             Dict with:
@@ -836,8 +923,12 @@ class VoiceProfileManager(QMainWindow):
         data = self.hierarchy[npc_name]
         has_existing = data.get("has_existing_voice", False)
         
-        npc_rows = self.df[self.df['RealName'] == npc_name]
-        total_lines = len(npc_rows)
+        # Use cached line counts
+        npc_counts = self.line_counts.get(npc_name, {})
+        total_lines = npc_counts.get('total_lines', 0)
+        
+        # Use cached covered lines
+        covered_lines = self.covered_lines_by_npc.get(npc_name, 0)
         
         # If NPC has a voice file, it's fully covered
         if has_existing:
@@ -848,38 +939,6 @@ class VoiceProfileManager(QMainWindow):
                 'is_fully_covered': True,
                 'has_partial': False
             }
-        
-        covered_lines = 0
-        
-        # Check if NPC has genders
-        if data["genders"]:
-            for gender, gender_data in data["genders"].items():
-                gender_rows = npc_rows[npc_rows['Gender'] == gender]
-                gender_total = len(gender_rows)
-                
-                # Check if this gender has sysnames
-                if gender_data["sysnames"]:
-                    # Count sysname-level assignments
-                    gender_covered = 0
-                    for sys in gender_data["sysnames"]:
-                        sys_rows = gender_rows[gender_rows['SystemName'] == sys['name']]
-                        if sys["assigned_voice"] is not None:
-                            gender_covered += len(sys_rows)
-                    
-                    # Also check if gender has an assignment (covers ALL sysnames for this gender)
-                    # This is the key fix!
-                    if gender_data["assigned_voice"] is not None:
-                        gender_covered = gender_total
-                    
-                    covered_lines += gender_covered
-                else:
-                    # No sysnames - check gender level
-                    if gender_data["assigned_voice"] is not None:
-                        covered_lines += gender_total
-        else:
-            # No genders - check NPC level
-            if data["assigned_voice"] is not None:
-                covered_lines = total_lines
         
         return {
             'total_lines': total_lines,
@@ -1268,6 +1327,13 @@ class VoiceProfileManager(QMainWindow):
                 sys_count = len(sys_rows)
                 self.line_counts[npc_name]['genders'][gender]['sysnames'][sysname] = sys_count
 
+        # Keep the covered-lines total in sync too - cheap, since it only
+        # walks this one NPC's (already-updated) line_counts entry rather
+        # than touching the DataFrame or any other NPC.
+        self.covered_lines_by_npc[npc_name] = calculate_covered_lines_for_npc(
+            npc_data, self.line_counts[npc_name]
+        )
+
     def _on_npc_voice_changed(self, npc_name: str, new_voice: str):
         current = self.substitutions.get(npc_name) or ""
         if new_voice == current:
@@ -1331,6 +1397,15 @@ class VoiceProfileManager(QMainWindow):
         self.stats_npc_level_label.setText(str(len(self.substitutions)))
         self.stats_gender_level_label.setText(str(len(self.gender_substitutions)))
         self.stats_sys_level_label.setText(str(len(self.sys_substitutions)))
+
+        total_covered = sum(self.covered_lines_by_npc.values())
+        pct = (100 * total_covered / self.total_lines_all) if self.total_lines_all else 0
+        self.stats_lines_covered_label.setText(
+            f"{total_covered:,} / {self.total_lines_all:,} ({pct:.1f}%)"
+        )
+        
+        # Update progress bar
+        self.coverage_progress.setValue(int(pct))
 
 
 def main():
