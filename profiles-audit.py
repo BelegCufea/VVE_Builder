@@ -398,6 +398,9 @@ class VoiceAuditor(QMainWindow):
         for "approved" mode. After loading, applies filters, populates the
         list, and updates statistics.
         """
+        # Release any media file handles
+        self._release_media()
+        
         prep_dir = Path(VOICES_PREP_DIR)
         voices_dir = Path(VOICES_DIR)
         
@@ -622,9 +625,12 @@ class VoiceAuditor(QMainWindow):
                     font-size: 12px;
                 }
             """)
-            text_edit.textChanged.connect(
-                lambda: self._save_text(sample, text_edit)
-            )
+            
+            # Create a proper closure that captures the current sample
+            def on_text_changed(edit=text_edit, s=sample):
+                self._save_text(s, edit)
+            
+            text_edit.textChanged.connect(on_text_changed)
             self.samples_layout.addWidget(text_edit)
             
             # Audio play button
@@ -735,6 +741,15 @@ class VoiceAuditor(QMainWindow):
         self.media_player.play()
         
         self.statusBar().showMessage(f"🔊 Playing: {wav_path.name}", 3000)
+
+    def _release_media(self):
+        """Stop playback and release the media player to free file handles."""
+        if self.media_player.playbackState() != QMediaPlayer.PlaybackState.StoppedState:
+            self.media_player.stop()
+        # Clear the source to release the file
+        self.media_player.setSource(QUrl())
+        # Process events to ensure the release happens
+        QApplication.processEvents()
     
     def _on_audio_error(self, error):
         """
@@ -813,6 +828,9 @@ class VoiceAuditor(QMainWindow):
         """
         if not self.selected_npc:
             return
+        
+        # Release any media file handles before moving files
+        self._release_media()
         
         samples = self.visible_npcs[self.selected_npc]
         prep_dir = Path(VOICES_PREP_DIR)

@@ -28,21 +28,19 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 # ============================================================================
 
 DEBUG = True
-OGG_QUALITY = 4  # Vorbis quality setting (0-10, 4 is good quality/size balance)
-
-
-def debug_print(*args, **kwargs):
-    if DEBUG:
-        timestamp = time.strftime("%H:%M:%S")
-        print(f"[{timestamp}] DEBUG:", *args, **kwargs, file=sys.stderr)
-
-
+OGG_QUALITY = 4      # Vorbis quality setting (0-10, 4 is good quality/size balance)
+MAX_DURATION = 30.0  # Maximum duration in seconds (single sample file)
 CSV_PATH = "dialog-report.csv"
 VOICES_DIR = "voices"
 VOICE_SUBSTITUTIONS_FILE = "voice-substitutions.json"
 VOICE_SUBSTITUTIONS_GENDER_FILE = "voice-substitutions-gender.json"
 VOICE_SUBSTITUTIONS_SYSNAME_FILE = "voice-substitutions-sysname.json"
 
+
+def debug_print(*args, **kwargs):
+    if DEBUG:
+        timestamp = time.strftime("%H:%M:%S")
+        print(f"[{timestamp}] DEBUG:", *args, **kwargs, file=sys.stderr)
 
 # ============================================================================
 # Audio Processing Functions
@@ -299,6 +297,24 @@ class VoiceProfileEditor(QDialog):
                 self.status_label.setText(f"💾 Saved text for {sample['stem']}")
             except Exception as e:
                 self.status_label.setText(f"❌ Error saving text: {e}")
+
+    def _get_audio_duration(self, audio_path: Path) -> Optional[float]:
+        """Get duration of audio file using ffmpeg."""
+        try:
+            cmd = [
+                'ffprobe', 
+                '-v', 'error',
+                '-show_entries', 'format=duration',
+                '-of', 'default=noprint_wrappers=1:nokey=1',
+                str(audio_path)
+            ]
+            result = subprocess.run(cmd, capture_output=True, text=True)
+            if result.returncode == 0 and result.stdout.strip():
+                return float(result.stdout.strip())
+            return None
+        except Exception as e:
+            debug_print(f"Failed to get duration for {audio_path}: {e}")
+            return None                
     
     def _add_sample(self):
         """Add a new sample to the profile."""
@@ -314,6 +330,18 @@ class VoiceProfileEditor(QDialog):
             return
         
         input_path = Path(file_path)
+        
+        # --- Check duration and warn ---
+        duration = self._get_audio_duration(input_path)
+        if duration and duration > MAX_DURATION:
+            QMessageBox.warning(
+                self,
+                "Audio Too Long",
+                f"The audio file is {duration:.1f}s long.\n\n"
+                f"VoiceBox has a maximum duration of {MAX_DURATION}s.\n"
+                "The audio will be uploaded but may be truncated or rejected by the server.\n\n"
+                "Consider trimming it manually in an audio editor."
+            )
         
         # Determine next sample number
         max_num = 0
@@ -670,6 +698,8 @@ class VoiceProfileManager(QMainWindow):
         self._build_ui()
         self._apply_filters()
         self._populate_npc_list()
+        if self.npc_list.count() > 0:
+            self.npc_list.setCurrentRow(0)        
         if self.selected_npc:
             self._select_npc_in_list(self.selected_npc)
 
@@ -718,6 +748,7 @@ class VoiceProfileManager(QMainWindow):
         controls_layout.addWidget(QLabel("Sort:"))
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["Alphabetical", "By Lines"])
+        self.sort_combo.setCurrentIndex(1)
         self.sort_combo.currentTextChanged.connect(self._on_filter_changed)
         controls_layout.addWidget(self.sort_combo)
         
@@ -845,7 +876,7 @@ class VoiceProfileManager(QMainWindow):
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, name)
             self.npc_list.addItem(item)
-        
+
         self.npc_count_label.setText(f"Showing {len(items)} of {len(self.npc_names)} NPCs")
         self.npc_list.blockSignals(False)
 
@@ -1082,7 +1113,15 @@ class VoiceProfileManager(QMainWindow):
                 if gender_data["sysnames"]:
                     sys_group = QGroupBox(f"📋 System Name Overrides ({gender})")
                     sys_form = QFormLayout(sys_group)
-                    for sys in gender_data["sysnames"]:
+                    
+                    # Sort sysnames by line count (descending)
+                    sorted_sysnames = sorted(
+                        gender_data["sysnames"],
+                        key=lambda s: npc_count.get('genders', {}).get(gender, {}).get('sysnames', {}).get(s["name"], 0),
+                        reverse=True
+                    )
+                    
+                    for sys in sorted_sysnames:
                         sysname = sys["name"]
                         sys_count = npc_count.get('genders', {}).get(gender, {}).get('sysnames', {}).get(sysname, 0)
                         
