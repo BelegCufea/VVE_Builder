@@ -188,6 +188,46 @@ def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions:
     return hierarchy
 
 
+def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
+    """
+    Calculate how many CSV lines each NPC, gender, and system name affects.
+    
+    Returns a dictionary with the same structure as hierarchy but with
+    'line_count' added to each level.
+    """
+    counts = {}
+    
+    for npc_name, npc_data in hierarchy.items():
+        # Get all rows for this NPC
+        npc_rows = df[df['RealName'] == npc_name]
+        total_lines = len(npc_rows)
+        
+        counts[npc_name] = {
+            'total_lines': total_lines,
+            'genders': {}
+        }
+        
+        # Count lines per gender
+        for gender in npc_data.get('genders', {}).keys():
+            gender_rows = npc_rows[npc_rows['Gender'] == gender]
+            gender_count = len(gender_rows)
+            
+            counts[npc_name]['genders'][gender] = {
+                'total_lines': gender_count,
+                'sysnames': {}
+            }
+            
+            # Count lines per system name (within this gender)
+            for sys in npc_data['genders'][gender].get('sysnames', []):
+                sysname = sys['name']
+                sys_rows = gender_rows[gender_rows['SystemName'] == sysname]
+                sys_count = len(sys_rows)
+                
+                counts[npc_name]['genders'][gender]['sysnames'][sysname] = sys_count
+    
+    return counts
+
+
 # ============================================================================
 # Main window
 # ============================================================================
@@ -211,11 +251,16 @@ class VoiceProfileManager(QMainWindow):
             self.df, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
         )
+        
+        # Calculate line counts for each NPC
+        self.line_counts = calculate_line_counts(self.df, self.hierarchy)
 
         self.npc_names = sorted(self.hierarchy.keys())
         self.selected_npc: Optional[str] = self.npc_names[0] if self.npc_names else None
+        self._filtered_items = []
 
         self._build_ui()
+        self._apply_filters()
         self._populate_npc_list()
         if self.selected_npc:
             self._select_npc_in_list(self.selected_npc)
@@ -253,11 +298,32 @@ class VoiceProfileManager(QMainWindow):
 
         left_layout.addWidget(QLabel("📋 NPC List"))
 
+        # Search box
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("🔍 Type to filter...")
-        self.search_box.textChanged.connect(self._on_search_changed)
+        self.search_box.textChanged.connect(self._on_filter_changed)
         left_layout.addWidget(self.search_box)
 
+        # --- Sorting and Filtering Controls ---
+        controls_layout = QHBoxLayout()
+        
+        # Sort dropdown
+        controls_layout.addWidget(QLabel("Sort:"))
+        self.sort_combo = QComboBox()
+        self.sort_combo.addItems(["Alphabetical", "By Lines"])
+        self.sort_combo.currentTextChanged.connect(self._on_filter_changed)
+        controls_layout.addWidget(self.sort_combo)
+        
+        # Filter dropdown
+        controls_layout.addWidget(QLabel("Filter:"))
+        self.filter_combo = QComboBox()
+        self.filter_combo.addItems(["All", "Modified", "Missing", "Has Voice File"])
+        self.filter_combo.currentTextChanged.connect(self._on_filter_changed)
+        controls_layout.addWidget(self.filter_combo)
+        
+        left_layout.addLayout(controls_layout)
+
+        # NPC count
         self.npc_count_label = QLabel()
         left_layout.addWidget(self.npc_count_label)
 
@@ -302,19 +368,92 @@ class VoiceProfileManager(QMainWindow):
             return "✅"
         return "🔴"
 
-    def _populate_npc_list(self, filter_text: str = ""):
+    def _apply_filters(self):
+        """
+        Apply all filters (search, status filter) to determine which NPCs to show.
+        
+        Status filters:
+            - All: Show all NPCs
+            - Modified: Show NPCs with assignments at any level
+            - Missing: Show NPCs with NO assignments and NO voice file
+            - Has Voice File: Show NPCs that have an existing voice file
+        """
+        search_term = self.search_box.text().strip().lower()
+        status_filter = self.filter_combo.currentText()
+        sort_by = "alphabetical" if self.sort_combo.currentText() == "Alphabetical" else "lines"
+        
+        # Store filtered items for list population
+        self._filtered_items = []
+        
+        for name in self.npc_names:
+            # Apply search filter
+            if search_term and search_term not in name.lower():
+                continue
+            
+            # Apply status filter
+            data = self.hierarchy[name]
+            has_existing = data.get("has_existing_voice", False)
+            has_assignments = (
+                data["assigned_voice"] is not None
+                or any(g["assigned_voice"] is not None for g in data["genders"].values())
+                or any(
+                    s["assigned_voice"] is not None
+                    for g in data["genders"].values()
+                    for s in g["sysnames"]
+                )
+            )
+            
+            if status_filter == "Modified" and not has_assignments:
+                continue
+            elif status_filter == "Missing" and (has_assignments or has_existing):
+                continue
+            elif status_filter == "Has Voice File" and not has_existing:
+                continue
+            
+            # Get line count
+            line_count = self.line_counts.get(name, {}).get('total_lines', 0)
+            self._filtered_items.append((name, line_count))
+        
+        # Sort items
+        if sort_by == "alphabetical":
+            self._filtered_items.sort(key=lambda x: x[0].lower())
+        else:  # by lines
+            self._filtered_items.sort(key=lambda x: x[1], reverse=True)
+
+    def _populate_npc_list(self):
+        """Populate the NPC list with filtered and sorted items."""
         self.npc_list.blockSignals(True)
         self.npc_list.clear()
-        filter_lower = filter_text.lower()
-        shown = 0
-        for name in self.npc_names:
-            if filter_lower and filter_lower not in name.lower():
-                continue
-            item = QListWidgetItem(f"{self._npc_icon(name)}  {name}")
+        
+        # Use filtered items
+        items = self._filtered_items if self._filtered_items else [(name, 0) for name in self.npc_names]
+        
+        for name, line_count in items:
+            data = self.hierarchy[name]
+            has_existing = data.get("has_existing_voice", False)
+            has_assignments = (
+                data["assigned_voice"] is not None
+                or any(g["assigned_voice"] is not None for g in data["genders"].values())
+                or any(
+                    s["assigned_voice"] is not None
+                    for g in data["genders"].values()
+                    for s in g["sysnames"]
+                )
+            )
+            if has_existing:
+                icon = "🟢"
+            elif has_assignments:
+                icon = "✅"
+            else:
+                icon = "🔴"
+            
+            # Display with line count
+            item_text = f"{icon} {name} [{line_count} lines]"
+            item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, name)
             self.npc_list.addItem(item)
-            shown += 1
-        self.npc_count_label.setText(f"Showing {shown} of {len(self.npc_names)} NPCs")
+        
+        self.npc_count_label.setText(f"Showing {len(items)} of {len(self.npc_names)} NPCs")
         self.npc_list.blockSignals(False)
 
     def _refresh_all_list_icons(self):
@@ -324,7 +463,9 @@ class VoiceProfileManager(QMainWindow):
             item = self.npc_list.item(i)
             name = item.data(Qt.ItemDataRole.UserRole)
             if name in self.hierarchy:
-                item.setText(f"{self._npc_icon(name)}  {name}")
+                line_count = self.line_counts.get(name, {}).get('total_lines', 0)
+                icon = self._npc_icon(name)
+                item.setText(f"{icon} {name} [{line_count} lines]")
         self.npc_list.blockSignals(False)
 
     def _select_npc_in_list(self, npc_name: str):
@@ -336,8 +477,24 @@ class VoiceProfileManager(QMainWindow):
         self.selected_npc = npc_name
         self._render_detail_panel()
 
-    def _on_search_changed(self, text: str):
-        self._populate_npc_list(text)
+    def _on_filter_changed(self, text: Optional[str] = None):
+        """Handle changes to search, sort, or filter controls."""
+        self._apply_filters()
+        self._populate_npc_list()
+        
+        # If selected NPC is no longer visible, clear selection
+        if self.selected_npc:
+            visible_names = [name for name, _ in self._filtered_items]
+            if self.selected_npc not in visible_names:
+                self.selected_npc = None
+                self._render_detail_panel()
+                # Update header
+                if hasattr(self, 'npc_title'):
+                    self.npc_title.setText("<h2>Select an NPC</h2>")
+        
+        # Auto-select first available NPC if nothing is selected
+        if self.npc_list.count() > 0 and not self.selected_npc:
+            self.npc_list.setCurrentRow(0)
 
     def _on_npc_selected(self, current: QListWidgetItem, previous: QListWidgetItem):
         if current is None:
@@ -380,6 +537,8 @@ class VoiceProfileManager(QMainWindow):
 
         npc_name = self.selected_npc
         npc_data = self.hierarchy[npc_name]
+        npc_count = self.line_counts.get(npc_name, {})
+        
         has_existing = npc_data.get("has_existing_voice", False)
         has_assignments = (
             npc_data["assigned_voice"] is not None
@@ -398,8 +557,13 @@ class VoiceProfileManager(QMainWindow):
         header_layout = QHBoxLayout(header_frame)
 
         title_box = QVBoxLayout()
+        total_lines = npc_count.get('total_lines', 0)
         title_label = QLabel(f"<h2>{icon} {npc_name}</h2>")
+        title_label2 = QLabel(f"<i>Affects {total_lines} CSV lines</i>")
         title_box.addWidget(title_label)
+        title_box.addWidget(title_label2)
+        # Store reference for filter updates
+        self.npc_title = title_label
         header_layout.addLayout(title_box, stretch=1)
 
         copy_btn = QPushButton("📋 Copy Name")
@@ -416,7 +580,7 @@ class VoiceProfileManager(QMainWindow):
         self.detail_layout.addWidget(QLabel("---"))
 
         # --- NPC level (always shown) ---
-        npc_group = QGroupBox("📌 NPC Level Assignment")
+        npc_group = QGroupBox(f"📌 NPC Level Assignment ({total_lines} lines)")
         npc_form = QFormLayout(npc_group)
         npc_combo = self._make_voice_combo(
             npc_data["assigned_voice"],
@@ -432,12 +596,13 @@ class VoiceProfileManager(QMainWindow):
 
             # First, render all gender comboboxes
             for gender, gender_data in npc_data["genders"].items():
+                gender_count = npc_count.get('genders', {}).get(gender, {}).get('total_lines', 0)
                 gform = QFormLayout()
                 gcombo = self._make_voice_combo(
                     gender_data["assigned_voice"],
                     lambda text, g=gender: self._on_gender_voice_changed(npc_name, g, text),
                 )
-                gform.addRow(f"Voice for {gender}:", gcombo)
+                gform.addRow(f"Voice for {gender} ({gender_count} lines):", gcombo)
                 gender_layout.addLayout(gform)
 
             # Then, render all system name groups (one per gender)
@@ -447,11 +612,12 @@ class VoiceProfileManager(QMainWindow):
                     sys_form = QFormLayout(sys_group)
                     for sys in gender_data["sysnames"]:
                         sysname = sys["name"]
+                        sys_count = npc_count.get('genders', {}).get(gender, {}).get('sysnames', {}).get(sysname, 0)
                         scombo = self._make_voice_combo(
                             sys["assigned_voice"],
                             lambda text, s=sysname: self._on_sys_voice_changed(s, text),
                         )
-                        sys_form.addRow(f"{sysname}:", scombo)
+                        sys_form.addRow(f"{sysname} ({sys_count} lines):", scombo)
                     gender_layout.addWidget(sys_group)
 
                 # Add separator between gender sections if both have systems
@@ -474,6 +640,8 @@ class VoiceProfileManager(QMainWindow):
             self.df, npc_name, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
         )
+        # Also update line counts
+        self.line_counts = calculate_line_counts(self.df, self.hierarchy)
 
     def _on_npc_voice_changed(self, npc_name: str, new_voice: str):
         current = self.substitutions.get(npc_name) or ""
