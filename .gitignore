@@ -1,11 +1,81 @@
-output/
-profiles/
-extracted/
-voices_prep/
-weidu/*.tp2
-weidu/export/
-*.log
-*.bak
-generation-memory*.json
-profiles-audit*.json
-strrefs*.json
+# ============================================================
+# .gitignore for Voicebox.tests project
+# ============================================================
+
+# ------------------------------------------------------------
+# Output & Generated Files
+# ------------------------------------------------------------
+# Generated output files
+output/            
+# Extracted content (dlg, cre files)
+extracted/         
+# Prepared voice data
+voices_prep/         
+
+# ------------------------------------------------------------
+# Profile & Configuration Data
+# ------------------------------------------------------------
+# User/profile data (compiled voice samples ready for import)
+profiles/            
+# Profile audit logs
+profiles-audit*.json 
+
+# ------------------------------------------------------------
+# WeiDU Modding Tool Files
+# ------------------------------------------------------------
+# WeiDU mod files
+weidu/*.tp2         
+# WeiDU exported content
+weidu/export/        
+
+# ------------------------------------------------------------
+# Logs & Temporary Files
+# ------------------------------------------------------------
+# All log files
+*.log                
+# Backup files
+*.bak                
+
+# ------------------------------------------------------------
+# Generated Data Files
+# ------------------------------------------------------------
+# Memory/state files from generation
+generation-memory*.json      
+# String reference mappings
+strrefs*.json                
+
+# ------------------------------------------------------------
+# Development Helper Scripts
+# ------------------------------------------------------------
+# Helper script (not needed in repo)
+scan-imports.py      
+
+# ------------------------------------------------------------
+# Python Cache & Virtual Environment
+# ------------------------------------------------------------
+# Python bytecode cache
+__pycache__/         
+# Compiled Python files
+*.pyc                
+# Virtual environment
+.venv/               
+venv/                
+# Package metadata
+*.egg-info/          
+# Build folders
+dist/                
+build/               
+
+# ------------------------------------------------------------
+# IDE & OS Specific
+# ------------------------------------------------------------
+# VS Code settings
+.vscode/             
+# PyCharm/IntelliJ settings
+.idea/               
+# Vim swap files
+*.swp                
+# MacOS folder metadata
+.DS_Store            
+# Windows thumbnail cache
+Thumbs.db            

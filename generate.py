@@ -57,6 +57,25 @@ VOICE_SUBSTITUTIONS = {
     "Harper": "Jaheira",
     "Armored Figure": "Sarevok"
 }
+# NPC name + gender -> Voicebox profile substitution.
+# Format: "npc_name|gender" -> "voice_profile"
+# Gender: "M" or "F"
+VOICE_SUBSTITUTIONS_GENDER = {
+    "Bandit|M": "Bandit male",
+    "Bandit|F": "Bandit female",
+    # Add more as needed
+}
+# System name (CSV column 1) -> Voicebox profile substitution.
+# Format: "sysname" -> "voice_profile"
+VOICE_SUBSTITUTIONS_SYSNAME = {
+    "AEWERE1": "Fighter 1",
+    "AEWERE2": "Fighter 2",
+    "AEWERE3": "Fighter 3",
+    "AEWERE4": "Fighter 4",
+    "AEWERE5": "Fighter 5",
+    "AEWERE6": "Fighter 6",
+    # Add more as needed
+}
 
 # Filter for which lines to process based on the CSV sound filename (column 6).
 FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
@@ -808,9 +827,17 @@ def generate_resref(strref, prefix="TS"):
 #endregion Utility Functions
 
 #region Voice Profile Management
-def get_voice_profile_name(npc_name, gender=None, profile_map=None):
+def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None):
     r"""
     Resolve an NPC name to the corresponding Voicebox profile name.
+    
+    Priority order (highest to lowest):
+    1. System name substitution (VOICE_SUBSTITUTIONS_SYSNAME)
+    2. NPC name + Gender substitution (VOICE_SUBSTITUTIONS_GENDER)
+    3. NPC name only substitution (VOICE_SUBSTITUTIONS)
+    4. NPC name as profile name (if it exists in profile_map)
+    5. Gender-based fallback (if USE_VOICE_FALLBACK is True)
+    6. Neutral/unknown fallback
 
     Uses the VOICE_SUBSTITUTIONS mapping to translate NPC names to specific
     voice profiles. This allows multiple NPCs to share a voice profile or
@@ -822,17 +849,12 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None):
     If voice fallback is enabled and the profile doesn't exist, falls back
     to gender-based voices.
 
-    Priority order:
-    1. Explicit substitution (VOICE_SUBSTITUTIONS)
-    2. NPC name as profile name (if it exists in profile_map)
-    3. Gender-based fallback (if USE_VOICE_FALLBACK is True)
-    4. Neutral/unknown fallback
-
     Args:
         npc_name (str): The name of the NPC as it appears in the CSV data.
             Can be empty for descriptions/lore entries.
         gender (str, optional): Gender from CSV ("M", "F", or empty).
         profile_map (dict, optional): Map of available voice profiles for fallback checking.
+        sysname (str, optional): System name from CSV (column 1).
 
     Returns:
         str: The Voicebox profile name to use for generating speech, or None
@@ -841,22 +863,34 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None):
     Example:
         >>> get_voice_profile_name("Nym Khalazza")
         "BG1 Narrator"
-        >>> get_voice_profile_name("Jaheira", "F")
-        "Jaheira"  # or fallback to FALLBACK_VOICE_FEMALE if not found
+        >>> get_voice_profile_name("Bandit", "M")
+        "Bandit male"
+        >>> get_voice_profile_name("Bandit", "F")
+        "Bandit female"
         >>> get_voice_profile_name("", "M")  # Empty NPC name
         "BG1 Narrator"  # Uses FALLBACK_VOICE_MALE
         >>> get_voice_profile_name("Unknown NPC", "", None)
         "Unknown NPC"  # No fallback, returns the name as-is
     """
-    # 1. Check explicit substitutions first (only if npc_name exists)
+    # 1. Check system name substitution first (highest priority)
+    if sysname and sysname in VOICE_SUBSTITUTIONS_SYSNAME:
+        return VOICE_SUBSTITUTIONS_SYSNAME[sysname]
+    
+    # 2. Check NPC name + gender substitution
+    if npc_name and gender:
+        gender_key = f"{npc_name}|{gender}"
+        if gender_key in VOICE_SUBSTITUTIONS_GENDER:
+            return VOICE_SUBSTITUTIONS_GENDER[gender_key]
+    
+    # 3. Check NPC name only substitution
     if npc_name and npc_name in VOICE_SUBSTITUTIONS:
         return VOICE_SUBSTITUTIONS[npc_name]
     
-    # 2. Check if the NPC name exists as a profile (only if npc_name exists)
+    # 4. Check if the NPC name exists as a profile (only if npc_name exists)
     if npc_name and profile_map is not None and npc_name in profile_map:
         return npc_name
     
-    # 3. Fallback if enabled
+    # 5. Fallback if enabled
     if USE_VOICE_FALLBACK:
         if gender == "M":
             return FALLBACK_VOICE_MALE
@@ -865,7 +899,7 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None):
         else:
             return FALLBACK_VOICE_NEUTRAL
     
-    # 4. No fallback and no valid voice found - return None
+    # 6. No fallback and no valid voice found - return None
     return None 
 
 
@@ -1606,6 +1640,7 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                     continue
                 
                 strref = row[0].strip()
+                sysname = row[1].strip() if len(row) > 1 else ""
                 npc_name = row[2].strip() if len(row) > 2 else ""
                 gender = row[3].strip() if len(row) > 3 else ""
                 csv_filename = row[5].strip() if len(row) > 5 else ""
@@ -1645,8 +1680,8 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                         # CSV filename is empty or invalid - generate one
                         filename = generate_resref(strref, RESREF_PREFIX)
                 
-                # Get voice profile with fallback - pass profile_map for validation
-                voice_name = get_voice_profile_name(npc_name, gender, profile_map)
+                # Get voice profile with fallback
+                voice_name = get_voice_profile_name(npc_name, gender, profile_map, sysname)
 
                 # Use npc_name for stats, or "Descriptions" if empty
                 display_name = npc_name if npc_name else "Descriptions"
@@ -1656,8 +1691,8 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                     npc_stats[display_name] = {
                         "voice_name": voice_name if voice_name else "MISSING",
                         "total": 0,
-                        "done": 0,              # Already generated
-                        "skipped": 0,           # Missing voices
+                        "done": 0,
+                        "skipped": 0,
                         "to_generate": 0,
                         "chars": 0
                     }
@@ -1667,13 +1702,11 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                 
                 # Check if voice is missing
                 if voice_name is None:
-                    # Count as skipped (missing voice)
                     npc_stats[display_name]["skipped"] += 1
                     continue
 
                 # Check if voice_name exists in profile_map
                 if profile_map is not None and voice_name not in profile_map:
-                    # Count as skipped (voice not on server)
                     npc_stats[display_name]["skipped"] += 1
                     continue
                 
@@ -1682,7 +1715,6 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                     npc_stats[display_name]["done"] += 1
                     continue
                 
-                # This row passed all filters - add to generation queue
                 npc_stats[display_name]["to_generate"] += 1
                 
                 # Preprocess text

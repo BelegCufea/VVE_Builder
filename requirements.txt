@@ -1,0 +1,4 @@
+requests
+runstats
+streamlit
+pyperclip
