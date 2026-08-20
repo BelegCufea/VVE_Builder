@@ -1,48 +1,54 @@
 """
-Infinity Engine Voice Sample Auditor
+Infinity Engine Voice Sample Auditor (PySide6 desktop version)
 
-A Streamlit-based application for auditing and managing voice sample files
+A native desktop GUI for auditing and managing voice sample files
 for Infinity Engine game mods. This tool helps organize voice samples by NPC,
-edit their associated text files, and move approved samples to the final
-voices directory.
+edit their associated text files, and move approved samples between the
+preparation directory and the final voices directory.
+
+Features:
+    - Two modes: Review new voices (voices_prep/) and review approved voices (voices/)
+    - NPC list with filtering and skip functionality
+    - Audio playback for WAV files
+    - Text editing for associated .txt files
+    - Move files between directories with a single click
+    - Persistent skip list across sessions
 
 Usage:
-    streamlit run profiles-audit.py
-
-Note: This application must be run using Streamlit. Double-clicking the file
-or using 'py profiles-audit.py' will not work because Streamlit provides
-the necessary web server and UI framework.
+    python profiles-audit.py
 """
 
-import streamlit as st
-from pathlib import Path
+import sys
+import json
 import shutil
 import re
-import json
+import os
+from pathlib import Path
 from typing import Dict, List, Set, Optional
-import pyperclip
+
+from PySide6.QtCore import Qt, QUrl
+from PySide6.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton,
+    QSplitter, QGroupBox, QCheckBox, QTextEdit, QMessageBox, QStatusBar,
+    QScrollArea, QFrame, QGridLayout, QSizePolicy,
+)
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 # ============================================================================
 # Configuration Constants
 # ============================================================================
 
-VOICES_PREP_DIR = "voices_prep"          # Directory containing raw voice samples
+VOICES_PREP_DIR = "voices_prep"          # Directory for raw/unedited voice samples
 VOICES_DIR = "voices"                    # Directory for approved voice samples
-SKIPPED_CONFIG_PATH = "profiles-audit-skipped.json"  # Persistent skip list storage
+SKIPPED_CONFIG_PATH = "profiles-audit-skipped.json"  # Persistent skip list
 
-# Initialize path objects for file operations
-voices_prep_dir = Path(VOICES_PREP_DIR)
-voices_dir = Path(VOICES_DIR)
 
-# ============================================================================
-# Streamlit Page Configuration
-# ============================================================================
+def debug_print(*args, **kwargs):
+    """Print timestamped debug messages to stderr."""
+    timestamp = __import__('time').strftime("%H:%M:%S")
+    print(f"[{timestamp}] DEBUG:", *args, **kwargs, file=sys.stderr)
 
-st.set_page_config(
-    page_title="Infinity Engine Voice Auditor",
-    page_icon="🎙️",
-    layout="wide"
-)
 
 # ============================================================================
 # Persistent Storage Functions
@@ -57,7 +63,8 @@ def load_skipped_npcs() -> Set[str]:
                  Returns an empty set if the file doesn't exist or is corrupted.
     
     The skipped NPCs are stored persistently so that the skip status survives
-    application restarts.
+    application restarts. This allows users to mark NPCs as "skip" during
+    auditing and have that preference remembered.
     """
     path = Path(SKIPPED_CONFIG_PATH)
     if path.exists():
@@ -65,7 +72,6 @@ def load_skipped_npcs() -> Set[str]:
             with open(path, "r", encoding="utf-8") as f:
                 return set(json.load(f))
         except Exception:
-            # If the file is corrupted or unreadable, return an empty set
             return set()
     return set()
 
@@ -78,7 +84,8 @@ def save_skipped_npcs(skipped_set: Set[str]) -> None:
         skipped_set: A set of NPC names to be persisted as skipped.
     
     This function writes the skipped NPC list to a JSON file to maintain
-    state across application sessions.
+    state across application sessions. Called whenever the user toggles
+    the skip checkbox.
     """
     path = Path(SKIPPED_CONFIG_PATH)
     try:
@@ -89,21 +96,15 @@ def save_skipped_npcs(skipped_set: Set[str]) -> None:
 
 
 # ============================================================================
-# Session State Initialization
+# Data Loading Functions
 # ============================================================================
 
-# Initialize session state with skipped NPCs loaded from the JSON file
-if "skipped_npcs" not in st.session_state:
-    st.session_state.skipped_npcs = load_skipped_npcs()
-
-# Initialize session state for mode selection
-if "audit_mode" not in st.session_state:
-    st.session_state.audit_mode = "prep"  # "prep" or "approved"
-
-
-def load_npc_groups() -> Dict[str, List[Dict]]:
+def load_npc_groups(prep_dir: Path) -> Dict[str, List[Dict]]:
     """
     Scan the voices_prep directory and group files by NPC name.
+    
+    Args:
+        prep_dir: Path to the voices_prep directory.
     
     Returns:
         Dict[str, List[Dict]]: A dictionary where:
@@ -125,30 +126,22 @@ def load_npc_groups() -> Dict[str, List[Dict]]:
     """
     npcs = {}
     
-    # Check if the source directory exists
-    if not voices_prep_dir.exists():
+    if not prep_dir.exists():
         return npcs
     
-    # Iterate through all WAV files in the preparation directory
-    for wav_path in voices_prep_dir.glob("*.WAV"):
+    for wav_path in prep_dir.glob("*.WAV"):
         stem = wav_path.stem
-        
-        # Extract NPC name and sample number using regex
-        # Pattern: Capture everything before an optional space and number at the end
         match = re.match(r'^(.*?)(?:\s+(\d+))?$', stem)
         if match:
             npc_name = match.group(1).strip()
             idx = match.group(2)
             sample_num = int(idx) if idx else 1
             
-            # Construct the path to the corresponding TXT file
             txt_path = wav_path.with_suffix('.txt')
             
-            # Initialize the NPC entry if it doesn't exist
             if npc_name not in npcs:
                 npcs[npc_name] = []
             
-            # Add the sample to the NPC's list
             npcs[npc_name].append({
                 "sample_num": sample_num,
                 "wav_path": wav_path,
@@ -156,49 +149,43 @@ def load_npc_groups() -> Dict[str, List[Dict]]:
                 "stem": stem
             })
     
-    # Sort samples by sample number for each NPC
     for npc in npcs:
         npcs[npc].sort(key=lambda x: x["sample_num"])
     
-    # Return a sorted dictionary by NPC name for consistent display
     return dict(sorted(npcs.items()))
 
 
-def load_approved_npc_groups() -> Dict[str, List[Dict]]:
+def load_approved_npc_groups(voices_dir: Path) -> Dict[str, List[Dict]]:
     """
-    Scan the voices directory and group files by NPC name (for already approved voices).
+    Scan the voices directory and group files by NPC name.
+    
+    Args:
+        voices_dir: Path to the voices directory.
     
     Returns:
-        Dict[str, List[Dict]]: Same structure as load_npc_groups() but from VOICES_DIR
+        Dict[str, List[Dict]]: Same structure as load_npc_groups() but from VOICES_DIR.
     
     This is identical to load_npc_groups() but reads from the approved voices directory
-    instead of the preparation directory.
+    instead of the preparation directory. Used in "Review Approved Voices" mode.
     """
     npcs = {}
     
-    # Check if the voices directory exists
     if not voices_dir.exists():
         return npcs
     
-    # Iterate through all WAV files in the voices directory
     for wav_path in voices_dir.glob("*.WAV"):
         stem = wav_path.stem
-        
-        # Extract NPC name and sample number using regex
         match = re.match(r'^(.*?)(?:\s+(\d+))?$', stem)
         if match:
             npc_name = match.group(1).strip()
             idx = match.group(2)
             sample_num = int(idx) if idx else 1
             
-            # Construct the path to the corresponding TXT file
             txt_path = wav_path.with_suffix('.txt')
             
-            # Initialize the NPC entry if it doesn't exist
             if npc_name not in npcs:
                 npcs[npc_name] = []
             
-            # Add the sample to the NPC's list
             npcs[npc_name].append({
                 "sample_num": sample_num,
                 "wav_path": wav_path,
@@ -206,274 +193,690 @@ def load_approved_npc_groups() -> Dict[str, List[Dict]]:
                 "stem": stem
             })
     
-    # Sort samples by sample number for each NPC
     for npc in npcs:
         npcs[npc].sort(key=lambda x: x["sample_num"])
     
-    # Return a sorted dictionary by NPC name for consistent display
     return dict(sorted(npcs.items()))
 
 
 # ============================================================================
-# Main Application Logic
+# Main Application Window
 # ============================================================================
 
-# Load NPC data based on current mode
-if st.session_state.audit_mode == "prep":
-    npcs = load_npc_groups()
-    mode_icon = "📝"
-    mode_title = "Review New Voices"
-else:
-    npcs = load_approved_npc_groups()
-    mode_icon = "🔍"
-    mode_title = "Review Approved Voices"
-
-total_npcs_count = len(npcs)
-
-# --- SIDEBAR: Overview, Filters & Mode ---
-st.sidebar.header("📊 Overview & Filters")
-
-# Mode selection
-st.sidebar.markdown("### 🔄 Mode")
-current_mode = st.sidebar.radio(
-    "Select mode:",
-    options=["📝 Review New Voices", "🔍 Review Approved Voices"],
-    index=0 if st.session_state.audit_mode == "prep" else 1,
-    label_visibility="collapsed"
-)
-
-# Update mode based on selection
-new_mode = "prep" if "📝" in current_mode else "approved"
-if new_mode != st.session_state.audit_mode:
-    st.session_state.audit_mode = new_mode
-    st.rerun()
-
-# Display current mode status
-if st.session_state.audit_mode == "prep":
-    st.sidebar.info("🔄 New voices from `voices_prep/`")
-else:
-    st.sidebar.info("🔄 Approved voices from `voices/`")
-
-st.sidebar.markdown("---")
-
-# Statistics - compact display
-col1, col2 = st.sidebar.columns(2)
-with col1:
-    st.metric("Total", total_npcs_count)
-with col2:
-    if st.session_state.audit_mode == "prep":
-        skipped_count = len(st.session_state.skipped_npcs)
-        st.metric("Skipped", skipped_count)
-
-# ============================================================================
-# MAIN AREA - Split Layout (NPC List | Samples)
-# ============================================================================
-
-# Title
-if st.session_state.audit_mode == "prep":
-    st.title("📝 Infinity Engine Voice Auditor - Review New Voices")
-else:
-    st.title("🔍 Infinity Engine Voice Auditor - Review Approved Voices")
-
-# Create two columns: left for NPC list (30%), right for samples (70%)
-left_col, right_col = st.columns([0.2, 0.8], gap="medium")
-
-# ============================================================================
-# LEFT COLUMN: NPC List
-# ============================================================================
-
-with left_col:
-    # Title row with checkbox
-    title_col, checkbox_col = st.columns([2, 1])
-    with title_col:
-        st.markdown("#### 📋 NPC List")
-    with checkbox_col:
-        hide_skipped = st.checkbox("Hide Skipped", value=True, key="hide_skipped_main")
+class VoiceAuditor(QMainWindow):
+    """
+    Main window for the Infinity Engine Voice Sample Auditor.
     
-    # Search/filter input
-    search_term = st.text_input("🔍 Filter NPCs", placeholder="Type to filter...", key="npc_search")    
-    # Filter visible NPCs based on skip status and search
-    visible_npcs = {}
-    for name, samples in npcs.items():
-        is_skipped = name in st.session_state.skipped_npcs
+    This class manages the entire application UI and logic, including:
+        - NPC list with filtering and search
+        - Sample viewing, editing, and audio playback
+        - File movement between preparation and approval directories
+        - Mode switching between reviewing new and approved voices
+    
+    The UI is split into two panels:
+        - Left: NPC list with stats, search, and filtering
+        - Right: Sample details with text editor and audio controls
+    """
+    
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("🎙️ Infinity Engine Voice Auditor")
+        self.resize(1400, 900)
+
+        # Initialize application state
+        self.skipped_npcs: Set[str] = load_skipped_npcs()
+        self.audit_mode = "prep"  # "prep" or "approved"
+        self.selected_npc: Optional[str] = None
+        self.npcs: Dict[str, List[Dict]] = {}
+        self.visible_npcs: Dict[str, List[Dict]] = {}
         
-        # Apply hide skipped filter
-        if hide_skipped and is_skipped:
-            continue
+        # Set up audio player with explicit audio output
+        self.audio_output = QAudioOutput()
+        self.media_player = QMediaPlayer()
+        self.media_player.setAudioOutput(self.audio_output)
         
-        # Apply search filter
-        if search_term and search_term.lower() not in name.lower():
-            continue
-            
-        visible_npcs[name] = samples
+        # Build UI and load initial data
+        self._build_ui()
+        self._load_data()
+        self._update_stats()
     
-    visible_npcs_count = len(visible_npcs)
+    # ------------------------------------------------------------------
+    # UI Construction
+    # ------------------------------------------------------------------
     
-    # Show count of visible NPCs
-    st.caption(f"Showing {visible_npcs_count} of {total_npcs_count} NPCs")
-    
-    if not visible_npcs:
-        st.info("No NPCs match your filters.")
-        st.stop()
-    
-    # Build display labels with icons
-    npc_labels = {}
-    for name in visible_npcs.keys():
-        is_skipped = name in st.session_state.skipped_npcs
-        icon = "⏭️ " if is_skipped else "👤 "
-        npc_labels[f"{icon}{name}"] = name
-    
-    # Manage selection state
-    if "selected_npc" not in st.session_state or st.session_state.selected_npc not in visible_npcs:
-        st.session_state.selected_npc = list(visible_npcs.keys())[0]
-    
-    # Find the index of the currently selected NPC
-    npc_list = list(npc_labels.keys())
-    default_index = 0
-    if st.session_state.selected_npc in list(visible_npcs.keys()):
-        # Find the label that corresponds to the selected NPC
-        for i, label in enumerate(npc_list):
-            if npc_labels[label] == st.session_state.selected_npc:
-                default_index = i
-                break
-    
-    # Create the radio button list for NPC selection
-    selected_label = st.radio(
-        "Select NPC:",
-        options=npc_list,
-        index=default_index,
-        label_visibility="collapsed",
-        key="npc_radio"
-    )
-    
-    selected_npc = npc_labels.get(selected_label)
-    st.session_state.selected_npc = selected_npc
-
-# ============================================================================
-# RIGHT COLUMN: Sample Editor
-# ============================================================================
-
-with right_col:
-    # Check if an NPC is selected
-    if not selected_npc:
-        st.info("ℹ️ No NPC selected.")
-        st.stop()
-    
-    # Get the samples for the selected NPC
-    samples = visible_npcs[selected_npc]
-    is_skipped = selected_npc in st.session_state.skipped_npcs
-    
-    # Header with NPC info and actions
-    with st.container(border=True):
-        col_title, col_copy, col_skip = st.columns([3, 1, 1])
+    def _build_ui(self):
+        """
+        Build the main application UI.
         
-        with col_title:
-            if st.session_state.audit_mode == "prep":
-                st.subheader(f"📝 {selected_npc}")
-            else:
-                st.subheader(f"🔍 {selected_npc}")
-            st.caption(f"Total samples: {len(samples)}")
+        Creates a split layout with:
+            - Left panel: Mode selector, stats, search, and NPC list
+            - Right panel: NPC header, sample editor, and action buttons
         
-        with col_copy:
-            # Copy NPC name to clipboard button
-            if st.button("📋 Copy Name", key=f"copy_{selected_npc}", use_container_width=True):
-                pyperclip.copy(selected_npc)
-                st.toast(f"Copied '{selected_npc}' to clipboard!", icon="✅")
+        The layout uses QSplitter to allow the user to resize panels.
+        """
+        central = QWidget()
+        self.setCentralWidget(central)
+        main_layout = QHBoxLayout(central)
         
-        with col_skip:
-            # Skip checkbox that persists the skip status (only in prep mode)
-            if st.session_state.audit_mode == "prep":
-                skip_status = st.checkbox("Skip this NPC", value=is_skipped, key=f"skip_{selected_npc}")
-                
-                # Handle skip status changes
-                if skip_status and selected_npc not in st.session_state.skipped_npcs:
-                    st.session_state.skipped_npcs.add(selected_npc)
-                    save_skipped_npcs(st.session_state.skipped_npcs)
-                    st.rerun()
-                elif not skip_status and selected_npc in st.session_state.skipped_npcs:
-                    st.session_state.skipped_npcs.remove(selected_npc)
-                    save_skipped_npcs(st.session_state.skipped_npcs)
-                    st.rerun()
-    
-    # Sample list
-    st.markdown("### Samples")
-    
-    # Loop through each sample for the selected NPC
-    for i, sample in enumerate(samples):
-        st.markdown(f"**Sample #{sample['sample_num']}** (`{sample['stem']}`)")
+        # Main splitter for resizable panels
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_layout.addWidget(splitter)
         
-        # Read existing text content
-        text_content = ""
-        if sample['txt_path'].exists():
-            text_content = sample['txt_path'].read_text(encoding='utf-8')
+        # ---------- LEFT PANEL: NPC List ----------
+        left_widget = QWidget()
+        left_layout = QVBoxLayout(left_widget)
         
-        # Text input area for editing the sample's text
-        new_text = st.text_area(
-            f"Edit text for {sample['stem']}",
-            value=text_content,
-            key=f"text_{selected_npc}_{i}",
-            height=110
+        # Mode selection buttons (mutually exclusive)
+        mode_group = QGroupBox("🔄 Mode")
+        mode_layout = QHBoxLayout(mode_group)
+        
+        self.prep_btn = QPushButton("📝 Review New Voices")
+        self.prep_btn.setCheckable(True)
+        self.prep_btn.setChecked(True)
+        self.prep_btn.clicked.connect(lambda: self._switch_mode("prep"))
+        
+        self.approved_btn = QPushButton("🔍 Review Approved Voices")
+        self.approved_btn.setCheckable(True)
+        self.approved_btn.clicked.connect(lambda: self._switch_mode("approved"))
+        
+        mode_layout.addWidget(self.prep_btn)
+        mode_layout.addWidget(self.approved_btn)
+        left_layout.addWidget(mode_group)
+        
+        # Statistics display
+        stats_group = QGroupBox("📊 Stats")
+        stats_layout = QGridLayout(stats_group)
+        
+        self.total_label = QLabel("0")
+        self.visible_label = QLabel("0")
+        self.skipped_label = QLabel("0")
+        
+        stats_layout.addWidget(QLabel("Total:"), 0, 0)
+        stats_layout.addWidget(self.total_label, 0, 1)
+        stats_layout.addWidget(QLabel("Visible:"), 1, 0)
+        stats_layout.addWidget(self.visible_label, 1, 1)
+        stats_layout.addWidget(QLabel("Skipped:"), 2, 0)
+        stats_layout.addWidget(self.skipped_label, 2, 1)
+        
+        left_layout.addWidget(stats_group)
+        
+        # NPC list header with "Hide Skipped" checkbox
+        list_header = QHBoxLayout()
+        list_header.addWidget(QLabel("📋 NPC List"))
+        
+        self.hide_skipped_cb = QCheckBox("Hide Skipped")
+        self.hide_skipped_cb.setChecked(True)
+        self.hide_skipped_cb.stateChanged.connect(self._on_filter_changed)
+        list_header.addWidget(self.hide_skipped_cb)
+        
+        left_layout.addLayout(list_header)
+        
+        # Search input
+        self.search_box = QLineEdit()
+        self.search_box.setPlaceholderText("🔍 Filter NPCs...")
+        self.search_box.textChanged.connect(self._on_filter_changed)
+        left_layout.addWidget(self.search_box)
+        
+        # NPC count indicator
+        self.npc_count_label = QLabel("Showing 0 of 0 NPCs")
+        left_layout.addWidget(self.npc_count_label)
+        
+        # NPC list widget
+        self.npc_list = QListWidget()
+        self.npc_list.currentItemChanged.connect(self._on_npc_selected)
+        left_layout.addWidget(self.npc_list, stretch=1)
+        
+        splitter.addWidget(left_widget)
+        
+        # ---------- RIGHT PANEL: Sample Editor ----------
+        right_widget = QWidget()
+        right_layout = QVBoxLayout(right_widget)
+        
+        # Header with NPC name and action buttons
+        self.header_frame = QFrame()
+        self.header_frame.setFrameShape(QFrame.Shape.StyledPanel)
+        header_layout = QHBoxLayout(self.header_frame)
+        
+        self.npc_title = QLabel("<h2>Select an NPC</h2>")
+        header_layout.addWidget(self.npc_title, stretch=1)
+        
+        self.copy_btn = QPushButton("📋 Copy Name")
+        self.copy_btn.clicked.connect(self._copy_name)
+        self.copy_btn.setEnabled(False)
+        header_layout.addWidget(self.copy_btn)
+        
+        self.skip_cb = QCheckBox("Skip this NPC")
+        self.skip_cb.stateChanged.connect(self._on_skip_toggled)
+        self.skip_cb.setEnabled(False)
+        header_layout.addWidget(self.skip_cb)
+        
+        right_layout.addWidget(self.header_frame)
+        
+        # Samples area (scrollable)
+        self.samples_scroll = QScrollArea()
+        self.samples_scroll.setWidgetResizable(True)
+        self.samples_content = QWidget()
+        # Prevent the content widget from stretching vertically
+        self.samples_content.setSizePolicy(
+            QSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
         )
+        self.samples_layout = QVBoxLayout(self.samples_content)
+        self.samples_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        self.samples_layout.setSpacing(4)
+        self.samples_layout.setContentsMargins(0, 0, 0, 0)
+        self.samples_scroll.setWidget(self.samples_content)
+        right_layout.addWidget(self.samples_scroll, stretch=1)
         
-        # Save the text if it was modified
-        if new_text != text_content:
-            sample['txt_path'].write_text(new_text, encoding='utf-8')
+        # Action buttons (Approve/Unapprove)
+        action_layout = QHBoxLayout()
+        self.approve_btn = QPushButton("✅ Approve & Move to Voices")
+        self.approve_btn.setEnabled(False)
+        self.approve_btn.clicked.connect(self._approve_samples)
+        action_layout.addWidget(self.approve_btn)
+        action_layout.addStretch()
+        right_layout.addLayout(action_layout)
         
-        # Audio player for the WAV file
-        if sample['wav_path'].exists():
-            st.audio(str(sample['wav_path']))
+        splitter.addWidget(right_widget)
+        splitter.setSizes([400, 1000])
+        
+        # Status bar for user feedback
+        self.setStatusBar(QStatusBar())
+        self.statusBar().showMessage("Ready", 3000)
+        
+        # Connect audio error handler
+        self.media_player.errorOccurred.connect(self._on_audio_error)
+    
+    # ------------------------------------------------------------------
+    # Data Loading and Filtering
+    # ------------------------------------------------------------------
+    
+    def _load_data(self):
+        """
+        Load NPC data based on the current audit mode.
+        
+        Uses load_npc_groups() for "prep" mode or load_approved_npc_groups()
+        for "approved" mode. After loading, applies filters, populates the
+        list, and updates statistics.
+        """
+        prep_dir = Path(VOICES_PREP_DIR)
+        voices_dir = Path(VOICES_DIR)
+        
+        if self.audit_mode == "prep":
+            self.npcs = load_npc_groups(prep_dir)
         else:
-            st.error(f"Audio file missing: {sample['wav_path'].name}")
+            self.npcs = load_approved_npc_groups(voices_dir)
         
-        # Add a separator between samples except after the last one
-        if i < len(samples) - 1:
-            st.markdown("---")
-    
-    st.markdown("---")
-    
-    # --- Action Buttons ---
-    col_approve, col_pad = st.columns([1, 3])
-    
-    with col_approve:
-        # Different button behavior based on mode
-        if st.session_state.audit_mode == "prep":
-            # Approve button for new voices - move to voices directory
-            if st.button("✅ Approve & Move to Voices", type="primary", use_container_width=True):
-                # Create the destination directory if it doesn't exist
-                voices_dir.mkdir(parents=True, exist_ok=True)
-                
-                moved_count = 0
-                
-                # Move all files for this NPC to the voices directory
-                for sample in samples:
-                    if sample['wav_path'].exists():
-                        shutil.move(str(sample['wav_path']), str(voices_dir / sample['wav_path'].name))
-                    if sample['txt_path'].exists():
-                        shutil.move(str(sample['txt_path']), str(voices_dir / sample['txt_path'].name))
-                    moved_count += 1
-                
-                # If the NPC was skipped, remove it from the skipped list after approval
-                if selected_npc in st.session_state.skipped_npcs:
-                    st.session_state.skipped_npcs.remove(selected_npc)
-                    save_skipped_npcs(st.session_state.skipped_npcs)
-                
-                st.success(f"Successfully moved {moved_count} files for `{selected_npc}` to `{voices_dir}`!")
-                st.rerun()
+        self._apply_filters()
+        self._populate_npc_list()
+        self._update_stats()
+        
+        # Auto-select first NPC if available
+        if self.npc_list.count() > 0:
+            self.npc_list.setCurrentRow(0)
         else:
-            # Unapprove button for approved voices - move back to prep directory
-            if st.button("↩️ Unapprove & Move Back", type="primary", use_container_width=True):
-                # Create the prep directory if it doesn't exist
-                voices_prep_dir.mkdir(parents=True, exist_ok=True)
-                
-                moved_count = 0
-                
-                # Move all files for this NPC back to the prep directory
-                for sample in samples:
-                    if sample['wav_path'].exists():
-                        shutil.move(str(sample['wav_path']), str(voices_prep_dir / sample['wav_path'].name))
-                    if sample['txt_path'].exists():
-                        shutil.move(str(sample['txt_path']), str(voices_prep_dir / sample['txt_path'].name))
-                    moved_count += 1
-                
-                st.success(f"Successfully moved {moved_count} files for `{selected_npc}` back to `{voices_prep_dir}`!")
-                st.rerun()
+            self.selected_npc = None
+            self._clear_samples()
+            self.npc_title.setText("<h2>No NPCs found</h2>")
+    
+    def _apply_filters(self):
+        """
+        Apply hide skipped and search filters to the NPC list.
+        
+        Filters NPCs based on:
+            1. Skip status (if "Hide Skipped" is checked)
+            2. Search term (case-insensitive substring match)
+        
+        The filtered result is stored in self.visible_npcs.
+        """
+        search_term = self.search_box.text().strip().lower()
+        hide_skipped = self.hide_skipped_cb.isChecked()
+        
+        self.visible_npcs = {}
+        for name, samples in self.npcs.items():
+            is_skipped = name in self.skipped_npcs
+            
+            if hide_skipped and is_skipped:
+                continue
+            
+            if search_term and search_term not in name.lower():
+                continue
+            
+            self.visible_npcs[name] = samples
+    
+    def _populate_npc_list(self):
+        """
+        Populate the NPC list widget with filtered items.
+        
+        Adds icons to indicate skip status:
+            - 👤: Normal NPC
+            - ⏭️: Skipped NPC
+        
+        Each item stores the NPC name as user data for selection handling.
+        """
+        self.npc_list.blockSignals(True)
+        self.npc_list.clear()
+        
+        for name in sorted(self.visible_npcs.keys()):
+            is_skipped = name in self.skipped_npcs
+            icon = "⏭️ " if is_skipped else "👤 "
+            item = QListWidgetItem(f"{icon}{name}")
+            item.setData(Qt.ItemDataRole.UserRole, name)
+            self.npc_list.addItem(item)
+        
+        self.npc_list.blockSignals(False)
+        total = len(self.npcs)
+        visible = len(self.visible_npcs)
+        self.npc_count_label.setText(f"Showing {visible} of {total} NPCs")
+    
+    def _update_stats(self):
+        """Update the statistics display in the sidebar."""
+        self.total_label.setText(str(len(self.npcs)))
+        self.visible_label.setText(str(len(self.visible_npcs)))
+        self.skipped_label.setText(str(len(self.skipped_npcs)))
+    
+    # ------------------------------------------------------------------
+    # Filter and Mode Handlers
+    # ------------------------------------------------------------------
+    
+    def _on_filter_changed(self):
+        """
+        Handle changes to search text or hide skipped checkbox.
+        
+        Re-applies filters, updates the list, and adjusts selection
+        if the currently selected NPC is no longer visible.
+        """
+        self._apply_filters()
+        self._populate_npc_list()
+        self._update_stats()
+        
+        # If selected NPC is no longer visible, clear selection
+        if self.selected_npc and self.selected_npc not in self.visible_npcs:
+            self.selected_npc = None
+            self._clear_samples()
+            self.npc_title.setText("<h2>Select an NPC</h2>")
+            self.copy_btn.setEnabled(False)
+            self.skip_cb.setEnabled(False)
+            self.skip_cb.blockSignals(True)
+            self.skip_cb.setChecked(False)
+            self.skip_cb.blockSignals(False)
+            self.approve_btn.setEnabled(False)
+        
+        # Auto-select first available NPC if nothing is selected
+        if self.npc_list.count() > 0 and not self.selected_npc:
+            self.npc_list.setCurrentRow(0)
+    
+    def _switch_mode(self, mode: str):
+        """
+        Switch between "prep" and "approved" audit modes.
+        
+        Args:
+            mode: Either "prep" or "approved"
+        
+        Updates button states, reloads data, and refreshes the UI.
+        """
+        if mode == self.audit_mode:
+            return
+        
+        self.audit_mode = mode
+        
+        # Update button states
+        self.prep_btn.setChecked(mode == "prep")
+        self.approved_btn.setChecked(mode == "approved")
+        
+        self._load_data()
+        self.statusBar().showMessage(f"Switched to {mode} mode", 3000)
+    
+    # ------------------------------------------------------------------
+    # NPC Selection Handling
+    # ------------------------------------------------------------------
+    
+    def _on_npc_selected(self, current: QListWidgetItem, previous):
+        """
+        Handle NPC selection from the list.
+        
+        Args:
+            current: The newly selected list item
+            previous: The previously selected list item (unused)
+        """
+        if current is None:
+            return
+        
+        self.selected_npc = current.data(Qt.ItemDataRole.UserRole)
+        self._render_samples()
+    
+    def _render_samples(self):
+        """
+        Render the sample list for the currently selected NPC.
+        
+        Displays:
+            - Sample count header
+            - For each sample:
+                - Sample number and filename
+                - Text editor for the .txt file
+                - Play button for audio playback
+        
+        The layout is compact with minimal spacing between elements.
+        """
+        if not self.selected_npc or self.selected_npc not in self.visible_npcs:
+            return
+        
+        samples = self.visible_npcs[self.selected_npc]
+        is_skipped = self.selected_npc in self.skipped_npcs
+        
+        # Update header with NPC name
+        if self.audit_mode == "prep":
+            self.npc_title.setText(f"<h2>📝 {self.selected_npc}</h2>")
+        else:
+            self.npc_title.setText(f"<h2>🔍 {self.selected_npc}</h2>")
+        
+        # Enable action buttons
+        self.copy_btn.setEnabled(True)
+        self.skip_cb.setEnabled(True)
+        self.skip_cb.blockSignals(True)
+        self.skip_cb.setChecked(is_skipped)
+        self.skip_cb.blockSignals(False)
+        
+        # Update approve button text based on mode
+        if self.audit_mode == "prep":
+            self.approve_btn.setText("✅ Approve & Move to Voices")
+        else:
+            self.approve_btn.setText("↩️ Unapprove & Move Back")
+        self.approve_btn.setEnabled(True)
+        
+        # Clear and rebuild samples layout
+        self._clear_layout(self.samples_layout)
+        
+        # Ensure compact spacing
+        self.samples_layout.setSpacing(4)
+        self.samples_layout.setContentsMargins(0, 0, 0, 0)
+        self.samples_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+        
+        # Sample count header
+        header_label = QLabel(f"<b>Total samples: {len(samples)}</b>")
+        header_label.setStyleSheet("margin-bottom: 2px;")
+        self.samples_layout.addWidget(header_label)
+        
+        # Render each sample
+        for i, sample in enumerate(samples):
+            # Sample header with number and filename
+            header = QLabel(f"<b>Sample #{sample['sample_num']}</b>  (<code>{sample['stem']}</code>)")
+            header.setStyleSheet("margin-top: 2px;")
+            self.samples_layout.addWidget(header)
+            
+            # Text editor for the sample's .txt file
+            text_content = ""
+            if sample['txt_path'].exists():
+                try:
+                    text_content = sample['txt_path'].read_text(encoding='utf-8')
+                except:
+                    pass
+            
+            text_edit = QTextEdit()
+            text_edit.setPlainText(text_content)
+            text_edit.setMaximumHeight(60)
+            text_edit.setStyleSheet("""
+                QTextEdit {
+                    border: 1px solid palette(mid);
+                    border-radius: 3px;
+                    padding: 4px;
+                    font-size: 12px;
+                }
+            """)
+            text_edit.textChanged.connect(
+                lambda: self._save_text(sample, text_edit)
+            )
+            self.samples_layout.addWidget(text_edit)
+            
+            # Audio play button
+            if sample['wav_path'].exists():
+                play_btn = QPushButton("▶️ Play")
+                play_btn.setStyleSheet("""
+                    QPushButton {
+                        border: 1px solid palette(mid);
+                        border-radius: 3px;
+                        padding: 2px 12px;
+                        font-size: 11px;
+                    }
+                    QPushButton:hover {
+                        background-color: palette(highlight);
+                        color: palette(highlighted-text);
+                    }
+                """)
+                play_btn.clicked.connect(
+                    lambda checked, wav_path=sample['wav_path']: self._play_audio(wav_path)
+                )
+                self.samples_layout.addWidget(play_btn)
+            else:
+                missing = QLabel("⚠️ Audio file missing")
+                missing.setStyleSheet("color: #ff6b6b; font-size: 11px;")
+                self.samples_layout.addWidget(missing)
+            
+            # Separator between samples
+            if i < len(samples) - 1:
+                line = QFrame()
+                line.setFrameShape(QFrame.Shape.HLine)
+                line.setStyleSheet("color: palette(mid); margin: 2px 0;")
+                self.samples_layout.addWidget(line)
+    
+    def _clear_layout(self, layout):
+        """
+        Recursively clear all widgets from a layout.
+        
+        Args:
+            layout: The QLayout to clear
+        
+        This is used when rebuilding the samples panel to remove all
+        old widgets before adding new ones.
+        """
+        while layout.count():
+            item = layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+            else:
+                sub_layout = item.layout()
+                if sub_layout is not None:
+                    self._clear_layout(sub_layout)
+    
+    def _clear_samples(self):
+        """Clear the samples panel and show a placeholder message."""
+        self._clear_layout(self.samples_layout)
+        self.samples_layout.addWidget(QLabel("No samples to display."))
+    
+    def _save_text(self, sample: Dict, text_edit: QTextEdit):
+        """
+        Save text content to the .txt file when it changes.
+        
+        Args:
+            sample: The sample dictionary containing txt_path
+            text_edit: The QTextEdit widget with the new text
+        
+        Only saves if the text has actually changed, to avoid unnecessary
+        file writes and status bar spam.
+        """
+        new_text = text_edit.toPlainText()
+        try:
+            existing = ""
+            if sample['txt_path'].exists():
+                existing = sample['txt_path'].read_text(encoding='utf-8')
+            
+            if new_text != existing:
+                sample['txt_path'].write_text(new_text, encoding='utf-8')
+                self.statusBar().showMessage(f"💾 Saved text for {sample['stem']}", 2000)
+        except Exception as e:
+            debug_print(f"Error saving text: {e}")
+    
+    # ------------------------------------------------------------------
+    # Audio Playback
+    # ------------------------------------------------------------------
+    
+    def _play_audio(self, wav_path: Path):
+        """
+        Play a WAV file using Qt's multimedia system.
+        
+        Args:
+            wav_path: Path to the WAV file to play
+        
+        Stops any currently playing audio before starting the new file.
+        Volume is set to 70% for comfortable listening.
+        """
+        if not wav_path.exists():
+            return
+        
+        # Stop any current playback
+        self.media_player.stop()
+        
+        # Set volume to 70%
+        self.audio_output.setVolume(0.7)
+        
+        # Play the file
+        url = QUrl.fromLocalFile(str(wav_path.absolute()))
+        self.media_player.setSource(url)
+        self.media_player.play()
+        
+        self.statusBar().showMessage(f"🔊 Playing: {wav_path.name}", 3000)
+    
+    def _on_audio_error(self, error):
+        """
+        Handle audio playback errors.
+        
+        Args:
+            error: The error code from QMediaPlayer
+        
+        Uses numeric error codes for compatibility across Qt versions.
+        Shows a user-friendly message in the status bar.
+        """
+        error_messages = {
+            0: "No error",
+            1: "Resource error (file not found or inaccessible)",
+            2: "Format error (unsupported audio format)",
+            3: "Network error",
+            4: "Access denied",
+            5: "Service missing (media service not available)"
+        }
+        msg = error_messages.get(error, f"Unknown error code: {error}")
+        self.statusBar().showMessage(f"⚠️ Audio error: {msg}", 5000)
+        debug_print(f"Audio error: {msg}")
+    
+    # ------------------------------------------------------------------
+    # Action Handlers
+    # ------------------------------------------------------------------
+    
+    def _copy_name(self):
+        """
+        Copy the selected NPC name to the system clipboard.
+        
+        Used for quickly pasting NPC names into other tools or documents.
+        """
+        if self.selected_npc:
+            QApplication.clipboard().setText(self.selected_npc)
+            self.statusBar().showMessage(f"📋 Copied '{self.selected_npc}' to clipboard!", 3000)
+    
+    def _on_skip_toggled(self, state):
+        """
+        Handle the "Skip this NPC" checkbox toggle.
+        
+        Args:
+            state: Qt.CheckState.Checked or Qt.CheckState.Unchecked
+        
+        Adds or removes the NPC from the skipped set and saves to disk.
+        Updates the list icon and statistics immediately.
+        """
+        if not self.selected_npc:
+            return
+        
+        is_skipped = state == Qt.CheckState.Checked.value
+        
+        if is_skipped and self.selected_npc not in self.skipped_npcs:
+            self.skipped_npcs.add(self.selected_npc)
+            save_skipped_npcs(self.skipped_npcs)
+            self._apply_filters()
+            self._populate_npc_list()
+            self._update_stats()
+            self.statusBar().showMessage(f"⏭️ Skipped {self.selected_npc}", 3000)
+        elif not is_skipped and self.selected_npc in self.skipped_npcs:
+            self.skipped_npcs.remove(self.selected_npc)
+            save_skipped_npcs(self.skipped_npcs)
+            self._apply_filters()
+            self._populate_npc_list()
+            self._update_stats()
+            self.statusBar().showMessage(f"✅ Unskipped {self.selected_npc}", 3000)
+    
+    def _approve_samples(self):
+        """
+        Approve or unapprove the selected NPC's samples.
+        
+        In "prep" mode: Moves files from voices_prep/ to voices/
+        In "approved" mode: Moves files from voices/ to voices_prep/
+        
+        After moving, refreshes the data and selects the first NPC.
+        """
+        if not self.selected_npc:
+            return
+        
+        samples = self.visible_npcs[self.selected_npc]
+        prep_dir = Path(VOICES_PREP_DIR)
+        voices_dir = Path(VOICES_DIR)
+        
+        if self.audit_mode == "prep":
+            # Move from prep to voices (approve)
+            voices_dir.mkdir(parents=True, exist_ok=True)
+            moved_count = 0
+            
+            for sample in samples:
+                if sample['wav_path'].exists():
+                    shutil.move(str(sample['wav_path']), str(voices_dir / sample['wav_path'].name))
+                if sample['txt_path'].exists():
+                    shutil.move(str(sample['txt_path']), str(voices_dir / sample['txt_path'].name))
+                moved_count += 1
+            
+            # Remove from skipped if present (approved files shouldn't be skipped)
+            if self.selected_npc in self.skipped_npcs:
+                self.skipped_npcs.remove(self.selected_npc)
+                save_skipped_npcs(self.skipped_npcs)
+            
+            self.statusBar().showMessage(f"✅ Moved {moved_count} files to {VOICES_DIR}/", 5000)
+        else:
+            # Move back from voices to prep (unapprove)
+            prep_dir.mkdir(parents=True, exist_ok=True)
+            moved_count = 0
+            
+            for sample in samples:
+                if sample['wav_path'].exists():
+                    shutil.move(str(sample['wav_path']), str(prep_dir / sample['wav_path'].name))
+                if sample['txt_path'].exists():
+                    shutil.move(str(sample['txt_path']), str(prep_dir / sample['txt_path'].name))
+                moved_count += 1
+            
+            self.statusBar().showMessage(f"↩️ Moved {moved_count} files back to {VOICES_PREP_DIR}/", 5000)
+        
+        # Refresh data and select first NPC
+        self._load_data()
+        self._update_stats()
+        
+        if self.npc_list.count() > 0:
+            self.npc_list.setCurrentRow(0)
+
+
+# ============================================================================
+# Application Entry Point
+# ============================================================================
+
+def main():
+    """
+    Application entry point.
+    
+    Sets up environment variables to suppress Qt multimedia debug messages,
+    creates the QApplication, and launches the main window.
+    """
+    # Suppress Qt multimedia debug messages (reduces console noise)
+    os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.multimedia.*=false"
+    
+    app = QApplication(sys.argv)
+    window = VoiceAuditor()
+    window.show()
+    sys.exit(app.exec())
+
+
+if __name__ == "__main__":
+    main()

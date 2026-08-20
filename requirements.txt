@@ -1,6 +1,4 @@
 requests
 runstats
-streamlit>=1.30
-pyperclip
 pandas>=2.0
 PySide6>=6.5
