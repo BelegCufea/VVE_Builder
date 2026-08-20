@@ -31,6 +31,10 @@ TIMEOUT_MAX_SECONDS = 600              # Hard maximum: 10 minutes (600 seconds)
 TIMEOUT_MULTIPLIER = 3.0               # Cancel if actual time > estimated * multiplier
 TIMEOUT_MIN_ESTIMATES = 10             # Minimum jobs before using estimated time
 
+# Retry Configuration
+RETRY_COUNT = 3                       # Number of retry attempts for failed generations (0 = no retry)
+RETRY_DELAY = 5.0                     # Delay in seconds between retries
+
 # Audio Conversion Configuration
 CONVERT_TO_OGG = True                  # convert WAV to Ogg Vorbis after download
 OGG_QUALITY = 4                        # libvorbis quality
@@ -494,7 +498,7 @@ def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_dur
     logging.log(logging.INFO if success else logging.WARNING, line)
 
 
-def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats):
+def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, retry_stats=None):
     """
     Log the final summary after all generation jobs complete.
     
@@ -504,6 +508,7 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
         - Average time per character
         - Already generated files (detailed if COMPACT_SUMMARY is False)
         - Missing voices (detailed if COMPACT_SUMMARY is False)
+        - Retry statistics (if retry_stats is provided)
         - Completion timestamp
     
     Args:
@@ -511,6 +516,7 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
         total_chars_processed (int): Total characters processed.
         avg_time_per_char (float): Average generation time per character.
         npc_stats (dict): Statistics dictionary per NPC.
+        retry_stats (dict, optional): Retry statistics from the generation run.
     
     Note:
         The summary is logged at INFO level. When COMPACT_SUMMARY is True,
@@ -565,6 +571,25 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
             # Full mode: show all details
             skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
             lines.append(f"Skipped missing voices: {total_skipped:,} ({skipped_details})")
+
+    # Add retry statistics if provided
+    if retry_stats:
+        lines.append("")
+        lines.append("-" * 70)
+        lines.append("RETRY STATISTICS")
+        lines.append(f"Total retry attempts: {retry_stats.get('failed_attempts', 0)}")
+        lines.append(f"Successful retries:   {retry_stats.get('successful_retries', 0)}")
+        lines.append(f"Failed tasks:         {retry_stats.get('failed_tasks', 0)}")
+        
+        # Add failed task details
+        failed_tasks = retry_stats.get('failed_task_details', [])
+        if failed_tasks:
+            lines.append("")
+            lines.append("Failed tasks:")
+            for task in failed_tasks:
+                lines.append(f"  [{task['idx']}] {task['strref']}/{task['filename']} - {task['npc_name']}")
+
+        lines.append("")
 
     lines.append(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 70)
@@ -1819,15 +1844,19 @@ def timeout_monitor(stop_event, gen_id, timeout_sec, idx, start_time):
 
 
 def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filename, text,
-                           profile_id, regressor, generation_memory, overall_line):
+                           profile_id, regressor, generation_memory, overall_line,
+                           retry_count=0, retry_delay=0.0):
     """
-    Execute a single TTS generation job.
+    Execute a single TTS generation job with optional retry on failure.
 
     Handles the complete lifecycle of one generation: submitting the request,
     waiting for completion, downloading the audio, and converting to Ogg Vorbis.
 
     The progress_worker keeps the job progress line and the Overall line
     (passed in as overall_line) visible, with Overall always last.
+
+    If retry_count > 0, the function will retry failed generations up to
+    retry_count times with a delay of retry_delay seconds between attempts.
 
     If ENABLE_TIMEOUT_SAFEGUARD is True, a separate monitor thread watches
     the elapsed time and cancels the generation if it exceeds the threshold.
@@ -1844,122 +1873,146 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
         regressor (Regression): Regression for time estimation.
         generation_memory (dict): Generation memory for recording completion.
         overall_line (str): Pre-formatted Overall progress string to keep as last line.
+        retry_count (int): Number of retry attempts on failure.
+        retry_delay (float): Delay in seconds between retries.
 
     Returns:
-        tuple: (success, elapsed_time, audio_duration, chars_processed)
-            where success is bool indicating if generation succeeded.
+        tuple: (success, elapsed_time, audio_duration, chars_processed, retry_attempts)
+            - success (bool): True if generation succeeded.
+            - elapsed_time (float): Time taken for generation in seconds.
+            - audio_duration (float): Duration of generated audio in seconds.
+            - chars_processed (int): Number of characters in the generated text.
+            - retry_attempts (int): Number of retry attempts made (0 for first success).
     """
     chars = len(text)
     estimated_sec = estimate_generation_time(regressor, chars)
-    stop_event = threading.Event()
-    cancel_event = threading.Event()  # Signals that generation is done (for monitor)
-
-    # Calculate timeout threshold
-    timeout_sec = None
-    if ENABLE_TIMEOUT_SAFEGUARD:
-        # Always use hard maximum
-        timeout_sec = TIMEOUT_MAX_SECONDS
+    
+    max_attempts = retry_count + 1
+    attempt = 0
+    retry_attempts = 0
+    last_elapsed = 0
+    last_audio_duration = 0
+    
+    while attempt < max_attempts:
+        attempt += 1
         
-        # Use estimated time if we have enough data
-        if len(regressor) >= TIMEOUT_MIN_ESTIMATES:
-            estimated_timeout = estimated_sec * TIMEOUT_MULTIPLIER
-            # Use the more conservative (smaller) timeout
-            timeout_sec = min(timeout_sec, estimated_timeout)
-
-    # Start progress bar thread – it will draw job line + Overall line
-    worker = threading.Thread(
-        target=progress_worker,
-        args=(stop_event, idx, total_jobs, filename, estimated_sec, timeout_sec,
-              npc_name, voice_name, chars, overall_line, strref)
-    )
-    worker.daemon = True
-    worker.start()
-
-    start_time = time.time()
-    success = False
-    elapsed = 0
-    audio_duration = 0
-    gen_id = None
-    final_event = None
-    monitor_thread = None
-
-    try:
-        gen_id = submit_generation(profile_id, text, ENGINE, MODEL_SIZE)
+        if attempt > 1:
+            logger.info(f"🔄 Retry {attempt - 1}/{retry_count} for {filename} (STRREF: {strref})")
+            time.sleep(retry_delay)
         
-        # Start timeout monitor thread if timeout is enabled
+        # Reset events for each attempt
+        stop_event = threading.Event()
+        cancel_event = threading.Event()
+
+        # Calculate timeout threshold
+        timeout_sec = None
+        if ENABLE_TIMEOUT_SAFEGUARD:
+            timeout_sec = TIMEOUT_MAX_SECONDS
+            if len(regressor) >= TIMEOUT_MIN_ESTIMATES:
+                estimated_timeout = estimated_sec * TIMEOUT_MULTIPLIER
+                timeout_sec = min(timeout_sec, estimated_timeout)
+
+        # Start progress bar thread
+        worker = threading.Thread(
+            target=progress_worker,
+            args=(stop_event, idx, total_jobs, filename, estimated_sec, timeout_sec,
+                  npc_name, voice_name, chars, overall_line, strref)
+        )
+        worker.daemon = True
+        worker.start()
+
+        start_time = time.time()
+        success = False
+        elapsed = 0
+        audio_duration = 0
+        gen_id = None
+        final_event = None
         monitor_thread = None
-        if timeout_sec is not None:
-            monitor_thread = threading.Thread(
-                target=timeout_monitor,
-                args=(cancel_event, gen_id, timeout_sec, idx, start_time)
-            )
-            monitor_thread.daemon = True
-            monitor_thread.start()
 
-        # Wait for completion (blocking - uses SSE)
-        final_event = wait_for_completion(gen_id)
-        
-        # Signal that generation is done (stop timeout monitor)
-        cancel_event.set()
-        if monitor_thread:
-            monitor_thread.join(timeout=0.5)
+        try:
+            gen_id = submit_generation(profile_id, text, ENGINE, MODEL_SIZE)
+            
+            # Start timeout monitor thread if timeout is enabled
+            if timeout_sec is not None:
+                monitor_thread = threading.Thread(
+                    target=timeout_monitor,
+                    args=(cancel_event, gen_id, timeout_sec, idx, start_time)
+                )
+                monitor_thread.daemon = True
+                monitor_thread.start()
 
-        elapsed = time.time() - start_time
+            # Wait for completion (blocking - uses SSE)
+            final_event = wait_for_completion(gen_id)
+            
+            # Signal that generation is done (stop timeout monitor)
+            cancel_event.set()
+            if monitor_thread:
+                monitor_thread.join(timeout=0.5)
 
-        # Stop the progress thread (it clears the two lines for us)
-        stop_event.set()
-        worker.join(timeout=1.0)
+            elapsed = time.time() - start_time
 
-        if final_event and final_event.get("status") == "completed":
-            audio_duration = final_event.get("duration", 0.0)
+            # Stop the progress thread
+            stop_event.set()
+            worker.join(timeout=1.0)
 
-            # Create output directory if it doesn't exist
-            safe_npc = sanitize_filename(npc_name)
-            npc_output_dir = os.path.join(OUTPUT_DIR, safe_npc)
-            os.makedirs(npc_output_dir, exist_ok=True)
-            output_path = os.path.join(npc_output_dir, f"{filename}.wav")
+            if final_event and final_event.get("status") == "completed":
+                audio_duration = final_event.get("duration", 0.0)
 
-            # Download and convert audio
-            temp_path = output_path + ".tmp"
-            try:
-                download_audio(gen_id, temp_path)
+                # Create output directory if it doesn't exist
+                safe_npc = sanitize_filename(npc_name)
+                npc_output_dir = os.path.join(OUTPUT_DIR, safe_npc)
+                os.makedirs(npc_output_dir, exist_ok=True)
+                output_path = os.path.join(npc_output_dir, f"{filename}.wav")
 
-                if CONVERT_TO_OGG:
-                    convert_to_ogg(temp_path, output_path, OGG_QUALITY)
-                    os.remove(temp_path)
-                else:
-                    os.rename(temp_path, output_path)
+                # Download and convert audio
+                temp_path = output_path + ".tmp"
+                try:
+                    download_audio(gen_id, temp_path)
 
-            except Exception as e:
-                if os.path.exists(temp_path):
-                    os.remove(temp_path)
-                raise e
+                    if CONVERT_TO_OGG:
+                        convert_to_ogg(temp_path, output_path, OGG_QUALITY)
+                        os.remove(temp_path)
+                    else:
+                        os.rename(temp_path, output_path)
 
-            # Record success in memory
-            mark_as_generated(generation_memory, npc_name, strref)
-            save_generation_memory(generation_memory, GENERATION_MEMORY_PATH)
+                except Exception as e:
+                    if os.path.exists(temp_path):
+                        os.remove(temp_path)
+                    raise e
 
-            success = True
+                # Record success in memory
+                mark_as_generated(generation_memory, npc_name, strref)
+                save_generation_memory(generation_memory, GENERATION_MEMORY_PATH)
 
-    except Exception as e:
-        # If there was an error and we had a gen_id, try to cancel it
-        if gen_id:
-            try:
-                cancel_generation(gen_id)
-            except Exception:
-                pass  # Ignore cancellation errors during exception handling
-        
-        cancel_event.set()
-        if monitor_thread:
-            monitor_thread.join(timeout=0.5)
-        
-        stop_event.set()
-        worker.join(timeout=1.0)
-        
-        # Log the error
-        logger.error(f"❌ Generation failed for {filename}: {e}")
+                success = True
+                # If we succeeded after retries, return success with retry count
+                return success, elapsed, audio_duration, chars, retry_attempts
 
-    return success, elapsed, audio_duration, chars
+        except Exception as e:
+            # If there was an error and we had a gen_id, try to cancel it
+            if gen_id:
+                try:
+                    cancel_generation(gen_id)
+                except Exception:
+                    pass
+            
+            cancel_event.set()
+            if monitor_thread:
+                monitor_thread.join(timeout=0.5)
+            
+            stop_event.set()
+            worker.join(timeout=1.0)
+            
+            # Log the error but continue to retry if possible
+            logger.error(f"❌ Generation failed for {filename} (attempt {attempt}/{max_attempts}): {e}")
+
+        # If we get here, the attempt failed
+        last_elapsed = elapsed
+        last_audio_duration = audio_duration
+        retry_attempts += 1
+
+    # All attempts failed
+    return False, last_elapsed, last_audio_duration, chars, retry_attempts
 #endregion Generation Execution
 
 # ---------- Main ----------
@@ -1968,14 +2021,42 @@ def main():
     Main entry point for the TTS generation script.
 
     Orchestrates the entire generation workflow:
-    1. Load config files
+    1. Load voice substitution rules from JSON files (NPC name, gender, system name)
     2. Load voice profiles from Voicebox API
     3. Load patcher configuration for text preprocessing
     4. Load generation memory to skip already processed files
-    5. Read and filter CSV data
-    6. Display pre-generation summary
-    7. Process each generation job with progress feedback
-    8. Display final summary
+    5. Read and filter CSV data using configured filters
+    6. Display pre-generation summary with statistics
+    7. Process each generation job with progress feedback and optional retries
+    8. Display final summary with retry statistics and completion status
+
+    The function uses the logging system (logger) for both console and file output,
+    providing real-time feedback during generation and a complete record of
+    all activity in the log file.
+
+    Configuration variables from the Configuration region control all aspects
+    of the generation process, including:
+        - Voicebox API connection (BASE_URL, ENGINE, MODEL_SIZE)
+        - File paths (CSV_PATH, OUTPUT_DIR, PATCHER_CONFIG_PATH, etc.)
+        - Filters (TARGET_VOICES, FILENAME_PATTERN, USE_STRREF_FILTER)
+        - Voice substitutions (VOICE_SUBSTITUTIONS_FILE)
+        - Fallback settings (USE_VOICE_FALLBACK, FALLBACK_VOICE_*)
+        - Retry behavior (RETRY_COUNT, RETRY_DELAY)
+        - Logging (LOG_FILE_PATH)
+        - Summary display (COMPACT_SUMMARY)
+
+    Returns:
+        None: The function exits with sys.exit(1) on critical errors,
+            or returns normally when processing completes.
+
+    Note:
+        - The generation memory (generation-memory.json) is loaded at startup
+          and saved after each successful generation to preserve progress.
+        - Failed generations are retried according to RETRY_COUNT and
+          tracked for reporting in the final summary.
+        - The pre-generation summary provides a comprehensive overview of
+          what will be processed before any generation begins.
+        - Both console and file logging are used for complete visibility.
     """
     header_messages = []
 
@@ -1996,7 +2077,7 @@ def main():
         logger.error(f"❌ Failed to fetch profiles: {e}")
         sys.exit(1)
 
-    # 3. Load patcher config (optional - generation continues without it)
+    # 3. Load patcher config
     try:
         patcher_config = load_patcher_config(PATCHER_CONFIG_PATH)
         header_messages.append("Loaded patcher config.")
@@ -2004,7 +2085,7 @@ def main():
         patcher_config = None
         header_messages.append(f"⚠️ Could not load patcher config: {e}")
 
-    # 4. Load generation memory to skip already processed files
+    # 4. Load generation memory
     generation_memory = load_generation_memory(GENERATION_MEMORY_PATH)
     if SKIP_ALREADY_GENERATED:
         header_messages.append("Already generated files will be skipped.")
@@ -2059,6 +2140,14 @@ def main():
     avg_time_per_char = None
     overall_regressor = Regression()
     regressor = Regression()
+    
+    # Track retry statistics for the final summary
+    retry_stats = {
+        "failed_attempts": 0,          # Total failed attempts (including retries)
+        "successful_retries": 0,       # Tasks that succeeded after at least one retry
+        "failed_tasks": 0,             # Tasks that failed all retry attempts
+        "failed_task_details": []      # List of (idx, strref, filename, npc_name) for failed tasks
+    }
 
     for idx, (strref, display_name, voice_name, filename, text) in enumerate(selected_rows, start=1):
         profile_id = profile_map.get(voice_name)
@@ -2073,31 +2162,51 @@ def main():
             overall_regressor, avg_time_per_char, elapsed_total
         )
 
-        # Process the generation job
-        success, elapsed, audio_duration, chars = process_generation_job(
+        # Process the generation job with retry support
+        success, elapsed, audio_duration, chars, retry_attempts = process_generation_job(
             idx, total_jobs, strref, display_name, voice_name, filename, text,
-            profile_id, regressor, generation_memory, overall_line
+            profile_id, regressor, generation_memory, overall_line,
+            RETRY_COUNT, RETRY_DELAY
         )
-
+        
+        # Update retry statistics
+        retry_stats["failed_attempts"] += retry_attempts
+        
         if success:
-            # Update statistics
+            # Update performance statistics
             regressor.push(chars, elapsed)
             total_chars_processed += chars
             avg_time_per_char = (time.time() - total_start_time) / total_chars_processed
             overall_regressor.push(chars, elapsed)
 
-            # Print job summary
-            log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
-                            audio_duration, display_name, voice_name, success=True)
+            if retry_attempts > 0:
+                retry_stats["successful_retries"] += 1
+                # Log success with retry info
+                log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                                audio_duration, display_name, voice_name, success=True,
+                                error_msg=f"(succeeded after {retry_attempts} retries)")
+            else:
+                # Log success (no retries)
+                log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                                audio_duration, display_name, voice_name, success=True)
 
         else:
-            # Handle failure
-            error_msg = "Generation failed"
+            # Track failed task
+            retry_stats["failed_tasks"] += 1
+            retry_stats["failed_task_details"].append({
+                "idx": idx,
+                "strref": strref,
+                "filename": filename,
+                "npc_name": display_name
+            })
+            
+            # Log failure
+            error_msg = f"Failed after {retry_attempts} retries"
             log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
                             audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
 
-    # 8. Final summary
-    log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
+    # 8. Final summary with retry statistics
+    log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, retry_stats)
 
 if __name__ == "__main__":
     main()
