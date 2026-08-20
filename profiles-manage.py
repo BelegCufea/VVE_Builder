@@ -1,8 +1,22 @@
 """
 Voice Profile Manager (PySide6 desktop version)
 
-A native desktop GUI for managing voice profile assignments across
-three levels: NPC Name, NPC+Gender, and System Name.
+A native desktop GUI for managing voice profile assignments across three levels:
+- NPC Level: Assign a voice to an entire NPC
+- Gender Level: Override voice for a specific gender (M/F)
+- System Name Level: Override voice for specific system names
+
+The hierarchy is: System Name > Gender > NPC > Existing Voice File
+
+This tool is part of the Infinity Engine Voice Generation toolchain:
+1. profiles-prepare.py - Extract source samples from game files
+2. profiles-audit.py - Review and approve samples
+3. profiles-manage.py - Assign voices to NPCs (THIS TOOL)
+4. profiles-upload.py - Upload profiles to VoiceBox
+5. generate.py - Generate TTS audio
+
+Usage:
+    python profiles-manage.py
 """
 
 import os
@@ -29,21 +43,24 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 # Configuration
 # ============================================================================
 
-OGG_QUALITY = 4      # Vorbis quality setting (0-10, 4 is good quality/size balance)
-MAX_DURATION = 30.0  # Maximum duration in seconds (single sample file)
+# Audio settings
+OGG_QUALITY = 4                # Vorbis quality (0-10, 4 = good quality/size balance)
+MAX_DURATION = 30.0            # Maximum duration in seconds for a single sample
+
+# File paths (relative to script directory)
 CSV_PATH = "dialog-report.csv"
 VOICES_DIR = "voices"
 VOICE_SUBSTITUTIONS_FILE = "voice-substitutions.json"
-VOICE_SUBSTITUTIONS_GENDER_FILE = "voice-substitutions-gender.json"
-VOICE_SUBSTITUTIONS_SYSNAME_FILE = "voice-substitutions-sysname.json"
 LOG_FILE_PATH = Path("logs/profiles-manage.log")
+
+# ============================================================================
+# Logging Setup
+# ============================================================================
+
+# Ensure log directory exists
 LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
 
-# ============================================================================
-# Logging
-# ============================================================================
-
-# Configure logging
+# Configure logging to both file and console
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -55,6 +72,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+
 # ============================================================================
 # Audio Processing Functions
 # ============================================================================
@@ -65,7 +83,7 @@ def convert_to_ogg(input_path: Path, output_path: Path, quality: int = OGG_QUALI
     
     Args:
         input_path: Path to input audio file
-        output_path: Path to output Ogg file
+        output_path: Path to output Ogg file (will be overwritten if exists)
         quality: Vorbis quality (0-10, 4 is good quality/size balance)
     
     Returns:
@@ -102,8 +120,17 @@ class VoiceProfileEditor(QDialog):
     """
     Dialog for editing or creating a voice profile.
     
-    Allows viewing/editing samples (WAV + TXT), adding new samples,
-    and deleting existing samples.
+    Allows users to:
+        - View all samples for a voice profile
+        - Play audio samples
+        - Edit transcript text for each sample
+        - Add new samples (converts to Ogg Vorbis)
+        - Delete existing samples (with confirmation)
+    
+    Samples are stored in /voices/ directory with naming:
+        - {profile_name} 1.WAV (first sample)
+        - {profile_name} 2.WAV (second sample)
+        - etc.
     """
     
     def __init__(self, profile_name: str, parent=None):
@@ -125,6 +152,7 @@ class VoiceProfileEditor(QDialog):
         logger.info(f"Opened voice profile editor: {profile_name}")
     
     def _build_ui(self):
+        """Build the editor UI."""
         layout = QVBoxLayout(self)
         
         # Header
@@ -186,7 +214,12 @@ class VoiceProfileEditor(QDialog):
         self.media_player.errorOccurred.connect(self._on_audio_error)
     
     def _load_samples(self):
-        """Load all samples for this profile from /voices directory."""
+        """
+        Load all samples for this profile from /voices directory.
+        
+        Finds all WAV files matching the profile name pattern and loads
+        their corresponding TXT files. Files are sorted by sample number.
+        """
         self.samples_list.clear()
         self._sample_data = []
         
@@ -259,7 +292,7 @@ class VoiceProfileEditor(QDialog):
         self.status_label.setText(f"Loaded {len(self._sample_data)} samples")
     
     def _on_sample_selected(self, current: QListWidgetItem, previous):
-        """Handle sample selection."""
+        """Handle sample selection from the list."""
         if current is None:
             self.play_btn.setEnabled(False)
             self.text_edit.setEnabled(False)
@@ -282,7 +315,7 @@ class VoiceProfileEditor(QDialog):
             self.text_edit.blockSignals(False)
     
     def _play_selected_sample(self):
-        """Play the selected sample."""
+        """Play the selected sample using Qt Multimedia."""
         if not self._current_sample:
             return
         
@@ -299,7 +332,7 @@ class VoiceProfileEditor(QDialog):
         self.status_label.setText(f"🔊 Playing: {wav_path.name}")
     
     def _on_text_changed(self):
-        """Save text when it changes."""
+        """Auto-save text when it changes."""
         if not self._current_sample:
             return
         
@@ -317,7 +350,7 @@ class VoiceProfileEditor(QDialog):
                 logger.error(f"Error saving text for {sample['stem']}: {e}")
 
     def _get_audio_duration(self, audio_path: Path) -> Optional[float]:
-        """Get duration of audio file using ffmpeg."""
+        """Get duration of audio file using ffprobe."""
         try:
             cmd = [
                 'ffprobe', 
@@ -335,7 +368,13 @@ class VoiceProfileEditor(QDialog):
             return None
     
     def _add_sample(self):
-        """Add a new sample to the profile."""
+        """
+        Add a new sample to the profile.
+        
+        Prompts user to select an audio file, converts it to Ogg Vorbis,
+        and creates a corresponding TXT file. The new sample is automatically
+        numbered (e.g., "Profile 1.wav", "Profile 2.wav", etc.).
+        """
         # Ask user for file
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -418,14 +457,19 @@ class VoiceProfileEditor(QDialog):
                 break
     
     def _delete_sample(self):
-        """Delete the selected sample with warnings."""
+        """
+        Delete the selected sample with double confirmation.
+        
+        Requires two separate confirmations to prevent accidental deletion.
+        Deletes both the WAV and TXT files permanently.
+        """
         if not self._current_sample:
             return
         
         sample = self._current_sample
         stem = sample['stem']
         
-        # Warning dialog
+        # First warning dialog
         reply = QMessageBox.warning(
             self,
             "Delete Sample",
@@ -496,10 +540,11 @@ class VoiceProfileEditor(QDialog):
 
 
 # ============================================================================
-# Data loading / saving functions
+# Data Loading / Saving Functions
 # ============================================================================
 
 def load_csv(csv_path: str) -> pd.DataFrame:
+    """Load the dialog report CSV file."""
     logger.info(f"Loading CSV from: {csv_path}")
     try:
         df = pd.read_csv(csv_path)
@@ -511,44 +556,89 @@ def load_csv(csv_path: str) -> pd.DataFrame:
 
 
 def load_json_files():
-    substitutions, gender_substitutions, sys_substitutions = {}, {}, {}
-    for path_str, target in [
-        (VOICE_SUBSTITUTIONS_FILE, "sub"),
-        (VOICE_SUBSTITUTIONS_GENDER_FILE, "gender"),
-        (VOICE_SUBSTITUTIONS_SYSNAME_FILE, "sys"),
-    ]:
-        path = Path(path_str)
-        if path.exists():
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    data = json.load(f)
-                if target == "sub":
-                    substitutions = data
-                elif target == "gender":
-                    gender_substitutions = data
-                else:
-                    sys_substitutions = data
-                logger.info(f"Loaded {len(data)} entries from {path_str}")
-            except Exception as e:
-                logger.error(f"Error loading {path_str}: {e}")
+    """
+    Load voice substitution rules from a single JSON file.
+    
+    File structure:
+    {
+        "npc": {"NPC Name": "voice_profile"},
+        "gender": {"NPC|gender": "voice_profile"},
+        "sysname": {"SystemName": "voice_profile"}
+    }
+    
+    Returns:
+        tuple: (substitutions, gender_substitutions, sys_substitutions)
+    """
+    substitutions = {}
+    gender_substitutions = {}
+    sys_substitutions = {}
+    
+    path = Path(VOICE_SUBSTITUTIONS_FILE)
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            # Extract each section, defaulting to empty dict if missing
+            substitutions = data.get("npc", {})
+            gender_substitutions = data.get("gender", {})
+            sys_substitutions = data.get("sysname", {})
+            
+            logger.info(f"Loaded substitutions from {VOICE_SUBSTITUTIONS_FILE}:")
+            logger.info(f"  NPC-level: {len(substitutions)} entries")
+            logger.info(f"  Gender-level: {len(gender_substitutions)} entries")
+            logger.info(f"  SysName-level: {len(sys_substitutions)} entries")
+        except Exception as e:
+            logger.error(f"Error loading {VOICE_SUBSTITUTIONS_FILE}: {e}")
+    else:
+        logger.info(f"No substitution file found, starting fresh: {VOICE_SUBSTITUTIONS_FILE}")
+    
     return substitutions, gender_substitutions, sys_substitutions
 
 
-def save_json_file(file_path: str, data: Dict) -> bool:
+def save_json_files(substitutions: Dict, gender_substitutions: Dict, sys_substitutions: Dict) -> bool:
+    """
+    Save all substitution rules to a single JSON file.
+    
+    File structure:
+    {
+        "npc": {"NPC Name": "voice_profile"},
+        "gender": {"NPC|gender": "voice_profile"},
+        "sysname": {"SystemName": "voice_profile"}
+    }
+    """
+    data = {
+        "npc": substitutions,
+        "gender": gender_substitutions,
+        "sysname": sys_substitutions
+    }
+    
     try:
-        path = Path(file_path)
+        path = Path(VOICE_SUBSTITUTIONS_FILE)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        logger.info(f"Saved {file_path} ({len(data)} entries)")
+        logger.info(f"Saved substitutions to {VOICE_SUBSTITUTIONS_FILE}")
         return True
     except Exception as e:
-        logger.error(f"Error saving {file_path}: {e}")
+        logger.error(f"Error saving {VOICE_SUBSTITUTIONS_FILE}: {e}")
         return False
 
 
 def clean_redundant_substitutions(substitutions: Dict, existing_voices: Set[str]) -> Dict:
-    """Remove redundant substitutions where NPC name equals the voice profile name."""
+    """
+    Remove redundant substitutions where NPC name equals the voice profile name.
+    
+    These are unnecessary because the system already defaults to using the NPC name
+    if it exists as a voice file (e.g., "Morul" -> "Morul" is redundant).
+    
+    Args:
+        substitutions: The substitutions dictionary to clean
+        existing_voices: Set of voice filenames that exist
+    
+    Returns:
+        Cleaned substitutions dictionary
+    """
     # Quick check if any redundant entries exist
     has_redundant = any(npc == voice and voice in existing_voices for npc, voice in substitutions.items())
     if not has_redundant:
@@ -564,7 +654,12 @@ def clean_redundant_substitutions(substitutions: Dict, existing_voices: Set[str]
 
 
 def get_available_voice_profiles() -> List[str]:
-    """Get unique voice profile names (grouping 'Boy 2.wav' as 'Boy')."""
+    """
+    Get unique voice profile names from the /voices directory.
+    
+    Groups files like "Boy.wav", "Boy 2.wav", "Boy 3.wav" into a single
+    profile "Boy" for the dropdown list.
+    """
     voices_dir = Path(VOICES_DIR)
     if not voices_dir.exists():
         return []
@@ -594,7 +689,23 @@ def get_existing_voice_files() -> Set[str]:
 def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict,
                              gender_substitutions: Dict, sys_substitutions: Dict,
                              existing_voices: Set[str]) -> Dict:
-    """Build the hierarchy entry for a single NPC."""
+    """
+    Build the hierarchy entry for a single NPC.
+    
+    The hierarchy structure:
+        {
+            "assigned_voice": str or None,     # NPC-level assignment
+            "has_existing_voice": bool,        # Voice file exists in /voices/
+            "genders": {
+                "M": {
+                    "assigned_voice": str or None,  # Gender-level assignment
+                    "sysnames": [
+                        {"name": "SYSNAME", "assigned_voice": str or None}
+                    ]
+                }
+            }
+        }
+    """
     npc_df = df[df["RealName"] == npc_name]
     entry = {
         "assigned_voice": substitutions.get(npc_name),
@@ -622,6 +733,7 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
 
 def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions: Dict,
                      sys_substitutions: Dict, existing_voices: Set[str]) -> Dict:
+    """Build the full NPC hierarchy for all characters."""
     logger.info("Building NPC hierarchy...")
     start_time = time.time()
     hierarchy = {}
@@ -663,11 +775,8 @@ def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
     """
     Calculate how many CSV lines each NPC, gender, and system name affects.
 
-    Uses a single groupby pass (like build_hierarchy) instead of re-filtering
-    the whole DataFrame once per NPC and again once per gender - on a large
-    CSV (100k+ rows, thousands of NPCs) the old per-NPC filtering pattern
-    scaled as roughly rows * NPCs and could take tens of seconds; groupby
-    partitions the data once up front instead.
+    Uses a single groupby pass instead of re-filtering the whole DataFrame
+    once per NPC, making it much faster on large datasets.
     """
     counts = {}
     if df.empty:
@@ -696,8 +805,7 @@ def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
                 'sysnames': {}
             }
 
-            # One value_counts() call covers every sysname for this
-            # NPC+gender, instead of a separate filter per sysname
+            # One value_counts() call covers every sysname for this NPC+gender
             sysname_counts = gender_df['SystemName'].value_counts()
             for sys in npc_data['genders'][gender].get('sysnames', []):
                 sysname = sys['name']
@@ -710,18 +818,16 @@ def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
 
 def calculate_covered_lines_for_npc(npc_data: Dict, npc_line_counts: Dict) -> int:
     """
-    Count how many of an NPC's CSV lines are covered by a voice assignment,
-    following the same NPC -> Gender -> SystemName cascade as
-    _get_coverage_status (an assignment at a higher level covers everything
-    beneath it, so it isn't double-counted with a lower-level override).
+    Count how many of an NPC's CSV lines are covered by a voice assignment.
 
-    Sourced entirely from the already-computed line_counts dict, not from
-    re-filtering the DataFrame - this keeps it cheap even on very large
-    datasets (170k+ rows), since the cost scales with the NPC's own number
-    of genders/sysnames rather than with the size of the CSV.
+    Follows the hierarchy: NPC-level > Gender-level > SystemName-level.
+    A higher-level assignment covers everything beneath it.
+
+    Uses cached line counts, not the DataFrame, for fast performance.
     """
     total_lines = npc_line_counts.get('total_lines', 0)
 
+    # Voice file with NPC name covers everything
     if npc_data.get('has_existing_voice', False):
         return total_lines
 
@@ -736,7 +842,7 @@ def calculate_covered_lines_for_npc(npc_data: Dict, npc_line_counts: Dict) -> in
             gender_total = gender_counts.get('total_lines', 0)
 
             if gender_data['assigned_voice'] is not None:
-                # A gender-level assignment covers all its sysnames' lines too
+                # Gender-level assignment covers all its sysnames' lines
                 covered += gender_total
             elif gender_data['sysnames']:
                 sys_counts = gender_counts.get('sysnames', {})
@@ -748,7 +854,7 @@ def calculate_covered_lines_for_npc(npc_data: Dict, npc_line_counts: Dict) -> in
 
 
 def calculate_all_covered_lines(hierarchy: Dict, line_counts: Dict) -> Dict[str, int]:
-    """Covered-line count per NPC, for every NPC in the hierarchy."""
+    """Calculate covered-line count for every NPC in the hierarchy."""
     return {
         name: calculate_covered_lines_for_npc(data, line_counts.get(name, {}))
         for name, data in hierarchy.items()
@@ -756,10 +862,26 @@ def calculate_all_covered_lines(hierarchy: Dict, line_counts: Dict) -> Dict[str,
 
 
 # ============================================================================
-# Main window
+# Main Application Window
 # ============================================================================
 
 class VoiceProfileManager(QMainWindow):
+    """
+    Main window for the Voice Profile Manager.
+    
+    Features:
+        - NPC list with search, sort, and filter
+        - Coverage statistics with progress bar
+        - Three-level voice assignment (NPC, Gender, System Name)
+        - Voice profile editor with sample management
+        - Real-time updates of coverage and icons
+        - Persistent storage via JSON files
+    
+    UI Layout:
+        - Left panel: Stats, search, sort/filter, NPC list
+        - Right panel: Details for selected NPC with assignment controls
+    """
+    
     def __init__(self):
         super().__init__()
         self.setWindowTitle("🎯 Voice Profile Manager")
@@ -801,9 +923,11 @@ class VoiceProfileManager(QMainWindow):
         logger.info(f"Initialization complete: {len(self.npc_names)} NPCs loaded")
 
     # ------------------------------------------------------------------
-    # UI construction
+    # UI Construction
     # ------------------------------------------------------------------
+    
     def _build_ui(self):
+        """Build the main application UI with split layout."""
         central = QWidget()
         self.setCentralWidget(central)
         outer_layout = QHBoxLayout(central)
@@ -811,7 +935,7 @@ class VoiceProfileManager(QMainWindow):
         splitter = QSplitter(Qt.Orientation.Horizontal)
         outer_layout.addWidget(splitter)
 
-        # --- Left: stats + search + NPC list ---
+        # --- Left: Stats + Search + NPC List ---
         left_widget = QWidget()
         left_layout = QVBoxLayout(left_widget)
 
@@ -825,6 +949,7 @@ class VoiceProfileManager(QMainWindow):
         self.stats_sys_level_label = QLabel()
         self.stats_lines_covered_label = QLabel()
 
+        # Coverage progress bar
         self.coverage_progress = QProgressBar()
         self.coverage_progress.setRange(0, 100)
         self.coverage_progress.setValue(0)
@@ -868,14 +993,14 @@ class VoiceProfileManager(QMainWindow):
         controls_layout.addWidget(QLabel("Sort:"))
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["Alphabetical", "By Lines"])
-        self.sort_combo.setCurrentIndex(1)
+        self.sort_combo.setCurrentIndex(1)  # Default: By Lines
         self.sort_combo.currentTextChanged.connect(self._on_filter_changed)
         controls_layout.addWidget(self.sort_combo)
         
         controls_layout.addWidget(QLabel("Filter:"))
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All", "Modified", "Missing", "Has Voice File"])
-        self.filter_combo.setCurrentIndex(2)
+        self.filter_combo.setCurrentIndex(2)  # Default: Missing
         self.filter_combo.currentTextChanged.connect(self._on_filter_changed)
         controls_layout.addWidget(self.filter_combo)
         
@@ -885,13 +1010,14 @@ class VoiceProfileManager(QMainWindow):
         self.npc_count_label = QLabel()
         left_layout.addWidget(self.npc_count_label)
 
+        # NPC list
         self.npc_list = QListWidget()
         self.npc_list.currentItemChanged.connect(self._on_npc_selected)
         left_layout.addWidget(self.npc_list, stretch=1)
 
         splitter.addWidget(left_widget)
 
-        # --- Right: detail panel ---
+        # --- Right: Detail Panel ---
         self.detail_scroll = QScrollArea()
         self.detail_scroll.setWidgetResizable(True)
         self.detail_content = QWidget()
@@ -906,8 +1032,9 @@ class VoiceProfileManager(QMainWindow):
         self._update_stats()
 
     # ------------------------------------------------------------------
-    # NPC list handling
+    # NPC List Handling
     # ------------------------------------------------------------------
+
     def _get_coverage_status(self, npc_name: str) -> Dict:
         """
         Get coverage status for an NPC using cached data.
@@ -949,6 +1076,16 @@ class VoiceProfileManager(QMainWindow):
         }
 
     def _npc_icon(self, npc_name: str) -> str:
+        """
+        Get the appropriate icon for an NPC based on coverage status.
+        
+        Returns:
+            str: Icon character
+                - 🟢 Voice file exists (full coverage)
+                - ✅ Fully covered (all lines have assignments)
+                - 🔵 Partially covered
+                - 🔴 Nothing assigned
+        """
         status = self._get_coverage_status(npc_name)
         if status['has_existing']:
             return "🟢"
@@ -960,7 +1097,13 @@ class VoiceProfileManager(QMainWindow):
 
     def _apply_filters(self):
         """
-        Apply all filters (search, status filter) to determine which NPCs to show.
+        Apply all filters (search, status filter, sort) to determine which NPCs to show.
+        
+        Filter options:
+            - All: Show all NPCs
+            - Modified: Show NPCs with assignments
+            - Missing: Show NPCs with NO assignments and NO voice file
+            - Has Voice File: Show NPCs with existing voice files
         """
         search_term = self.search_box.text().strip().lower()
         status_filter = self.filter_combo.currentText()
@@ -1009,24 +1152,7 @@ class VoiceProfileManager(QMainWindow):
         items = self._filtered_items if self._filtered_items else [(name, 0) for name in self.npc_names]
         
         for name, line_count in items:
-            data = self.hierarchy[name]
-            has_existing = data.get("has_existing_voice", False)
-            has_assignments = (
-                data["assigned_voice"] is not None
-                or any(g["assigned_voice"] is not None for g in data["genders"].values())
-                or any(
-                    s["assigned_voice"] is not None
-                    for g in data["genders"].values()
-                    for s in g["sysnames"]
-                )
-            )
-            if has_existing:
-                icon = "🟢"
-            elif has_assignments:
-                icon = "✅"
-            else:
-                icon = "🔴"
-            
+            icon = self._npc_icon(name)
             item_text = f"{icon} {name} [{line_count} lines]"
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, name)
@@ -1046,6 +1172,7 @@ class VoiceProfileManager(QMainWindow):
                 return
 
     def _select_npc_in_list(self, npc_name: str):
+        """Select an NPC in the list by name."""
         for i in range(self.npc_list.count()):
             item = self.npc_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == npc_name:
@@ -1071,15 +1198,18 @@ class VoiceProfileManager(QMainWindow):
             self.npc_list.setCurrentRow(0)
 
     def _on_npc_selected(self, current: QListWidgetItem, previous: QListWidgetItem):
+        """Handle NPC selection from the list."""
         if current is None:
             return
         self.selected_npc = current.data(Qt.ItemDataRole.UserRole)
         self._render_detail_panel()
 
     # ------------------------------------------------------------------
-    # Detail panel
+    # Detail Panel
     # ------------------------------------------------------------------
+
     def _clear_layout(self, layout):
+        """Recursively clear all widgets from a layout."""
         while layout.count():
             item = layout.takeAt(0)
             widget = item.widget()
@@ -1095,6 +1225,7 @@ class VoiceProfileManager(QMainWindow):
         Create a combo box with an Edit/Create button next to it.
         
         Returns a widget containing the combo and button.
+        The button shows ✏️ if the profile exists, or ➕ if it doesn't.
         """
         container = QWidget()
         layout = QHBoxLayout(container)
@@ -1178,6 +1309,7 @@ class VoiceProfileManager(QMainWindow):
         self._render_detail_panel()
 
     def _render_detail_panel(self):
+        """Render the detail panel for the currently selected NPC."""
         self._clear_layout(self.detail_layout)
 
         if not self.selected_npc:
@@ -1284,12 +1416,14 @@ class VoiceProfileManager(QMainWindow):
             self.detail_layout.addWidget(gender_group)
 
     def _copy_name(self, npc_name: str):
+        """Copy NPC name to clipboard."""
         QApplication.clipboard().setText(npc_name)
         self.statusBar().showMessage(f"Copied '{npc_name}' to clipboard!", 3000)
 
     # ------------------------------------------------------------------
-    # Change handlers
+    # Change Handlers
     # ------------------------------------------------------------------
+
     def _refresh_npc_entry(self, npc_name: str):
         """Refresh the hierarchy entry for a single NPC (fast)."""
         self.hierarchy[npc_name] = build_hierarchy_for_npc(
@@ -1327,14 +1461,13 @@ class VoiceProfileManager(QMainWindow):
                 sys_count = len(sys_rows)
                 self.line_counts[npc_name]['genders'][gender]['sysnames'][sysname] = sys_count
 
-        # Keep the covered-lines total in sync too - cheap, since it only
-        # walks this one NPC's (already-updated) line_counts entry rather
-        # than touching the DataFrame or any other NPC.
+        # Keep the covered-lines total in sync
         self.covered_lines_by_npc[npc_name] = calculate_covered_lines_for_npc(
             npc_data, self.line_counts[npc_name]
         )
 
     def _on_npc_voice_changed(self, npc_name: str, new_voice: str):
+        """Handle NPC-level voice assignment change."""
         current = self.substitutions.get(npc_name) or ""
         if new_voice == current:
             return
@@ -1348,7 +1481,7 @@ class VoiceProfileManager(QMainWindow):
         cleaned_substitutions = clean_redundant_substitutions(self.substitutions, self.existing_voices)
         self.substitutions = cleaned_substitutions
         
-        if save_json_file(VOICE_SUBSTITUTIONS_FILE, self.substitutions):
+        if save_json_files(self.substitutions, self.gender_substitutions, self.sys_substitutions):
             # Update hierarchy
             self._refresh_npc_entry(npc_name)
             self._update_stats()
@@ -1357,6 +1490,7 @@ class VoiceProfileManager(QMainWindow):
             self.statusBar().showMessage(f"✅ Updated {npc_name} → {new_voice or 'unassigned'}", 3000)
 
     def _on_gender_voice_changed(self, npc_name: str, gender: str, new_voice: str):
+        """Handle gender-level voice assignment change."""
         gender_key = f"{npc_name}|{gender}"
         current = self.gender_substitutions.get(gender_key) or ""
         if new_voice == current:
@@ -1366,13 +1500,14 @@ class VoiceProfileManager(QMainWindow):
             self.gender_substitutions[gender_key] = new_voice
         else:
             self.gender_substitutions.pop(gender_key, None)
-        if save_json_file(VOICE_SUBSTITUTIONS_GENDER_FILE, self.gender_substitutions):
+        if save_json_files(self.substitutions, self.gender_substitutions, self.sys_substitutions):
             self._refresh_npc_entry(npc_name)
             self._update_stats()
             self._refresh_npc_list_icon(npc_name)  # Target only this NPC
             self.statusBar().showMessage(f"✅ Updated {npc_name}|{gender} → {new_voice or 'unassigned'}", 3000)
 
     def _on_sys_voice_changed(self, sysname: str, new_voice: str):
+        """Handle system-name-level voice assignment change."""
         current = self.sys_substitutions.get(sysname) or ""
         if new_voice == current:
             return
@@ -1381,7 +1516,7 @@ class VoiceProfileManager(QMainWindow):
             self.sys_substitutions[sysname] = new_voice
         else:
             self.sys_substitutions.pop(sysname, None)
-        if save_json_file(VOICE_SUBSTITUTIONS_SYSNAME_FILE, self.sys_substitutions):
+        if save_json_files(self.substitutions, self.gender_substitutions, self.sys_substitutions):
             if self.selected_npc is not None:
                 self._refresh_npc_entry(self.selected_npc)
                 self._refresh_npc_list_icon(self.selected_npc)  # Target only this NPC
@@ -1389,6 +1524,7 @@ class VoiceProfileManager(QMainWindow):
             self.statusBar().showMessage(f"✅ Updated {sysname} → {new_voice or 'unassigned'}", 3000)
 
     def _update_stats(self):
+        """Update all statistics displays."""
         npcs_with_voice = sum(1 for d in self.hierarchy.values() if d.get("has_existing_voice", False))
         
         self.stats_total_label.setText(str(len(self.hierarchy)))
@@ -1408,7 +1544,13 @@ class VoiceProfileManager(QMainWindow):
         self.coverage_progress.setValue(int(pct))
 
 
+# ============================================================================
+# Application Entry Point
+# ============================================================================
+
 def main():
+    """Application entry point."""
+    # Suppress Qt multimedia debug messages
     os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.multimedia.*=false"
 
     logger.info("=" * 60)

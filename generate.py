@@ -50,10 +50,8 @@ TARGET_VOICES = [
     # "Bodhi",
     # "Gaelan Bayle"
 ]   
-# Voice Substitution Files
+# Voice Substitution File
 VOICE_SUBSTITUTIONS_FILE = r"voice-substitutions.json"
-VOICE_SUBSTITUTIONS_GENDER_FILE = r"voice-substitutions-gender.json"
-VOICE_SUBSTITUTIONS_SYSNAME_FILE = r"voice-substitutions-sysname.json"
 
 # Filter for which lines to process based on the CSV sound filename (column 6).
 FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
@@ -805,51 +803,46 @@ def generate_resref(strref, prefix="TS"):
 #endregion Utility Functions
 
 #region Voice Profile Management
-def load_voice_substitutions(file_path, default=None):
-    """
-    Load voice substitution rules from a JSON file.
-
-    Args:
-        file_path (str): Path to the JSON file.
-        default (dict, optional): Default dictionary if file not found.
-
-    Returns:
-        dict: The loaded substitution dictionary, or default if file not found.
-    """
-    if default is None:
-        default = {}
-    
-    if not os.path.exists(file_path):
-        logger.warning(f"⚠️ Voice substitution file not found: {file_path}")
-        return default
-    
-    try:
-        with open(file_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        
-        if not isinstance(data, dict):
-            logger.warning(f"⚠️ Voice substitution file must contain a JSON object: {file_path}")
-            return default
-        
-        return data
-    except Exception as e:
-        logger.warning(f"⚠️ Could not load voice substitutions from {file_path}: {e}")
-        return default
-
-
 def load_voice_substitutions_all():
     """
-    Load all voice substitution rules from their respective JSON files.
-
+    Load all voice substitution rules from a single JSON file.
+    
+    File structure:
+    {
+        "npc": {"NPC Name": "voice_profile"},
+        "gender": {"NPC|gender": "voice_profile"},
+        "sysname": {"SystemName": "voice_profile"}
+    }
+    
     Returns:
         tuple: (substitutions, substitutions_gender, substitutions_sysname)
             - substitutions (dict): NPC name -> voice profile
             - substitutions_gender (dict): NPC name|gender -> voice profile
             - substitutions_sysname (dict): sysname -> voice profile
     """
-    substitutions = load_voice_substitutions(VOICE_SUBSTITUTIONS_FILE, {})
-    substitutions_gender = load_voice_substitutions(VOICE_SUBSTITUTIONS_GENDER_FILE, {})
-    substitutions_sysname = load_voice_substitutions(VOICE_SUBSTITUTIONS_SYSNAME_FILE, {})
+    substitutions = {}
+    substitutions_gender = {}
+    substitutions_sysname = {}
+    
+    path = Path(VOICE_SUBSTITUTIONS_FILE)
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            
+            # Extract each section, defaulting to empty dict if missing
+            substitutions = data.get("npc", {})
+            substitutions_gender = data.get("gender", {})
+            substitutions_sysname = data.get("sysname", {})
+            
+            logger.info(f"Loaded substitutions from {VOICE_SUBSTITUTIONS_FILE}:")
+            logger.info(f"  NPC-level: {len(substitutions)} entries")
+            logger.info(f"  Gender-level: {len(substitutions_gender)} entries")
+            logger.info(f"  SysName-level: {len(substitutions_sysname)} entries")
+        except Exception as e:
+            logger.warning(f"⚠️ Could not load voice substitutions from {VOICE_SUBSTITUTIONS_FILE}: {e}")
+    else:
+        logger.info(f"No substitution file found, using defaults: {VOICE_SUBSTITUTIONS_FILE}")
     
     return substitutions, substitutions_gender, substitutions_sysname
 
