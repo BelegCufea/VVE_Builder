@@ -19,6 +19,8 @@ voices_prep/
 profiles/            
 # Profile audit logs
 profiles-audit*.json 
+# voice substitutions
+voice-substitutions*.json
 
 # ------------------------------------------------------------
 # WeiDU Modding Tool Files

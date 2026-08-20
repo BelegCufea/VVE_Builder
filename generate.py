@@ -50,32 +50,10 @@ TARGET_VOICES = [
     # "Bodhi",
     # "Gaelan Bayle"
 ]   
-# NPC name -> Voicebox profile substitution.
-# If an NPC is not listed here, its name is used as the voice profile name.
-VOICE_SUBSTITUTIONS = {
-    # "Drizzt Do'Urden": "Drizzt",
-    "Harper": "Jaheira",
-    "Armored Figure": "Sarevok"
-}
-# NPC name + gender -> Voicebox profile substitution.
-# Format: "npc_name|gender" -> "voice_profile"
-# Gender: "M" or "F"
-VOICE_SUBSTITUTIONS_GENDER = {
-    "Bandit|M": "Bandit male",
-    "Bandit|F": "Bandit female",
-    # Add more as needed
-}
-# System name (CSV column 1) -> Voicebox profile substitution.
-# Format: "sysname" -> "voice_profile"
-VOICE_SUBSTITUTIONS_SYSNAME = {
-    "AEWERE1": "Fighter 1",
-    "AEWERE2": "Fighter 2",
-    "AEWERE3": "Fighter 3",
-    "AEWERE4": "Fighter 4",
-    "AEWERE5": "Fighter 5",
-    "AEWERE6": "Fighter 6",
-    # Add more as needed
-}
+# Voice Substitution Files
+VOICE_SUBSTITUTIONS_FILE = r"voice-substitutions.json"
+VOICE_SUBSTITUTIONS_GENDER_FILE = r"voice-substitutions-gender.json"
+VOICE_SUBSTITUTIONS_SYSNAME_FILE = r"voice-substitutions-sysname.json"
 
 # Filter for which lines to process based on the CSV sound filename (column 6).
 FILENAME_PATTERN = r"^TS"              # regex pattern for filename (column 6)
@@ -827,19 +805,70 @@ def generate_resref(strref, prefix="TS"):
 #endregion Utility Functions
 
 #region Voice Profile Management
-def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None):
+def load_voice_substitutions(file_path, default=None):
+    """
+    Load voice substitution rules from a JSON file.
+
+    Args:
+        file_path (str): Path to the JSON file.
+        default (dict, optional): Default dictionary if file not found.
+
+    Returns:
+        dict: The loaded substitution dictionary, or default if file not found.
+    """
+    if default is None:
+        default = {}
+    
+    if not os.path.exists(file_path):
+        logger.warning(f"⚠️ Voice substitution file not found: {file_path}")
+        return default
+    
+    try:
+        with open(file_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        
+        if not isinstance(data, dict):
+            logger.warning(f"⚠️ Voice substitution file must contain a JSON object: {file_path}")
+            return default
+        
+        return data
+    except Exception as e:
+        logger.warning(f"⚠️ Could not load voice substitutions from {file_path}: {e}")
+        return default
+
+
+def load_voice_substitutions_all():
+    """
+    Load all voice substitution rules from their respective JSON files.
+
+    Returns:
+        tuple: (substitutions, substitutions_gender, substitutions_sysname)
+            - substitutions (dict): NPC name -> voice profile
+            - substitutions_gender (dict): NPC name|gender -> voice profile
+            - substitutions_sysname (dict): sysname -> voice profile
+    """
+    substitutions = load_voice_substitutions(VOICE_SUBSTITUTIONS_FILE, {})
+    substitutions_gender = load_voice_substitutions(VOICE_SUBSTITUTIONS_GENDER_FILE, {})
+    substitutions_sysname = load_voice_substitutions(VOICE_SUBSTITUTIONS_SYSNAME_FILE, {})
+    
+    return substitutions, substitutions_gender, substitutions_sysname
+
+
+def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None,
+                           substitutions=None, substitutions_gender=None, 
+                           substitutions_sysname=None):
     r"""
     Resolve an NPC name to the corresponding Voicebox profile name.
     
     Priority order (highest to lowest):
-    1. System name substitution (VOICE_SUBSTITUTIONS_SYSNAME)
-    2. NPC name + Gender substitution (VOICE_SUBSTITUTIONS_GENDER)
-    3. NPC name only substitution (VOICE_SUBSTITUTIONS)
+    1. System name substitution (substitutions_sysname)
+    2. NPC name + Gender substitution (substitutions_gender)
+    3. NPC name only substitution (substitutions)
     4. NPC name as profile name (if it exists in profile_map)
     5. Gender-based fallback (if USE_VOICE_FALLBACK is True)
     6. Neutral/unknown fallback
 
-    Uses the VOICE_SUBSTITUTIONS mapping to translate NPC names to specific
+    Uses the substitution mappings to translate NPC names to specific
     voice profiles. This allows multiple NPCs to share a voice profile or
     to use a profile name that differs from the NPC's display name.
 
@@ -855,6 +884,9 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
         gender (str, optional): Gender from CSV ("M", "F", or empty).
         profile_map (dict, optional): Map of available voice profiles for fallback checking.
         sysname (str, optional): System name from CSV (column 1).
+        substitutions (dict, optional): NPC name -> voice profile mappings.
+        substitutions_gender (dict, optional): NPC name|gender -> voice profile mappings.
+        substitutions_sysname (dict, optional): sysname -> voice profile mappings.
 
     Returns:
         str: The Voicebox profile name to use for generating speech, or None
@@ -872,19 +904,27 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
         >>> get_voice_profile_name("Unknown NPC", "", None)
         "Unknown NPC"  # No fallback, returns the name as-is
     """
+    # Use loaded substitutions or fallback to defaults
+    if substitutions is None:
+        substitutions = {}
+    if substitutions_gender is None:
+        substitutions_gender = {}
+    if substitutions_sysname is None:
+        substitutions_sysname = {}
+    
     # 1. Check system name substitution first (highest priority)
-    if sysname and sysname in VOICE_SUBSTITUTIONS_SYSNAME:
-        return VOICE_SUBSTITUTIONS_SYSNAME[sysname]
+    if sysname and sysname in substitutions_sysname:
+        return substitutions_sysname[sysname]
     
     # 2. Check NPC name + gender substitution
     if npc_name and gender:
         gender_key = f"{npc_name}|{gender}"
-        if gender_key in VOICE_SUBSTITUTIONS_GENDER:
-            return VOICE_SUBSTITUTIONS_GENDER[gender_key]
+        if gender_key in substitutions_gender:
+            return substitutions_gender[gender_key]
     
     # 3. Check NPC name only substitution
-    if npc_name and npc_name in VOICE_SUBSTITUTIONS:
-        return VOICE_SUBSTITUTIONS[npc_name]
+    if npc_name and npc_name in substitutions:
+        return substitutions[npc_name]
     
     # 4. Check if the NPC name exists as a profile (only if npc_name exists)
     if npc_name and profile_map is not None and npc_name in profile_map:
@@ -1594,7 +1634,9 @@ def load_strref_filter(filter_file):
 def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_config, 
                        generation_memory, skip_generated, limit, profile_map=None,
                        use_strref_filter=False, strref_filter_file="strrefs.json", 
-                       force_generated_filenames=False):
+                       force_generated_filenames=False,
+                       substitutions=None, substitutions_gender=None, 
+                       substitutions_sysname=None):
     """
     Load CSV data, apply filters, and prepare rows for generation.
     
@@ -1610,6 +1652,9 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
         use_strref_filter (bool): Whether to use STRREF filter instead of voice/filename filters.
         strref_filter_file (str): Path to STRREF filter JSON file.
         force_generated_filenames (bool): If True, always use generated; if False, use CSV with fallback.
+        substitutions (dict, optional): NPC name -> voice profile mappings.
+        substitutions_gender (dict, optional): NPC name|gender -> voice profile mappings.
+        substitutions_sysname (dict, optional): sysname -> voice profile mappings.
         
     Returns:
         tuple: (selected_rows, npc_stats, messages)
@@ -1681,7 +1726,10 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                         filename = generate_resref(strref, RESREF_PREFIX)
                 
                 # Get voice profile with fallback
-                voice_name = get_voice_profile_name(npc_name, gender, profile_map, sysname)
+                voice_name = get_voice_profile_name(
+                    npc_name, gender, profile_map, sysname,
+                    substitutions, substitutions_gender, substitutions_sysname
+                )
 
                 # Use npc_name for stats, or "Descriptions" if empty
                 display_name = npc_name if npc_name else "Descriptions"
@@ -1927,17 +1975,27 @@ def main():
     Main entry point for the TTS generation script.
 
     Orchestrates the entire generation workflow:
-    1. Load voice profiles from Voicebox API
-    2. Load patcher configuration for text preprocessing
-    3. Load generation memory to skip already processed files
-    4. Read and filter CSV data
-    5. Display pre-generation summary
-    6. Process each generation job with progress feedback
-    7. Display final summary
+    1. Load config files
+    2. Load voice profiles from Voicebox API
+    3. Load patcher configuration for text preprocessing
+    4. Load generation memory to skip already processed files
+    5. Read and filter CSV data
+    6. Display pre-generation summary
+    7. Process each generation job with progress feedback
+    8. Display final summary
     """
     header_messages = []
 
-    # 1. Load profiles
+    # 1. Load voice substitution rules from JSON files
+    substitutions, substitutions_gender, substitutions_sysname = load_voice_substitutions_all()
+    if substitutions:
+        header_messages.append(f"Loaded {len(substitutions)} voice substitutions (NPC name).")
+    if substitutions_gender:
+        header_messages.append(f"Loaded {len(substitutions_gender)} voice substitutions (NPC + gender).")
+    if substitutions_sysname:
+        header_messages.append(f"Loaded {len(substitutions_sysname)} voice substitutions (System name).")
+
+    # 2. Load profiles
     try:
         profile_map = get_all_profiles()
         header_messages.append(f"Loaded {len(profile_map)} voice profiles.")
@@ -1945,7 +2003,7 @@ def main():
         logger.error(f"❌ Failed to fetch profiles: {e}")
         sys.exit(1)
 
-    # 2. Load patcher config (optional - generation continues without it)
+    # 3. Load patcher config (optional - generation continues without it)
     try:
         patcher_config = load_patcher_config(PATCHER_CONFIG_PATH)
         header_messages.append("Loaded patcher config.")
@@ -1953,14 +2011,14 @@ def main():
         patcher_config = None
         header_messages.append(f"⚠️ Could not load patcher config: {e}")
 
-    # 3. Load generation memory to skip already processed files
+    # 4. Load generation memory to skip already processed files
     generation_memory = load_generation_memory(GENERATION_MEMORY_PATH)
     if SKIP_ALREADY_GENERATED:
         header_messages.append("Already generated files will be skipped.")
     else:
         header_messages.append("Skipping already generated files is disabled.")
 
-    # 4. Read CSV, filter, and select rows
+    # 5. Read CSV, filter, and select rows
     selected_rows, npc_stats, filter_messages = load_and_filter_csv(
         CSV_PATH,
         TARGET_VOICES,
@@ -1972,7 +2030,10 @@ def main():
         profile_map,
         USE_STRREF_FILTER,
         STRREF_FILTER_FILE,
-        FORCE_GENERATED_FILENAMES
+        FORCE_GENERATED_FILENAMES,
+        substitutions,
+        substitutions_gender,
+        substitutions_sysname
     )
 
     header_messages.extend(filter_messages)
@@ -1996,10 +2057,10 @@ def main():
         logger.info("No jobs to process. Exiting.")
         return
 
-    # 5. Pre-generation summary
+    # 6. Pre-generation summary
     log_pregeneration_summary(npc_stats, profile_map)
 
-    # 6. Process all generation jobs
+    # 7. Process all generation jobs
     total_chars_processed = 0
     total_start_time = time.time()
     avg_time_per_char = None
@@ -2042,7 +2103,7 @@ def main():
             log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
                             audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
 
-    # 7. Final summary
+    # 8. Final summary
     log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats)
 
 if __name__ == "__main__":
