@@ -118,7 +118,15 @@ class VoiceBoxImporter:
                     name = match.group(1).strip()
                     number = match.group(2)
                     if number is None:
-                        number = "1"
+                        # Check if this is "Name 1" format (with space but no number captured)
+                        # or just "Name" (no number)
+                        if ' ' in name and name.split(' ')[-1].isdigit():
+                            # This handles cases like "Name 1" where the regex didn't capture properly
+                            parts = name.rsplit(' ', 1)
+                            name = parts[0]
+                            number = parts[1]
+                        else:
+                            number = "1"
                 else:
                     name = base_name
                     number = "1"

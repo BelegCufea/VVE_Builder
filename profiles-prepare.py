@@ -394,12 +394,14 @@ class VoiceSampleProcessor:
             for idx, (entry, audio_path, duration) in enumerate(samples):
                 logger.debug(f"    {idx+1}. StrRef: {entry.str_ref}, Sound: {entry.sound_res_ref}, Duration: {duration:.2f}s")
         
-        # Create files for each sample
+        # Create files for each sample - ALWAYS use numbers starting from 1
         for idx, (entry, audio_path, duration) in enumerate(samples):
-            if idx == 0:
-                base_name = real_name
+            # Always use number, starting from 1
+            sample_num = idx + 1
+            if sample_num == 1:
+                base_name = f"{real_name} 1"
             else:
-                base_name = f"{real_name} {idx + 1}"
+                base_name = f"{real_name} {sample_num}"
             
             # Copy WAV file
             wav_path = voice_prep_dir / f"{base_name}.WAV"

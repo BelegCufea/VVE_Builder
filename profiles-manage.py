@@ -9,22 +9,26 @@ import sys
 import json
 import time
 import re
+import subprocess
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
 import pandas as pd
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QUrl
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton, QComboBox,
     QScrollArea, QSplitter, QGroupBox, QFrame, QMessageBox, QStatusBar,
+    QTextEdit, QDialog, QDialogButtonBox, QFileDialog,
 )
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 # ============================================================================
 # Configuration
 # ============================================================================
 
 DEBUG = True
+OGG_QUALITY = 4  # Vorbis quality setting (0-10, 4 is good quality/size balance)
 
 
 def debug_print(*args, **kwargs):
@@ -41,7 +45,404 @@ VOICE_SUBSTITUTIONS_SYSNAME_FILE = "voice-substitutions-sysname.json"
 
 
 # ============================================================================
-# Data loading / saving
+# Audio Processing Functions
+# ============================================================================
+
+def convert_to_ogg(input_path: Path, output_path: Path, quality: int = OGG_QUALITY) -> bool:
+    """
+    Convert audio file to Ogg Vorbis format using ffmpeg.
+    
+    Args:
+        input_path: Path to input audio file
+        output_path: Path to output Ogg file
+        quality: Vorbis quality (0-10, 4 is good quality/size balance)
+    
+    Returns:
+        bool: True if conversion succeeded, False otherwise
+    """
+    cmd = [
+        'ffmpeg',
+        '-y',                      # Overwrite output files
+        '-i', str(input_path),     # Input file
+        '-c:a', 'libvorbis',       # Use libvorbis codec
+        '-qscale:a', str(quality), # Quality setting
+        '-f', 'ogg',               # Force Ogg container format
+        str(output_path)
+    ]
+    
+    try:
+        debug_print(f"Converting: {input_path} -> {output_path}")
+        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
+        debug_print(f"Conversion successful")
+        return True
+    except subprocess.CalledProcessError as e:
+        debug_print(f"FFmpeg error: {e.stderr}")
+        return False
+    except FileNotFoundError:
+        debug_print("ffmpeg not found! Please install ffmpeg.")
+        return False
+
+
+# ============================================================================
+# Voice Profile Editor Dialog
+# ============================================================================
+
+class VoiceProfileEditor(QDialog):
+    """
+    Dialog for editing or creating a voice profile.
+    
+    Allows viewing/editing samples (WAV + TXT), adding new samples,
+    and deleting existing samples.
+    """
+    
+    def __init__(self, profile_name: str, parent=None):
+        super().__init__(parent)
+        self.profile_name = profile_name
+        self.parent_window = parent
+        self.setWindowTitle(f"🎵 Voice Profile Editor: {profile_name}")
+        self.resize(800, 600)
+        self._current_sample = None
+        self._sample_data = []
+        
+        # Audio player
+        self.audio_output = QAudioOutput()
+        self.media_player = QMediaPlayer()
+        self.media_player.setAudioOutput(self.audio_output)
+        
+        self._build_ui()
+        self._load_samples()
+    
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+        
+        # Header
+        header = QLabel(f"<h2>Editing Profile: {self.profile_name}</h2>")
+        layout.addWidget(header)
+        
+        # Samples list
+        layout.addWidget(QLabel("Samples:"))
+        
+        self.samples_list = QListWidget()
+        self.samples_list.currentItemChanged.connect(self._on_sample_selected)
+        layout.addWidget(self.samples_list)
+        
+        # Sample details area
+        details_group = QGroupBox("Sample Details")
+        details_layout = QVBoxLayout(details_group)
+        
+        # Audio player
+        self.play_btn = QPushButton("▶️ Play")
+        self.play_btn.clicked.connect(self._play_selected_sample)
+        self.play_btn.setEnabled(False)
+        details_layout.addWidget(self.play_btn)
+        
+        # Text editor
+        details_layout.addWidget(QLabel("Text:"))
+        self.text_edit = QTextEdit()
+        self.text_edit.setMaximumHeight(150)
+        self.text_edit.textChanged.connect(self._on_text_changed)
+        self.text_edit.setEnabled(False)
+        details_layout.addWidget(self.text_edit)
+        
+        layout.addWidget(details_group)
+        
+        # Action buttons
+        btn_layout = QHBoxLayout()
+        
+        self.add_btn = QPushButton("➕ Add Sample")
+        self.add_btn.clicked.connect(self._add_sample)
+        btn_layout.addWidget(self.add_btn)
+        
+        self.delete_btn = QPushButton("🗑️ Delete Sample")
+        self.delete_btn.clicked.connect(self._delete_sample)
+        self.delete_btn.setEnabled(False)
+        btn_layout.addWidget(self.delete_btn)
+        
+        btn_layout.addStretch()
+        
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(self.close_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Status bar
+        self.status_label = QLabel("Ready")
+        layout.addWidget(self.status_label)
+        
+        # Audio error handler
+        self.media_player.errorOccurred.connect(self._on_audio_error)
+    
+    def _load_samples(self):
+        """Load all samples for this profile from /voices directory."""
+        self.samples_list.clear()
+        self._sample_data = []
+        
+        voices_dir = Path(VOICES_DIR)
+        if not voices_dir.exists():
+            return
+        
+        # Find all WAV files matching this profile
+        pattern = f"{self.profile_name}*.WAV"
+        for wav_path in voices_dir.glob(pattern):
+            stem = wav_path.stem
+            txt_path = wav_path.with_suffix('.txt')
+            
+            # Read text if exists
+            text = ""
+            if txt_path.exists():
+                try:
+                    text = txt_path.read_text(encoding='utf-8')
+                except:
+                    pass
+            
+            self._sample_data.append({
+                'stem': stem,
+                'wav_path': wav_path,
+                'txt_path': txt_path,
+                'text': text
+            })
+        
+        # Also check lowercase .wav
+        pattern = f"{self.profile_name}*.wav"
+        for wav_path in voices_dir.glob(pattern):
+            stem = wav_path.stem
+            # Check if already added
+            if any(s['stem'] == stem for s in self._sample_data):
+                continue
+            
+            txt_path = wav_path.with_suffix('.txt')
+            text = ""
+            if txt_path.exists():
+                try:
+                    text = txt_path.read_text(encoding='utf-8')
+                except:
+                    pass
+            
+            self._sample_data.append({
+                'stem': stem,
+                'wav_path': wav_path,
+                'txt_path': txt_path,
+                'text': text
+            })
+        
+        # Sort by sample number (extract number from stem)
+        def get_sample_num(stem):
+            match = re.search(r'(\d+)$', stem)
+            return int(match.group(1)) if match else 0
+        
+        self._sample_data.sort(key=lambda x: get_sample_num(x['stem']))
+        
+        # Populate list
+        for sample in self._sample_data:
+            # Try to get sample number
+            match = re.search(r'(\d+)$', sample['stem'])
+            label = f"Sample {match.group(1) if match else '?'}: {sample['stem']}"
+            item = QListWidgetItem(label)
+            item.setData(Qt.ItemDataRole.UserRole, sample['stem'])
+            self.samples_list.addItem(item)
+        
+        self.status_label.setText(f"Loaded {len(self._sample_data)} samples")
+    
+    def _on_sample_selected(self, current: QListWidgetItem, previous):
+        """Handle sample selection."""
+        if current is None:
+            self.play_btn.setEnabled(False)
+            self.text_edit.setEnabled(False)
+            self.delete_btn.setEnabled(False)
+            self._current_sample = None
+            return
+        
+        stem = current.data(Qt.ItemDataRole.UserRole)
+        sample = next((s for s in self._sample_data if s['stem'] == stem), None)
+        
+        if sample:
+            self._current_sample = sample
+            self.play_btn.setEnabled(True)
+            self.text_edit.setEnabled(True)
+            self.delete_btn.setEnabled(True)
+            
+            # Load text
+            self.text_edit.blockSignals(True)
+            self.text_edit.setPlainText(sample['text'])
+            self.text_edit.blockSignals(False)
+    
+    def _play_selected_sample(self):
+        """Play the selected sample."""
+        if not self._current_sample:
+            return
+        
+        wav_path = self._current_sample['wav_path']
+        if not wav_path.exists():
+            self.status_label.setText(f"⚠️ Audio file not found: {wav_path.name}")
+            return
+        
+        self.media_player.stop()
+        self.audio_output.setVolume(0.7)
+        url = QUrl.fromLocalFile(str(wav_path.absolute()))
+        self.media_player.setSource(url)
+        self.media_player.play()
+        self.status_label.setText(f"🔊 Playing: {wav_path.name}")
+    
+    def _on_text_changed(self):
+        """Save text when it changes."""
+        if not self._current_sample:
+            return
+        
+        new_text = self.text_edit.toPlainText()
+        sample = self._current_sample
+        
+        if new_text != sample['text']:
+            sample['text'] = new_text
+            try:
+                sample['txt_path'].write_text(new_text, encoding='utf-8')
+                self.status_label.setText(f"💾 Saved text for {sample['stem']}")
+            except Exception as e:
+                self.status_label.setText(f"❌ Error saving text: {e}")
+    
+    def _add_sample(self):
+        """Add a new sample to the profile."""
+        # Ask user for file
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Audio File",
+            "",
+            "Audio Files (*.wav *.mp3 *.flac *.aac *.m4a);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            return
+        
+        input_path = Path(file_path)
+        
+        # Determine next sample number
+        max_num = 0
+        for sample in self._sample_data:
+            match = re.search(r'(\d+)$', sample['stem'])
+            if match:
+                num = int(match.group(1))
+                if num > max_num:
+                    max_num = num
+        
+        next_num = max_num + 1
+        stem = f"{self.profile_name} {next_num}"
+        output_wav = Path(VOICES_DIR) / f"{stem}.WAV"
+        output_txt = Path(VOICES_DIR) / f"{stem}.txt"
+        
+        # Create voices directory if it doesn't exist
+        Path(VOICES_DIR).mkdir(parents=True, exist_ok=True)
+        
+        # Convert to Ogg Vorbis
+        self.status_label.setText(f"🔄 Converting audio...")
+        QApplication.processEvents()
+        
+        if not convert_to_ogg(input_path, output_wav, OGG_QUALITY):
+            QMessageBox.warning(self, "Conversion Error", 
+                "Failed to convert audio file. Please ensure ffmpeg is installed.")
+            return
+        
+        # Create empty text file
+        try:
+            output_txt.write_text("", encoding='utf-8')
+        except:
+            pass
+        
+        # Add to sample data
+        self._sample_data.append({
+            'stem': stem,
+            'wav_path': output_wav,
+            'txt_path': output_txt,
+            'text': ""
+        })
+        
+        # Refresh list
+        self._load_samples()
+        self.status_label.setText(f"✅ Added sample: {stem}")
+        
+        # Select the new sample
+        for i in range(self.samples_list.count()):
+            item = self.samples_list.item(i)
+            if item.data(Qt.ItemDataRole.UserRole) == stem:
+                self.samples_list.setCurrentItem(item)
+                break
+    
+    def _delete_sample(self):
+        """Delete the selected sample with warnings."""
+        if not self._current_sample:
+            return
+        
+        sample = self._current_sample
+        stem = sample['stem']
+        
+        # Warning dialog
+        reply = QMessageBox.warning(
+            self,
+            "Delete Sample",
+            f"Are you sure you want to delete sample '{stem}'?\n\n"
+            "This will delete the WAV and TXT files permanently.",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        
+        # Double-check with user
+        reply2 = QMessageBox.warning(
+            self,
+            "Final Confirmation",
+            f"⚠️ This action cannot be undone!\n\n"
+            f"Delete '{stem}.WAV' and '{stem}.txt'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        
+        if reply2 != QMessageBox.StandardButton.Yes:
+            return
+        
+        # Delete files
+        try:
+            if sample['wav_path'].exists():
+                sample['wav_path'].unlink()
+            if sample['txt_path'].exists():
+                sample['txt_path'].unlink()
+            
+            # Remove from list
+            self._sample_data = [s for s in self._sample_data if s['stem'] != stem]
+            
+            # Refresh list
+            self._load_samples()
+            self.status_label.setText(f"🗑️ Deleted sample: {stem}")
+            
+            # Clear current sample
+            self._current_sample = None
+            
+        except Exception as e:
+            self.status_label.setText(f"❌ Error deleting: {e}")
+            QMessageBox.warning(self, "Error", f"Failed to delete files: {e}")
+    
+    def _on_audio_error(self, error):
+        """Handle audio playback errors."""
+        error_messages = {
+            0: "No error",
+            1: "Resource error (file not found or inaccessible)",
+            2: "Format error (unsupported audio format)",
+            3: "Network error",
+            4: "Access denied",
+            5: "Service missing (media service not available)"
+        }
+        msg = error_messages.get(error, f"Unknown error code: {error}")
+        self.status_label.setText(f"⚠️ Audio error: {msg}")
+        debug_print(f"Audio error: {msg}")
+    
+    def closeEvent(self, event):
+        """Clean up on close."""
+        self.media_player.stop()
+        event.accept()
+
+
+# ============================================================================
+# Data loading / saving functions
 # ============================================================================
 
 def load_csv(csv_path: str) -> pd.DataFrame:
@@ -91,9 +492,23 @@ def save_json_file(file_path: str, data: Dict) -> bool:
         debug_print(f"ERROR saving {file_path}: {e}")
         return False
 
+def clean_redundant_substitutions(substitutions: Dict, existing_voices: Set[str]) -> Dict:
+    """Remove redundant substitutions where NPC name equals the voice profile name."""
+    # Quick check if any redundant entries exist
+    has_redundant = any(npc == voice and voice in existing_voices for npc, voice in substitutions.items())
+    if not has_redundant:
+        return substitutions  # No changes needed
+    
+    cleaned = {}
+    for npc_name, voice_profile in substitutions.items():
+        if npc_name == voice_profile and voice_profile in existing_voices:
+            debug_print(f"Removing redundant substitution: {npc_name} -> {voice_profile}")
+            continue
+        cleaned[npc_name] = voice_profile
+    return cleaned
 
 def get_available_voice_profiles() -> List[str]:
-    """Get unique voice profile names (grouping "Boy 2.wav" as "Boy")."""
+    """Get unique voice profile names (grouping 'Boy 2.wav' as 'Boy')."""
     voices_dir = Path(VOICES_DIR)
     if not voices_dir.exists():
         return []
@@ -191,14 +606,10 @@ def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions:
 def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
     """
     Calculate how many CSV lines each NPC, gender, and system name affects.
-    
-    Returns a dictionary with the same structure as hierarchy but with
-    'line_count' added to each level.
     """
     counts = {}
     
     for npc_name, npc_data in hierarchy.items():
-        # Get all rows for this NPC
         npc_rows = df[df['RealName'] == npc_name]
         total_lines = len(npc_rows)
         
@@ -207,7 +618,6 @@ def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
             'genders': {}
         }
         
-        # Count lines per gender
         for gender in npc_data.get('genders', {}).keys():
             gender_rows = npc_rows[npc_rows['Gender'] == gender]
             gender_count = len(gender_rows)
@@ -217,7 +627,6 @@ def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
                 'sysnames': {}
             }
             
-            # Count lines per system name (within this gender)
             for sys in npc_data['genders'][gender].get('sysnames', []):
                 sysname = sys['name']
                 sys_rows = gender_rows[gender_rows['SystemName'] == sysname]
@@ -252,7 +661,6 @@ class VoiceProfileManager(QMainWindow):
             self.sys_substitutions, self.existing_voices,
         )
         
-        # Calculate line counts for each NPC
         self.line_counts = calculate_line_counts(self.df, self.hierarchy)
 
         self.npc_names = sorted(self.hierarchy.keys())
@@ -304,17 +712,15 @@ class VoiceProfileManager(QMainWindow):
         self.search_box.textChanged.connect(self._on_filter_changed)
         left_layout.addWidget(self.search_box)
 
-        # --- Sorting and Filtering Controls ---
+        # Sorting and Filtering Controls
         controls_layout = QHBoxLayout()
         
-        # Sort dropdown
         controls_layout.addWidget(QLabel("Sort:"))
         self.sort_combo = QComboBox()
         self.sort_combo.addItems(["Alphabetical", "By Lines"])
         self.sort_combo.currentTextChanged.connect(self._on_filter_changed)
         controls_layout.addWidget(self.sort_combo)
         
-        # Filter dropdown
         controls_layout.addWidget(QLabel("Filter:"))
         self.filter_combo = QComboBox()
         self.filter_combo.addItems(["All", "Modified", "Missing", "Has Voice File"])
@@ -371,26 +777,17 @@ class VoiceProfileManager(QMainWindow):
     def _apply_filters(self):
         """
         Apply all filters (search, status filter) to determine which NPCs to show.
-        
-        Status filters:
-            - All: Show all NPCs
-            - Modified: Show NPCs with assignments at any level
-            - Missing: Show NPCs with NO assignments and NO voice file
-            - Has Voice File: Show NPCs that have an existing voice file
         """
         search_term = self.search_box.text().strip().lower()
         status_filter = self.filter_combo.currentText()
         sort_by = "alphabetical" if self.sort_combo.currentText() == "Alphabetical" else "lines"
         
-        # Store filtered items for list population
         self._filtered_items = []
         
         for name in self.npc_names:
-            # Apply search filter
             if search_term and search_term not in name.lower():
                 continue
             
-            # Apply status filter
             data = self.hierarchy[name]
             has_existing = data.get("has_existing_voice", False)
             has_assignments = (
@@ -410,14 +807,12 @@ class VoiceProfileManager(QMainWindow):
             elif status_filter == "Has Voice File" and not has_existing:
                 continue
             
-            # Get line count
             line_count = self.line_counts.get(name, {}).get('total_lines', 0)
             self._filtered_items.append((name, line_count))
         
-        # Sort items
         if sort_by == "alphabetical":
             self._filtered_items.sort(key=lambda x: x[0].lower())
-        else:  # by lines
+        else:
             self._filtered_items.sort(key=lambda x: x[1], reverse=True)
 
     def _populate_npc_list(self):
@@ -425,7 +820,6 @@ class VoiceProfileManager(QMainWindow):
         self.npc_list.blockSignals(True)
         self.npc_list.clear()
         
-        # Use filtered items
         items = self._filtered_items if self._filtered_items else [(name, 0) for name in self.npc_names]
         
         for name, line_count in items:
@@ -447,7 +841,6 @@ class VoiceProfileManager(QMainWindow):
             else:
                 icon = "🔴"
             
-            # Display with line count
             item_text = f"{icon} {name} [{line_count} lines]"
             item = QListWidgetItem(item_text)
             item.setData(Qt.ItemDataRole.UserRole, name)
@@ -456,17 +849,15 @@ class VoiceProfileManager(QMainWindow):
         self.npc_count_label.setText(f"Showing {len(items)} of {len(self.npc_names)} NPCs")
         self.npc_list.blockSignals(False)
 
-    def _refresh_all_list_icons(self):
-        """Update all list item icons to reflect current state."""
-        self.npc_list.blockSignals(True)
+    def _refresh_npc_list_icon(self, npc_name: str):
+        """Update the icon for a single NPC in the list."""
         for i in range(self.npc_list.count()):
             item = self.npc_list.item(i)
-            name = item.data(Qt.ItemDataRole.UserRole)
-            if name in self.hierarchy:
-                line_count = self.line_counts.get(name, {}).get('total_lines', 0)
-                icon = self._npc_icon(name)
-                item.setText(f"{icon} {name} [{line_count} lines]")
-        self.npc_list.blockSignals(False)
+            if item.data(Qt.ItemDataRole.UserRole) == npc_name:
+                line_count = self.line_counts.get(npc_name, {}).get('total_lines', 0)
+                icon = self._npc_icon(npc_name)
+                item.setText(f"{icon} {npc_name} [{line_count} lines]")
+                return
 
     def _select_npc_in_list(self, npc_name: str):
         for i in range(self.npc_list.count()):
@@ -482,17 +873,14 @@ class VoiceProfileManager(QMainWindow):
         self._apply_filters()
         self._populate_npc_list()
         
-        # If selected NPC is no longer visible, clear selection
         if self.selected_npc:
             visible_names = [name for name, _ in self._filtered_items]
             if self.selected_npc not in visible_names:
                 self.selected_npc = None
                 self._render_detail_panel()
-                # Update header
                 if hasattr(self, 'npc_title'):
                     self.npc_title.setText("<h2>Select an NPC</h2>")
         
-        # Auto-select first available NPC if nothing is selected
         if self.npc_list.count() > 0 and not self.selected_npc:
             self.npc_list.setCurrentRow(0)
 
@@ -516,7 +904,18 @@ class VoiceProfileManager(QMainWindow):
                 if sub_layout is not None:
                     self._clear_layout(sub_layout)
 
-    def _make_voice_combo(self, current_voice: Optional[str], on_change) -> QComboBox:
+    def _make_voice_combo_with_editor(self, current_voice: Optional[str], on_change, profile_name: str) -> QWidget:
+        """
+        Create a combo box with an Edit/Create button next to it.
+        
+        Returns a widget containing the combo and button.
+        """
+        container = QWidget()
+        layout = QHBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(4)
+        
+        # Combo box
         combo = QComboBox()
         options = [""] + self.available_voices
         combo.addItems(options)
@@ -526,7 +925,75 @@ class VoiceProfileManager(QMainWindow):
             combo.setCurrentIndex(options.index(current_voice))
         combo.blockSignals(False)
         combo.currentTextChanged.connect(on_change)
-        return combo
+        layout.addWidget(combo, stretch=1)
+        
+        # Store reference to combo for the button callback
+        setattr(container, 'combo', combo)
+        
+        # Edit/Create button
+        has_voice = current_voice in self.existing_voices
+        btn_text = "✏️" if has_voice else "➕"
+        btn_tooltip = f"Edit '{current_voice or 'new'}' profile" if has_voice else f"Create '{combo.currentText() or 'new'}' profile"
+        
+        btn = QPushButton(btn_text)
+        btn.setFixedWidth(30)
+        btn.setToolTip(btn_tooltip)
+        
+        # Capture combo reference for the lambda
+        def on_btn_clicked():
+            # Get the current text from the combo
+            current_text = combo.currentText() or profile_name
+            # Open the editor
+            self._open_profile_editor(current_text)
+            # After editor closes, update the combo to select the profile if it exists
+            if current_text in self.available_voices:
+                combo.blockSignals(True)
+                combo.setCurrentText(current_text)
+                combo.blockSignals(False)
+                # Trigger the change event
+                on_change(current_text)
+        
+        btn.clicked.connect(on_btn_clicked)
+        layout.addWidget(btn)
+        
+        # Store reference to button
+        setattr(container, 'btn', btn)
+        
+        return container
+    
+    def _open_profile_editor(self, profile_name: str):
+        """Open the voice profile editor for the given profile name."""
+        if not profile_name:
+            profile_name = "New Profile"
+        
+        # Store state before editor opens
+        before_voices = set(self.existing_voices)
+        
+        editor = VoiceProfileEditor(profile_name, self)
+        editor.exec()
+        
+        # After editor closes, refresh available voices
+        self.available_voices = get_available_voice_profiles()
+        self.existing_voices = get_existing_voice_files()
+        
+        # Only do expensive operations if something actually changed
+        after_voices = set(self.existing_voices)
+        if before_voices != after_voices:
+            debug_print("Voice files changed, rebuilding full list")
+            # Rebuild full hierarchy (expensive but necessary)
+            self.hierarchy = build_hierarchy(
+                self.df, self.substitutions, self.gender_substitutions,
+                self.sys_substitutions, self.existing_voices,
+            )
+            self.line_counts = calculate_line_counts(self.df, self.hierarchy)
+            self._update_stats()
+            # Full rebuild is needed here since many NPCs might be affected
+            self._populate_npc_list()  # Rebuild the entire list
+            self._render_detail_panel()
+        else:
+            debug_print("No voice files changed, skipping full rebuild")
+            # Just update the combo boxes with new available voices
+            self._render_detail_panel()
 
     def _render_detail_panel(self):
         self._clear_layout(self.detail_layout)
@@ -562,7 +1029,6 @@ class VoiceProfileManager(QMainWindow):
         title_label2 = QLabel(f"<i>Affects {total_lines} CSV lines</i>")
         title_box.addWidget(title_label)
         title_box.addWidget(title_label2)
-        # Store reference for filter updates
         self.npc_title = title_label
         header_layout.addLayout(title_box, stretch=1)
 
@@ -582,11 +1048,15 @@ class VoiceProfileManager(QMainWindow):
         # --- NPC level (always shown) ---
         npc_group = QGroupBox(f"📌 NPC Level Assignment ({total_lines} lines)")
         npc_form = QFormLayout(npc_group)
-        npc_combo = self._make_voice_combo(
-            npc_data["assigned_voice"],
+        
+        # Use the NPC name as the profile name for the editor
+        # This ensures the edit button appears even if the profile exists as a file
+        npc_container = self._make_voice_combo_with_editor(
+            npc_data["assigned_voice"] or npc_name,  # Pass NPC name as default
             lambda text: self._on_npc_voice_changed(npc_name, text),
+            npc_name
         )
-        npc_form.addRow("Voice:", npc_combo)
+        npc_form.addRow("Voice:", npc_container)
         self.detail_layout.addWidget(npc_group)
 
         # --- Gender level (shown if genders exist) ---
@@ -598,11 +1068,13 @@ class VoiceProfileManager(QMainWindow):
             for gender, gender_data in npc_data["genders"].items():
                 gender_count = npc_count.get('genders', {}).get(gender, {}).get('total_lines', 0)
                 gform = QFormLayout()
-                gcombo = self._make_voice_combo(
+                
+                gender_container = self._make_voice_combo_with_editor(
                     gender_data["assigned_voice"],
                     lambda text, g=gender: self._on_gender_voice_changed(npc_name, g, text),
+                    f"{npc_name}_{gender}"
                 )
-                gform.addRow(f"Voice for {gender} ({gender_count} lines):", gcombo)
+                gform.addRow(f"Voice for {gender} ({gender_count} lines):", gender_container)
                 gender_layout.addLayout(gform)
 
             # Then, render all system name groups (one per gender)
@@ -613,14 +1085,15 @@ class VoiceProfileManager(QMainWindow):
                     for sys in gender_data["sysnames"]:
                         sysname = sys["name"]
                         sys_count = npc_count.get('genders', {}).get(gender, {}).get('sysnames', {}).get(sysname, 0)
-                        scombo = self._make_voice_combo(
+                        
+                        sys_container = self._make_voice_combo_with_editor(
                             sys["assigned_voice"],
                             lambda text, s=sysname: self._on_sys_voice_changed(s, text),
+                            sysname
                         )
-                        sys_form.addRow(f"{sysname} ({sys_count} lines):", scombo)
+                        sys_form.addRow(f"{sysname} ({sys_count} lines):", sys_container)
                     gender_layout.addWidget(sys_group)
 
-                # Add separator between gender sections if both have systems
                 if gender_data["sysnames"] and list(npc_data["genders"].keys())[-1] != gender:
                     line = QFrame()
                     line.setFrameShape(QFrame.Shape.HLine)
@@ -636,12 +1109,40 @@ class VoiceProfileManager(QMainWindow):
     # Change handlers
     # ------------------------------------------------------------------
     def _refresh_npc_entry(self, npc_name: str):
+        """Refresh the hierarchy entry for a single NPC (fast)."""
         self.hierarchy[npc_name] = build_hierarchy_for_npc(
             self.df, npc_name, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
         )
-        # Also update line counts
-        self.line_counts = calculate_line_counts(self.df, self.hierarchy)
+        # Update line counts for this NPC only
+        self._update_line_counts_for_npc(npc_name)
+    
+    def _update_line_counts_for_npc(self, npc_name: str):
+        """Update line counts for a single NPC only (fast)."""
+        npc_rows = self.df[self.df['RealName'] == npc_name]
+        total_lines = len(npc_rows)
+        
+        self.line_counts[npc_name] = {
+            'total_lines': total_lines,
+            'genders': {}
+        }
+        
+        # Get the NPC data from hierarchy
+        npc_data = self.hierarchy[npc_name]
+        for gender in npc_data.get('genders', {}).keys():
+            gender_rows = npc_rows[npc_rows['Gender'] == gender]
+            gender_count = len(gender_rows)
+            
+            self.line_counts[npc_name]['genders'][gender] = {
+                'total_lines': gender_count,
+                'sysnames': {}
+            }
+            
+            for sys in npc_data['genders'][gender].get('sysnames', []):
+                sysname = sys['name']
+                sys_rows = gender_rows[gender_rows['SystemName'] == sysname]
+                sys_count = len(sys_rows)
+                self.line_counts[npc_name]['genders'][gender]['sysnames'][sysname] = sys_count
 
     def _on_npc_voice_changed(self, npc_name: str, new_voice: str):
         current = self.substitutions.get(npc_name) or ""
@@ -652,12 +1153,18 @@ class VoiceProfileManager(QMainWindow):
             self.substitutions[npc_name] = new_voice
         else:
             self.substitutions.pop(npc_name, None)
+        
+        # Clean redundant substitutions before saving
+        cleaned_substitutions = clean_redundant_substitutions(self.substitutions, self.existing_voices)
+        self.substitutions = cleaned_substitutions
+        
         if save_json_file(VOICE_SUBSTITUTIONS_FILE, self.substitutions):
+            # Update hierarchy
             self._refresh_npc_entry(npc_name)
-            self.statusBar().showMessage(f"✅ Updated {npc_name} → {new_voice or 'unassigned'}", 3000)
             self._update_stats()
-            self._refresh_all_list_icons()
-            self._render_detail_panel()
+            # Update ONLY the changed NPC's icon (fast!)
+            self._refresh_npc_list_icon(npc_name)
+            self.statusBar().showMessage(f"✅ Updated {npc_name} → {new_voice or 'unassigned'}", 3000)
 
     def _on_gender_voice_changed(self, npc_name: str, gender: str, new_voice: str):
         gender_key = f"{npc_name}|{gender}"
@@ -671,10 +1178,9 @@ class VoiceProfileManager(QMainWindow):
             self.gender_substitutions.pop(gender_key, None)
         if save_json_file(VOICE_SUBSTITUTIONS_GENDER_FILE, self.gender_substitutions):
             self._refresh_npc_entry(npc_name)
-            self.statusBar().showMessage(f"✅ Updated {npc_name}|{gender} → {new_voice or 'unassigned'}", 3000)
             self._update_stats()
-            self._refresh_all_list_icons()
-            self._render_detail_panel()
+            self._refresh_npc_list_icon(npc_name)  # Target only this NPC
+            self.statusBar().showMessage(f"✅ Updated {npc_name}|{gender} → {new_voice or 'unassigned'}", 3000)
 
     def _on_sys_voice_changed(self, sysname: str, new_voice: str):
         current = self.sys_substitutions.get(sysname) or ""
@@ -688,10 +1194,9 @@ class VoiceProfileManager(QMainWindow):
         if save_json_file(VOICE_SUBSTITUTIONS_SYSNAME_FILE, self.sys_substitutions):
             if self.selected_npc is not None:
                 self._refresh_npc_entry(self.selected_npc)
-            self.statusBar().showMessage(f"✅ Updated {sysname} → {new_voice or 'unassigned'}", 3000)
+                self._refresh_npc_list_icon(self.selected_npc)  # Target only this NPC
             self._update_stats()
-            self._refresh_all_list_icons()
-            self._render_detail_panel()
+            self.statusBar().showMessage(f"✅ Updated {sysname} → {new_voice or 'unassigned'}", 3000)
 
     def _update_stats(self):
         npcs_with_voice = sum(1 for d in self.hierarchy.values() if d.get("has_existing_voice", False))
