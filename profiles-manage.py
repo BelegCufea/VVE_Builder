@@ -26,6 +26,8 @@ import time
 import re
 import subprocess
 import logging
+import requests
+import tempfile
 from pathlib import Path
 from typing import Dict, List, Optional, Set
 
@@ -42,6 +44,9 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 # ============================================================================
 # Configuration
 # ============================================================================
+
+# CSV filtering
+FILENAME_PATTERN = r"^TS"      # regex pattern for filename (column 6)
 
 # Audio settings
 OGG_QUALITY = 4                # Vorbis quality (0-10, 4 = good quality/size balance)
@@ -189,10 +194,14 @@ class VoiceProfileEditor(QDialog):
         # Action buttons
         btn_layout = QHBoxLayout()
         
-        self.add_btn = QPushButton("➕ Add Sample")
+        self.add_btn = QPushButton("➕ Add Sample (File)")
         self.add_btn.clicked.connect(self._add_sample)
         btn_layout.addWidget(self.add_btn)
         
+        self.url_btn = QPushButton("🌐 Add Sample (URL)")
+        self.url_btn.clicked.connect(self._add_sample_from_url)
+        btn_layout.addWidget(self.url_btn)
+
         self.delete_btn = QPushButton("🗑️ Delete Sample")
         self.delete_btn.clicked.connect(self._delete_sample)
         self.delete_btn.setEnabled(False)
@@ -219,6 +228,7 @@ class VoiceProfileEditor(QDialog):
         
         Finds all WAV files matching the profile name pattern and loads
         their corresponding TXT files. Files are sorted by sample number.
+        Also displays audio duration for each sample.
         """
         self.samples_list.clear()
         self._sample_data = []
@@ -228,10 +238,26 @@ class VoiceProfileEditor(QDialog):
             logger.debug(f"Voices directory does not exist: {VOICES_DIR}")
             return
         
-        # Find all WAV files matching this profile
-        pattern = f"{self.profile_name}*.WAV"
-        for wav_path in voices_dir.glob(pattern):
+        # Build a regex pattern to match ONLY this profile's files
+        escaped_name = re.escape(self.profile_name)
+        pattern = re.compile(rf'^{escaped_name}(?: \d+)?$', re.IGNORECASE)
+        
+        # Use a set to avoid duplicates
+        unique_files = set()
+        
+        # Find all WAV files (case-insensitive on Windows)
+        for wav_path in voices_dir.glob("*.wav"):
+            unique_files.add(wav_path)
+        for wav_path in voices_dir.glob("*.WAV"):
+            unique_files.add(wav_path)
+        
+        for wav_path in unique_files:
             stem = wav_path.stem
+            
+            # Check if this file belongs to this profile using the regex
+            if not pattern.match(stem):
+                continue
+            
             txt_path = wav_path.with_suffix('.txt')
             
             # Read text if exists
@@ -242,34 +268,15 @@ class VoiceProfileEditor(QDialog):
                 except:
                     pass
             
-            self._sample_data.append({
-                'stem': stem,
-                'wav_path': wav_path,
-                'txt_path': txt_path,
-                'text': text
-            })
-        
-        # Also check lowercase .wav
-        pattern = f"{self.profile_name}*.wav"
-        for wav_path in voices_dir.glob(pattern):
-            stem = wav_path.stem
-            # Check if already added
-            if any(s['stem'] == stem for s in self._sample_data):
-                continue
-            
-            txt_path = wav_path.with_suffix('.txt')
-            text = ""
-            if txt_path.exists():
-                try:
-                    text = txt_path.read_text(encoding='utf-8')
-                except:
-                    pass
+            # Get audio duration
+            duration = self._get_audio_duration(wav_path)
             
             self._sample_data.append({
                 'stem': stem,
                 'wav_path': wav_path,
                 'txt_path': txt_path,
-                'text': text
+                'text': text,
+                'duration': duration
             })
         
         # Sort by sample number (extract number from stem)
@@ -279,18 +286,30 @@ class VoiceProfileEditor(QDialog):
         
         self._sample_data.sort(key=lambda x: get_sample_num(x['stem']))
         
-        # Populate list
+        # Populate list with duration info
         for sample in self._sample_data:
             # Try to get sample number
             match = re.search(r'(\d+)$', sample['stem'])
             label = f"Sample {match.group(1) if match else '?'}: {sample['stem']}"
+            
+            # Add duration if available
+            if sample['duration'] is not None:
+                duration = sample['duration']
+                if duration >= 60:
+                    minutes = int(duration // 60)
+                    seconds = int(duration % 60)
+                    duration_str = f"{minutes}:{seconds:02d}"
+                else:
+                    duration_str = f"{duration:.1f}s"
+                label += f" [{duration_str}]"
+            
             item = QListWidgetItem(label)
             item.setData(Qt.ItemDataRole.UserRole, sample['stem'])
             self.samples_list.addItem(item)
         
         logger.debug(f"Loaded {len(self._sample_data)} samples for profile {self.profile_name}")
-        self.status_label.setText(f"Loaded {len(self._sample_data)} samples")
-    
+        self.status_label.setText(f"Loaded {len(self._sample_data)} samples")    
+
     def _on_sample_selected(self, current: QListWidgetItem, previous):
         """Handle sample selection from the list."""
         if current is None:
@@ -324,13 +343,18 @@ class VoiceProfileEditor(QDialog):
             self.status_label.setText(f"⚠️ Audio file not found: {wav_path.name}")
             return
         
+        # Stop any existing playback first
         self.media_player.stop()
+        # Ensure the previous source is cleared
+        self.media_player.setSource(QUrl())
+        QApplication.processEvents()
+        
         self.audio_output.setVolume(0.7)
         url = QUrl.fromLocalFile(str(wav_path.absolute()))
         self.media_player.setSource(url)
         self.media_player.play()
         self.status_label.setText(f"🔊 Playing: {wav_path.name}")
-    
+
     def _on_text_changed(self):
         """Auto-save text when it changes."""
         if not self._current_sample:
@@ -366,42 +390,29 @@ class VoiceProfileEditor(QDialog):
         except Exception as e:
             logger.error(f"Failed to get duration for {audio_path}: {e}")
             return None
-    
-    def _add_sample(self):
-        """
-        Add a new sample to the profile.
-        
-        Prompts user to select an audio file, converts it to Ogg Vorbis,
-        and creates a corresponding TXT file. The new sample is automatically
-        numbered (e.g., "Profile 1.wav", "Profile 2.wav", etc.).
-        """
-        # Ask user for file
-        file_path, _ = QFileDialog.getOpenFileName(
-            self,
-            "Select Audio File",
-            "",
-            "Audio Files (*.wav *.mp3 *.flac *.aac *.m4a);;All Files (*.*)"
-        )
-        
-        if not file_path:
-            return
-        
-        input_path = Path(file_path)
-        logger.info(f"Adding sample from: {file_path}")
+
+    def _import_audio_file(self, input_path: Path):
+        """Import a local audio file (from disk) as a new sample."""
+        logger.info(f"Importing sample from: {input_path}")
         
         # Check duration and warn
         duration = self._get_audio_duration(input_path)
         if duration and duration > MAX_DURATION:
             logger.warning(f"Audio too long: {duration:.1f}s (max: {MAX_DURATION}s)")
-            QMessageBox.warning(
+            reply = QMessageBox.warning(
                 self,
                 "Audio Too Long",
                 f"The audio file is {duration:.1f}s long.\n\n"
                 f"VoiceBox has a maximum duration of {MAX_DURATION}s.\n"
                 "The audio will be uploaded but may be truncated or rejected by the server.\n\n"
-                "Consider trimming it manually in an audio editor."
+                "Consider trimming it manually in an audio editor.\n\n"
+                "Do you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No
             )
-        
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
         # Determine next sample number
         max_num = 0
         for sample in self._sample_data:
@@ -435,12 +446,16 @@ class VoiceProfileEditor(QDialog):
         except:
             pass
         
+        # Get duration of the converted file
+        duration = self._get_audio_duration(output_wav)
+        
         # Add to sample data
         self._sample_data.append({
             'stem': stem,
             'wav_path': output_wav,
             'txt_path': output_txt,
-            'text': ""
+            'text': "",
+            'duration': duration
         })
         
         logger.info(f"Added sample: {stem}")
@@ -455,6 +470,228 @@ class VoiceProfileEditor(QDialog):
             if item.data(Qt.ItemDataRole.UserRole) == stem:
                 self.samples_list.setCurrentItem(item)
                 break
+
+    def _import_downloaded_file(self, temp_path: Path):
+        """Import a downloaded temporary file, then clean up."""
+        try:
+            # Use the main import function
+            self._import_audio_file(temp_path)
+        finally:
+            # Clean up the temporary file
+            try:
+                if temp_path.exists():
+                    temp_path.unlink()
+                    logger.debug(f"Removed temporary file: {temp_path}")
+            except Exception as e:
+                logger.warning(f"Could not remove temporary file {temp_path}: {e}")       
+
+    def _normalize_escaping(self, raw: str) -> str:
+        """
+        Fish Audio's Next.js page streams data via self.__next_f.push(...) calls,
+        where the payload is JSON-encoded as a JS string literal -- and some
+        fields are nested an extra level deep (JSON-within-JSON), so the number
+        of backslashes escaping a given quote varies field to field (\" vs \\").
+        Collapsing all runs of backslashes-before-a-quote, then decoding \\uXXXX
+        escapes, normalizes everything to plain JSON-like text regexes can match.
+        """
+        cleaned = re.sub(r'\\+(?=")', '', raw)
+        cleaned = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), cleaned)
+        return cleaned
+
+
+    def _parse_fish_audio_page(self, url: str) -> Optional[Dict[str, str]]:
+        """
+        Fetch a Fish Audio model page and extract the default sample's audio
+        URL and text, straight from the embedded (escaped) JSON -- no browser
+        required.
+
+        Returns {'audio_url': ..., 'text': ...} or None if this voice has no
+        sample (page will contain "no audio samples yet") or parsing fails.
+        """
+        try:
+            headers = {
+                "User-Agent": (
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0 Safari/537.36"
+                )
+            }
+            response = requests.get(url, headers=headers, timeout=10)
+            response.raise_for_status()
+            raw = response.text
+
+            cleaned = self._normalize_escaping(raw)
+
+            # Anchor on the "samples" block that pairs title/text/audio together,
+            # rather than matching "text" or "audio" keys in isolation -- those
+            # keys appear elsewhere on the page (related voices, marketing copy,
+            # other sample sets like "s2/sample-N.mp3") and a loose match can grab
+            # the wrong one.
+            sample_match = re.search(
+                r'"title":"Default Sample","text":"(?P<text>[^"]+?)"'
+                r'.*?"audio":"(?P<audio>https://[^"]+?\.mp3\?[^"]+?)"',
+                cleaned,
+            )
+
+            if sample_match:
+                return {
+                    "audio_url": sample_match.group("audio"),
+                    "text": sample_match.group("text"),
+                }
+
+            # Only trust the page's "no samples" UI message once the real JSON
+            # block genuinely isn't there -- that phrase also appears as a
+            # translation-string constant even on pages that DO have a sample,
+            # so checking it first can produce false negatives.
+            if "no audio samples yet" in raw.lower():
+                logger.info("Page reports no audio samples for this voice.")
+            else:
+                logger.warning("Could not find the Default Sample block, and no explicit 'no samples' message either.")
+            return None
+            
+        except Exception as e:
+            logger.exception(f"Error parsing Fish Audio page: {e}")
+            return None
+    
+    def _download_from_url(self, url: str):
+        """Download audio from a URL and add it as a sample."""
+        self.status_label.setText(f"⬇️ Downloading from URL...")
+        QApplication.processEvents()
+
+        try:
+            # Download the file with a timeout
+            response = requests.get(url, timeout=30, stream=True)
+            response.raise_for_status()
+
+            # Determine file extension from Content-Type or URL
+            content_type = response.headers.get('content-type', '')
+            ext = '.mp3'  # default
+            if 'audio/wav' in content_type or 'audio/x-wav' in content_type:
+                ext = '.wav'
+            elif 'audio/flac' in content_type or 'audio/x-flac' in content_type:
+                ext = '.flac'
+            elif 'audio/mpeg' in content_type:
+                ext = '.mp3'
+            elif 'audio/m4a' in content_type:
+                ext = '.m4a'
+            elif 'audio/aac' in content_type:
+                ext = '.aac'
+            elif 'audio/ogg' in content_type:
+                ext = '.ogg'
+            # Could also try to get from URL path
+            else:
+                # Try to get extension from URL
+                url_path = url.split('?')[0]
+                if '.' in url_path:
+                    possible_ext = Path(url_path).suffix.lower()
+                    if possible_ext in ['.mp3', '.wav', '.flac', '.aac', '.m4a', '.ogg']:
+                        ext = possible_ext
+
+            with tempfile.NamedTemporaryFile(delete=False, suffix=ext) as tmp_file:
+                for chunk in response.iter_content(chunk_size=8192):
+                    tmp_file.write(chunk)
+                temp_path = Path(tmp_file.name)
+
+            self.status_label.setText(f"✅ Downloaded. Importing...")
+            QApplication.processEvents()
+
+            self._import_downloaded_file(temp_path)
+
+        except requests.exceptions.Timeout:
+            self.status_label.setText("❌ Download timed out. URL may be slow or inaccessible.")
+            logger.error(f"Download timeout for URL: {url}")
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None:
+                status_code = e.response.status_code
+                if status_code == 403:
+                    msg = "Access Denied (403) - The URL may require authentication or be expired."
+                elif status_code == 404:
+                    msg = "File Not Found (404) - The URL is invalid or the file has been removed."
+                elif status_code == 410:
+                    msg = "File Gone (410) - This URL is no longer available."
+                else:
+                    msg = f"HTTP Error: {status_code}"
+                self.status_label.setText(f"❌ {msg}")
+                logger.error(f"HTTP Error {status_code} for URL: {url}")
+            else:
+                self.status_label.setText(f"❌ HTTP Error occurred")
+                logger.error(f"HTTP Error for URL: {url} - {e}")
+        except requests.exceptions.RequestException as e:
+            self.status_label.setText(f"❌ Download failed: {e}")
+            logger.error(f"Download failed for URL {url}: {e}")
+        except Exception as e:
+            self.status_label.setText(f"❌ An unexpected error occurred.")
+            logger.exception(f"Unexpected error during download from URL {url}: {e}")
+
+    def _add_sample_from_url(self):
+        """Open dialog to import audio from a URL."""
+        dialog = URLImportDialog(self)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            url = dialog.get_url()
+            mode = dialog.get_mode()
+            if url:
+                if mode == "fish":
+                    self._import_from_fish_audio(url)
+                else:
+                    self._download_from_url(url)
+
+    def _import_from_fish_audio(self, url: str):
+        """Import audio and text from a Fish Audio page."""
+        self.status_label.setText(f"🔍 Parsing Fish Audio page...")
+        QApplication.processEvents()
+        
+        # Use the updated parser
+        result = self._parse_fish_audio_page(url)
+        
+        if not result:
+            self.status_label.setText(f"❌ Failed to parse Fish Audio page")
+            QMessageBox.warning(
+                self,
+                "Parsing Failed",
+                "Could not extract audio from the Fish Audio page.\n\n"
+                "Try using the direct audio URL instead."
+            )
+            return
+        
+        audio_url = result['audio_url']
+        sample_text = result['text']
+        
+        # First download the audio
+        self.status_label.setText(f"⬇️ Downloading audio from Fish Audio...")
+        QApplication.processEvents()
+        
+        # Download and import the audio
+        self._download_from_url(audio_url)
+        
+        # After import, set the text on the newly added sample
+        if self._sample_data:
+            latest_sample = self._sample_data[-1]
+            try:
+                latest_sample['txt_path'].write_text(sample_text, encoding='utf-8')
+                latest_sample['text'] = sample_text
+                # Refresh the display if this sample is selected
+                if self._current_sample and self._current_sample['stem'] == latest_sample['stem']:
+                    self.text_edit.blockSignals(True)
+                    self.text_edit.setPlainText(sample_text)
+                    self.text_edit.blockSignals(False)
+                self.status_label.setText(f"✅ Imported audio with sample text")
+                logger.info(f"Successfully imported from Fish Audio: {url}")
+            except Exception as e:
+                logger.error(f"Failed to save sample text: {e}")
+                self.status_label.setText(f"⚠️ Audio imported but text failed: {e}")
+    
+    def _add_sample(self):
+        """Add a new sample from a local file."""
+        file_path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select Audio File",
+            "",
+            "Audio Files (*.wav *.mp3 *.flac *.aac *.m4a);;All Files (*.*)"
+        )
+        
+        if not file_path:
+            return
+
+        self._import_audio_file(Path(file_path))
     
     def _delete_sample(self):
         """
@@ -495,6 +732,20 @@ class VoiceProfileEditor(QDialog):
         if reply2 != QMessageBox.StandardButton.Yes:
             return
         
+        # ⭐ CRITICAL: Stop playback and release the file BEFORE deletion
+        self.media_player.stop()
+        # Set source to empty to release the file handle
+        self.media_player.setSource(QUrl())
+        # Process events to ensure the release happens
+        QApplication.processEvents()
+        
+        # Also stop any pending audio operations
+        if self.audio_output:
+            self.audio_output.setVolume(0.0)
+        
+        # Small delay to ensure the file is released
+        time.sleep(0.1)
+        
         # Delete files
         try:
             if sample['wav_path'].exists():
@@ -513,6 +764,15 @@ class VoiceProfileEditor(QDialog):
             # Clear current sample
             self._current_sample = None
             
+        except PermissionError as e:
+            self.status_label.setText(f"❌ File in use - couldn't delete")
+            logger.error(f"Permission error deleting sample {stem}: {e}")
+            QMessageBox.warning(
+                self, 
+                "File in Use", 
+                f"Could not delete '{stem}' because the file is still in use.\n\n"
+                "Make sure the sample is not playing and try again."
+            )
         except Exception as e:
             self.status_label.setText(f"❌ Error deleting: {e}")
             logger.error(f"Error deleting sample {stem}: {e}")
@@ -540,6 +800,120 @@ class VoiceProfileEditor(QDialog):
 
 
 # ============================================================================
+# URL Paste Editor Dialog
+# ============================================================================
+
+class URLImportDialog(QDialog):
+    """Dialog for importing audio from a URL."""
+    
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("📥 Import Audio from URL")
+        self.resize(600, 250)
+        self.url = None
+        self.mode = "direct"  # "direct" or "fish_page"
+        
+        layout = QVBoxLayout(self)
+        
+        # Instructions - now mentions both options
+        instructions = QLabel(
+            "Paste a URL to an audio file OR a Fish Audio page URL.\n"
+            "Fish Audio pages will be parsed to extract the audio and sample text."
+        )
+        instructions.setWordWrap(True)
+        layout.addWidget(instructions)
+        
+        # URL text edit
+        self.url_edit = QTextEdit()
+        self.url_edit.setPlaceholderText(
+            "Direct audio URL:\nhttps://example.com/audio.mp3\n\n"
+            "OR Fish Audio page:\nhttps://fish.audio/app/m/..."
+        )
+        self.url_edit.setMaximumHeight(80)
+        layout.addWidget(self.url_edit)
+        
+        # Buttons
+        btn_layout = QHBoxLayout()
+        
+        paste_btn = QPushButton("📋 Paste from Clipboard")
+        paste_btn.clicked.connect(self._paste_from_clipboard)
+        btn_layout.addWidget(paste_btn)
+        
+        btn_layout.addStretch()
+        
+        # Mode indicator
+        self.mode_label = QLabel("🔹 Mode: Auto-detect")
+        btn_layout.addWidget(self.mode_label)
+        
+        ok_btn = QPushButton("✅ Download")
+        ok_btn.clicked.connect(self._accept_url)
+        ok_btn.setDefault(True)
+        btn_layout.addWidget(ok_btn)
+        
+        cancel_btn = QPushButton("❌ Cancel")
+        cancel_btn.clicked.connect(self.reject)
+        btn_layout.addWidget(cancel_btn)
+        
+        layout.addLayout(btn_layout)
+        
+        # Status label
+        self.status_label = QLabel("")
+        layout.addWidget(self.status_label)
+        
+        # Update mode indicator when text changes
+        self.url_edit.textChanged.connect(self._update_mode_indicator)
+    
+    def _update_mode_indicator(self):
+        """Update the mode indicator based on the URL."""
+        url = self.url_edit.toPlainText().strip()
+        if "fish.audio/app/m/" in url:
+            self.mode_label.setText("🔹 Mode: Fish Audio (parse page)")
+        elif url.startswith(('http://', 'https://')):
+            self.mode_label.setText("🔹 Mode: Direct download")
+        else:
+            self.mode_label.setText("🔹 Mode: Auto-detect")
+    
+    def _paste_from_clipboard(self):
+        """Paste from clipboard into the text edit."""
+        clipboard = QApplication.clipboard()
+        text = clipboard.text()
+        if text:
+            self.url_edit.setText(text)
+            self.status_label.setText("✅ Pasted from clipboard")
+            self.url_edit.selectAll()
+            self._update_mode_indicator()
+    
+    def _accept_url(self):
+        """Validate and accept the URL."""
+        url = self.url_edit.toPlainText().strip()
+        if not url:
+            self.status_label.setText("⚠️ Please paste a URL first.")
+            return
+        
+        if not url.startswith(('http://', 'https://')):
+            self.status_label.setText("⚠️ URL must start with http:// or https://")
+            return
+        
+        # Auto-detect mode
+        if "fish.audio/app/m/" in url:
+            self.mode = "fish"
+            self.status_label.setText("✅ Fish Audio page detected - will parse for audio + text")
+        else:
+            self.mode = "direct"
+            self.status_label.setText("✅ Direct audio URL - will download file")
+        
+        self.url = url
+        self.accept()
+    
+    def get_url(self) -> Optional[str]:
+        """Return the validated URL."""
+        return self.url
+    
+    def get_mode(self) -> str:
+        """Return the import mode ('direct' or 'fish')."""
+        return self.mode
+
+# ============================================================================
 # Data Loading / Saving Functions
 # ============================================================================
 
@@ -553,6 +927,43 @@ def load_csv(csv_path: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading CSV: {e}")
         return pd.DataFrame()
+    
+
+def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Filter the CSV to only include lines that need voice assignment.
+    
+    Rules:
+    1. Lines with SoundResRef already set are skipped (already have voice)
+    2. Lines where SoundResRef matches FILENAME_PATTERN are always kept (exception)
+    
+    Args:
+        df: Original DataFrame from CSV
+    
+    Returns:
+        Filtered DataFrame with only lines needing assignment
+    """
+    original_count = len(df)
+    
+    # Convert to string and clean
+    sound_refs = df['SoundResRef'].fillna('').astype(str).str.strip()
+    
+    # Check if SoundResRef is empty (needs assignment)
+    is_empty_sound = (sound_refs == '') | (sound_refs == 'nan') | (sound_refs == 'None')
+    
+    # Check if SoundResRef starts with "TS" (exception - always keep these)
+    is_ts = sound_refs.str.match(FILENAME_PATTERN, na=False)
+    
+    # Keep if: empty SoundResRef OR SoundResRef matches TS pattern
+    keep_mask = is_empty_sound | is_ts
+    
+    filtered_df = df[keep_mask].copy()
+    
+    logger.info(f"CSV filter: {original_count} rows → {len(filtered_df)} rows kept")
+    removed_count = original_count - len(filtered_df)
+    logger.info(f"  Removed {removed_count} lines with existing SoundResRef (not matching TS pattern)")
+    
+    return filtered_df
 
 
 def load_json_files():
@@ -891,6 +1302,11 @@ class VoiceProfileManager(QMainWindow):
 
         # --- Load everything once at startup ---
         self.df = load_csv(CSV_PATH)
+
+        # Apply the filter to remove lines with SoundResRef (except TS files)
+        if not self.df.empty:
+            self.df = filter_csv_for_assignment(self.df)
+
         self.substitutions, self.gender_substitutions, self.sys_substitutions = load_json_files()
         self.available_voices = get_available_voice_profiles()
         self.existing_voices = get_existing_voice_files()

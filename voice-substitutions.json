@@ -1,0 +1,10 @@
+{
+  "npc": {
+    "Machine of Lum the Mad": "BG1 Narrator"
+  },
+  "gender": {},
+  "sysname": {
+    "GORALT1": "BG1 Narrator",
+    "RIFTG01": "BG1 Narrator"
+  }
+}
