@@ -2013,6 +2013,127 @@ def process_generation_job(idx, total_jobs, strref, npc_name, voice_name, filena
 
     # All attempts failed
     return False, last_elapsed, last_audio_duration, chars, retry_attempts
+
+def process_generation_jobs_all(profile_map, generation_memory, selected_rows, total_jobs, total_chars_all):
+    """
+    Process all generation jobs in the selected rows with real-time progress tracking.
+
+    Iterates through each row in selected_rows, submitting each to the TTS API
+    with optional retry support. Maintains real-time performance statistics
+    (regression-based time estimation) and tracks retry/error statistics for
+    reporting in the final summary.
+
+    The function manages the following aspects for each job:
+        - Snapshots the overall progress line before each job
+        - Calls process_generation_job() with retry support (RETRY_COUNT and RETRY_DELAY)
+        - Updates regression models for time estimation using successful jobs only
+        - Logs job completion or failure with appropriate detail (retry count if applicable)
+        - Tracks failed tasks for final reporting
+
+    Performance statistics:
+        - Character-based linear regression (regressor) for individual job estimation
+        - Overall regression (overall_regressor) for ETA calculations
+        - Running average time per character for fallback estimation
+
+    Args:
+        profile_map (dict): Voice profile map from get_all_profiles(),
+            mapping profile names to their numeric IDs.
+        generation_memory (dict): Generation memory dictionary for tracking
+            already generated STRREFs.
+        selected_rows (list): List of tuples (strref, display_name, voice_name, filename, text)
+            that have passed all filters and are ready for generation.
+        total_jobs (int): Total number of jobs in the selected_rows list.
+        total_chars_all (int): Total character count across all jobs for progress calculation.
+
+    Returns:
+        tuple: (total_chars_processed, avg_time_per_char, retry_stats)
+            - total_chars_processed (int): Total characters successfully generated.
+            - avg_time_per_char (float): Running average seconds per character across all jobs.
+            - retry_stats (dict): Statistics tracking retry behavior:
+                {
+                    "failed_attempts": int,      # Total failed attempts (including retries)
+                    "successful_retries": int,   # Tasks that succeeded after at least one retry
+                    "failed_tasks": int,         # Tasks that failed all retry attempts
+                    "failed_task_details": list  # List of failed task info
+                }
+
+    Note:
+        - The function uses the logger for all console and file output.
+        - Skipped rows (missing profile_id) are logged as warnings but not counted as failures.
+        - Retry statistics are only tracked for jobs that were actually processed.
+        - The function does not return the regression objects; they are only used internally
+          for time estimation during processing.
+    """    
+    total_chars_processed = 0
+    total_start_time = time.time()
+    avg_time_per_char = None
+    overall_regressor = Regression()
+    regressor = Regression()
+    
+    # Track retry statistics for the final summary
+    retry_stats = {
+        "failed_attempts": 0,          # Total failed attempts (including retries)
+        "successful_retries": 0,       # Tasks that succeeded after at least one retry
+        "failed_tasks": 0,             # Tasks that failed all retry attempts
+        "failed_task_details": []      # List of (idx, strref, filename, npc_name) for failed tasks
+    }
+
+    for idx, (strref, display_name, voice_name, filename, text) in enumerate(selected_rows, start=1):
+        profile_id = profile_map.get(voice_name)
+        if not profile_id:
+            logger.warning(f"Skipping {strref}/{filename}: Voice '{voice_name}' not found.")
+            continue
+
+        # Snapshot Overall line (static for the duration of this job)
+        elapsed_total = time.time() - total_start_time
+        overall_line = format_overall_line(
+            total_chars_processed, total_chars_all, total_jobs, idx - 1,
+            overall_regressor, avg_time_per_char, elapsed_total
+        )
+
+        # Process the generation job with retry support
+        success, elapsed, audio_duration, chars, retry_attempts = process_generation_job(
+            idx, total_jobs, strref, display_name, voice_name, filename, text,
+            profile_id, regressor, generation_memory, overall_line,
+            RETRY_COUNT, RETRY_DELAY
+        )
+        
+        # Update retry statistics
+        retry_stats["failed_attempts"] += retry_attempts
+        
+        if success:
+            # Update performance statistics
+            regressor.push(chars, elapsed)
+            total_chars_processed += chars
+            avg_time_per_char = (time.time() - total_start_time) / total_chars_processed
+            overall_regressor.push(chars, elapsed)
+
+            if retry_attempts > 0:
+                retry_stats["successful_retries"] += 1
+                # Log success with retry info
+                log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                                audio_duration, display_name, voice_name, success=True,
+                                error_msg=f"(succeeded after {retry_attempts} retries)")
+            else:
+                # Log success (no retries)
+                log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                                audio_duration, display_name, voice_name, success=True)
+
+        else:
+            # Track failed task
+            retry_stats["failed_tasks"] += 1
+            retry_stats["failed_task_details"].append({
+                "idx": idx,
+                "strref": strref,
+                "filename": filename,
+                "npc_name": display_name
+            })
+            
+            # Log failure
+            error_msg = f"Failed after {retry_attempts} retries"
+            log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
+                            audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
+    return total_chars_processed,avg_time_per_char,retry_stats
 #endregion Generation Execution
 
 # ---------- Main ----------
@@ -2135,75 +2256,7 @@ def main():
     log_pregeneration_summary(npc_stats, profile_map)
 
     # 7. Process all generation jobs
-    total_chars_processed = 0
-    total_start_time = time.time()
-    avg_time_per_char = None
-    overall_regressor = Regression()
-    regressor = Regression()
-    
-    # Track retry statistics for the final summary
-    retry_stats = {
-        "failed_attempts": 0,          # Total failed attempts (including retries)
-        "successful_retries": 0,       # Tasks that succeeded after at least one retry
-        "failed_tasks": 0,             # Tasks that failed all retry attempts
-        "failed_task_details": []      # List of (idx, strref, filename, npc_name) for failed tasks
-    }
-
-    for idx, (strref, display_name, voice_name, filename, text) in enumerate(selected_rows, start=1):
-        profile_id = profile_map.get(voice_name)
-        if not profile_id:
-            logger.warning(f"Skipping {strref}/{filename}: Voice '{voice_name}' not found.")
-            continue
-
-        # Snapshot Overall line (static for the duration of this job)
-        elapsed_total = time.time() - total_start_time
-        overall_line = format_overall_line(
-            total_chars_processed, total_chars_all, total_jobs, idx - 1,
-            overall_regressor, avg_time_per_char, elapsed_total
-        )
-
-        # Process the generation job with retry support
-        success, elapsed, audio_duration, chars, retry_attempts = process_generation_job(
-            idx, total_jobs, strref, display_name, voice_name, filename, text,
-            profile_id, regressor, generation_memory, overall_line,
-            RETRY_COUNT, RETRY_DELAY
-        )
-        
-        # Update retry statistics
-        retry_stats["failed_attempts"] += retry_attempts
-        
-        if success:
-            # Update performance statistics
-            regressor.push(chars, elapsed)
-            total_chars_processed += chars
-            avg_time_per_char = (time.time() - total_start_time) / total_chars_processed
-            overall_regressor.push(chars, elapsed)
-
-            if retry_attempts > 0:
-                retry_stats["successful_retries"] += 1
-                # Log success with retry info
-                log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
-                                audio_duration, display_name, voice_name, success=True,
-                                error_msg=f"(succeeded after {retry_attempts} retries)")
-            else:
-                # Log success (no retries)
-                log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
-                                audio_duration, display_name, voice_name, success=True)
-
-        else:
-            # Track failed task
-            retry_stats["failed_tasks"] += 1
-            retry_stats["failed_task_details"].append({
-                "idx": idx,
-                "strref": strref,
-                "filename": filename,
-                "npc_name": display_name
-            })
-            
-            # Log failure
-            error_msg = f"Failed after {retry_attempts} retries"
-            log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, 
-                            audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
+    total_chars_processed, avg_time_per_char, retry_stats = process_generation_jobs_all(profile_map, generation_memory, selected_rows, total_jobs, total_chars_all)
 
     # 8. Final summary with retry statistics
     log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, retry_stats)
