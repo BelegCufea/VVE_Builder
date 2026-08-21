@@ -1016,6 +1016,32 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
     return None 
 
 
+def delete_profile(profile_id):
+    """
+    Delete a voice profile from the Voicebox server.
+
+    Sends a DELETE request to the /profiles/{profile_id} endpoint.
+
+    Args:
+        profile_id (str or int): The ID of the profile to delete.
+
+    Returns:
+        tuple: (success, message)
+            - success (bool): True if deletion was successful, False otherwise.
+            - message (str): Status message describing the result.
+    """
+    try:
+        delete_url = f"{BASE_URL}{PROFILES_ENDPOINT}/{profile_id}"
+        resp = requests.delete(delete_url)
+        
+        if resp.status_code == 200:
+            return True, "Profile deleted successfully"
+        else:
+            return False, f"Deletion returned: {resp.status_code}"
+    except Exception as e:
+        return False, f"Deletion error: {e}"
+    
+
 def get_all_profiles():
     """
     Fetch all available voice profiles from the Voicebox TTS API.
@@ -1023,8 +1049,14 @@ def get_all_profiles():
     Sends a GET request to the /profiles endpoint of the Voicebox server
     and returns a mapping of profile names to their numeric IDs.
 
+    Profiles with zero samples (sample_count == 0) are automatically filtered
+    out, as they are unusable for generation. This handles the edge case where
+    a profile was created but its samples failed to upload.
+
     Returns:
-        dict: A dictionary mapping profile names (str) to profile IDs (int).
+        tuple: (profile_map, zero_sample_profiles)
+            - profile_map (dict): Profile name -> ID mapping (valid profiles only)
+            - zero_sample_profiles (dict): Profile name -> ID mapping for zero-sample profiles
 
     Raises:
         requests.exceptions.RequestException: If the API request fails
@@ -1032,12 +1064,44 @@ def get_all_profiles():
 
     Note:
         The API is expected to return a JSON array of profile objects,
-        each containing at least "name" and "id" fields. Profiles without
-        a name or ID will be silently skipped.
+        each containing at least "name", "id", and "sample_count" fields.
+        Profiles without a name, ID, or with zero samples are skipped.
     """
     resp = requests.get(f"{BASE_URL}{PROFILES_ENDPOINT}")
     resp.raise_for_status()
-    return {p["name"]: p["id"] for p in resp.json()}
+    
+    profile_map = {}
+    zero_sample_profiles = {}
+    total_profiles = 0
+    
+    for p in resp.json():
+        total_profiles += 1
+        profile_id = p.get("id")
+        profile_name = p.get("name")
+        sample_count = p.get("sample_count", 0)
+        
+        # Skip profiles without a name or ID
+        if not profile_name or not profile_id:
+            continue
+        
+        # Track zero-sample profiles separately
+        if sample_count == 0:
+            zero_sample_profiles[profile_name] = profile_id
+            continue
+        
+        profile_map[profile_name] = profile_id
+    
+    # Log warning if any zero-sample profiles were found
+    if zero_sample_profiles:
+        logger.warning(
+            f"⚠️ Found {len(zero_sample_profiles)} zero-sample profile(s) "
+            f"out of {total_profiles} total: {', '.join(list(zero_sample_profiles.keys())[:5])}"
+            + (f" and {len(zero_sample_profiles) - 5} more" if len(zero_sample_profiles) > 5 else "")
+        )
+    else:
+        logger.info(f"Loaded {len(profile_map)} voice profiles (all with samples).")
+    
+    return profile_map, zero_sample_profiles
 #endregion Voice Profile Management
 
 #region Voice Profile Auto-Provisioning
@@ -1273,17 +1337,19 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
     voices/ can provide, composing and importing any missing-but-available
     profiles before generation starts.
 
+    Also handles zero-sample profiles by deleting and re-importing them if
+    the voice files are available locally.
+
     Process:
         1. Fetch what Voicebox already has (get_all_profiles).
-        2. Scan the CSV for what's needed (scan_csv_needed_voice_names),
-           resolving names without requiring them to already exist.
+        2. Scan the CSV for what's needed (scan_csv_needed_voice_names).
         3. Scan voices/ for what we could compose (scan_available_voice_dirs).
-        4. For names that are needed, missing, and available: build a
-           .voicebox.zip and import it.
-        5. Poll get_all_profiles() with a short delay, retrying up to
+        4. For zero-sample profiles that are needed and available: delete them,
+           then rebuild and re-import.
+        5. For missing profiles that are available: build a .voicebox.zip and import.
+        6. Poll get_all_profiles() with a short delay, retrying up to
            PROFILE_SYNC_MAX_ATTEMPTS times, until every imported profile is
-           visible (or attempts run out) - Voicebox may take a moment to
-           index a freshly imported profile.
+           visible (or attempts run out).
 
     Args:
         csv_path, filename_pattern, target_voices, use_strref_filter,
@@ -1294,7 +1360,8 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
     Returns:
         dict: Freshest profile name -> id map available.
     """
-    profile_map = get_all_profiles()
+    # Get profiles and zero-sample profiles
+    profile_map, zero_sample_profiles = get_all_profiles()
 
     if not AUTO_PROVISION_PROFILES:
         return profile_map
@@ -1303,41 +1370,103 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
         csv_path, filename_pattern, target_voices, use_strref_filter, strref_filter_file,
         substitutions, substitutions_gender, substitutions_sysname
     )
-    missing = needed - profile_map.keys()
+    
+    # Check if any zero-sample profiles are needed
+    zero_sample_needed = set(zero_sample_profiles.keys()) & needed
+    
+    if zero_sample_needed:
+        logger.info(f"🔧 Found {len(zero_sample_needed)} zero-sample profile(s) that are needed:")
+        for name in sorted(zero_sample_needed):
+            logger.info(f"  - {name}")
+    
+    # Find missing profiles (not in profile_map, not zero-sample)
+    missing = needed - profile_map.keys() - zero_sample_profiles.keys()
 
-    if not missing:
-        return profile_map
-
+    # Check what's available in voices/ directory
     available = scan_available_voice_dirs(VOICES_DIR)
+    
+    # Determine which zero-sample profiles we can rebuild
+    rebuildable = sorted(name for name in zero_sample_needed if available.get(name))
+    
+    # Determine which missing profiles we can create
     composable = sorted(name for name in missing if available.get(name))
 
-    if not composable:
-        logger.warning(
-            f"⚠️ {len(missing)} needed voice(s) missing from Voicebox and not found in {VOICES_DIR}/."
-        )
+    if not rebuildable and not composable:
+        if missing or zero_sample_needed:
+            logger.warning(
+                f"⚠️ {len(missing)} needed voice(s) missing from Voicebox and not found in {VOICES_DIR}/, "
+                f"and {len(zero_sample_needed)} zero-sample profile(s) cannot be rebuilt."
+            )
         return profile_map
 
-    logger.info(f"🧩 Composing {len(composable)} missing voice profile(s) from {VOICES_DIR}/...")
+    # Process rebuildable profiles (delete + re-import)
     imported = []
-    for voice_name in composable:
-        zip_path = create_profile_package(voice_name, available[voice_name], PROFILE_PACKAGES_DIR)
-        if not zip_path:
-            continue
-        result = import_profile_zip(zip_path)
-        if result:
-            imported.append(voice_name)
-            logger.info(f"  ✓ Imported: {voice_name}")
-        else:
-            logger.warning(f"  ✗ Failed to import: {voice_name}")
+    reimported = []
+    failed = []
 
-    if not imported:
-        logger.warning(f"⚠️ Could not import any of {len(composable)} composable voice profile(s).")
+    if rebuildable:
+        logger.info(f"♻️ Rebuilding {len(rebuildable)} zero-sample profile(s) from {VOICES_DIR}/...")
+        
+        for voice_name in rebuildable:
+            profile_id = zero_sample_profiles[voice_name]
+            
+            # Delete the zero-sample profile
+            logger.info(f"  Deleting zero-sample profile: {voice_name} (ID: {profile_id})...")
+            success, message = delete_profile(profile_id)
+            
+            if not success:
+                logger.warning(f"  ✗ Failed to delete {voice_name}: {message}")
+                failed.append(voice_name)
+                continue
+            
+            logger.info(f"  ✓ Deleted: {voice_name}")
+            
+            # Wait a moment for the deletion to propagate
+            time.sleep(PROFILE_SYNC_RETRY_DELAY)
+            
+            # Rebuild the profile
+            logger.info(f"  Rebuilding profile: {voice_name}...")
+            zip_path = create_profile_package(voice_name, available[voice_name], PROFILE_PACKAGES_DIR)
+            if not zip_path:
+                failed.append(voice_name)
+                continue
+                
+            result = import_profile_zip(zip_path)
+            if result:
+                reimported.append(voice_name)
+                logger.info(f"  ✓ Re-imported: {voice_name}")
+            else:
+                logger.warning(f"  ✗ Failed to re-import: {voice_name}")
+                failed.append(voice_name)
+
+    # Process composable profiles (new imports)
+    if composable:
+        logger.info(f"🧩 Composing {len(composable)} missing voice profile(s) from {VOICES_DIR}/...")
+        
+        for voice_name in composable:
+            zip_path = create_profile_package(voice_name, available[voice_name], PROFILE_PACKAGES_DIR)
+            if not zip_path:
+                failed.append(voice_name)
+                continue
+                
+            result = import_profile_zip(zip_path)
+            if result:
+                imported.append(voice_name)
+                logger.info(f"  ✓ Imported: {voice_name}")
+            else:
+                logger.warning(f"  ✗ Failed to import: {voice_name}")
+                failed.append(voice_name)
+
+    all_imported = imported + reimported
+    
+    if not all_imported:
+        logger.warning(f"⚠️ Could not import any profiles.")
         return profile_map
 
     # Poll until Voicebox reflects the newly imported profiles (or we give up)
-    still_missing = set(imported)
+    still_missing = set(all_imported)
     for attempt in range(1, PROFILE_SYNC_MAX_ATTEMPTS + 1):
-        profile_map = get_all_profiles()
+        profile_map, _ = get_all_profiles()
         still_missing -= profile_map.keys()
         if not still_missing:
             break
@@ -1345,11 +1474,12 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
 
     if still_missing:
         logger.warning(
-            f"⚠️ {len(still_missing)} imported profile(s) not yet visible after "
+            f"⚠️ {len(still_missing)} imported/re-imported profile(s) not yet visible after "
             f"{PROFILE_SYNC_MAX_ATTEMPTS} attempts: {', '.join(sorted(still_missing))}"
         )
 
-    logger.info(f"Auto-provisioned {len(imported) - len(still_missing)} voice profile(s) from {VOICES_DIR}/.")
+    if all_imported:
+        logger.info(f"Auto-provisioned {len(all_imported) - len(still_missing)} voice profile(s) from {VOICES_DIR}/.")
 
     return profile_map
 #endregion Voice Profile Auto-Provisioning
