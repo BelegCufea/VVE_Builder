@@ -13,8 +13,12 @@ import sys
 import io
 import threading
 import time
+import uuid
+import shutil
+import zipfile
 import requests
 import logging
+from collections import defaultdict
 from runstats import Regression
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -24,6 +28,15 @@ from pathlib import Path
 BASE_URL = "http://10.0.50.5:17600"    # VoiceBox API - http://localhost:17493 for local server, or remote URL for remote server
 ENGINE = "qwen"
 MODEL_SIZE = "1.7B"
+
+# Voicebox API Endpoints (relative to BASE_URL)
+# {gen_id} placeholders are filled in with str.format() at call time.
+PROFILES_ENDPOINT = "/profiles"                        # List/fetch voice profiles
+PROFILES_IMPORT_ENDPOINT = "/profiles/import"           # Import a .voicebox.zip profile package
+GENERATE_ENDPOINT = "/generate"                         # Submit a generation job
+GENERATE_STATUS_ENDPOINT = "/generate/{gen_id}/status"  # SSE stream of a generation job's status
+GENERATE_CANCEL_ENDPOINT = "/generate/{gen_id}/cancel"  # Cancel a queued/running generation job
+AUDIO_ENDPOINT = "/audio/{gen_id}"                      # Download a completed generation's audio
 
 # Generation Timeout Safeguards
 ENABLE_TIMEOUT_SAFEGUARD = True        # Enable/disable timeout protection
@@ -83,6 +96,15 @@ LOG_FILE_PATH = r"logs/generate.log"
 
 # Pre-generation Summary Options
 COMPACT_SUMMARY = True                 # If True, only show NPCs with valid voices; if False, show all
+
+# Voice Profile Auto-Provisioning
+# Before generation, scan the CSV for voices we need, compare against what Voicebox
+# already has, and auto-compose+import any that are missing but available in VOICES_DIR.
+AUTO_PROVISION_PROFILES = True         # If True, run the sync step before generation
+VOICES_DIR = r"voices"                 # Directory of NPC WAV/TXT samples (see profiles-upload.py)
+PROFILE_PACKAGES_DIR = r"profiles"     # Where composed .voicebox.zip packages are written
+PROFILE_SYNC_MAX_ATTEMPTS = 10         # How many times to poll Voicebox after import before giving up
+PROFILE_SYNC_RETRY_DELAY = 3.0         # Seconds to wait between polling attempts
 #endregion Configuration
 
 #region Logging
@@ -145,44 +167,51 @@ def log_initialize():
 logger = log_initialize()
 
 
-def log_header(total_jobs, total_chars_all, header_messages):
+def log_header_start():
     """
-    Log a formatted header block containing initialization information.
-    
-    Creates a visually distinct header section in the log that summarizes
-    the configuration and setup state before generation begins. This helps
-    contextualize the log entries that follow and provides a quick reference
-    for what was configured.
-    
-    The header includes:
-        - Script name and start timestamp
-        - All collected initialization messages (profile count, config status)
-        - Total number of jobs and characters to process
-    
-    Args:
-        total_jobs (int): Total number of generation jobs to process.
-        total_chars_all (int): Total character count across all jobs.
-        header_messages (list): List of message strings collected during
-            initialization (e.g., "Loaded 88 voice profiles").
-    
-    Note:
-        The header is logged at INFO level and appears in both the console
-        and log file with a consistent format.
-    """    
-    lines =  []
+    Log the run-start banner immediately, before any initialization work happens.
 
+    This is the first half of what used to be a single log_header() call made
+    only after all setup (substitutions, profile sync, CSV scan, etc.) had
+    already completed - which meant nothing appeared in the log/console until
+    setup was fully done. Splitting it lets the banner appear right away, with
+    log_header_summary() closing out the block once totals are known and each
+    setup step logging its own message as it happens in between.
+
+    Note:
+        Logged at INFO level to both console and file.
+    """
+    lines = []
     lines.append("")
     lines.append("=" * 70)
     lines.append("Voice over Generation")
     lines.append(f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     lines.append("=" * 70)
     lines.append(f"TTS Engine: {ENGINE}" + (f" ({MODEL_SIZE})" if MODEL_SIZE and MODEL_SIZE.strip() else ""))
-    lines.extend(header_messages)
+    logger.info("\n".join(lines))
+
+
+def log_header_summary(total_jobs, total_chars_all):
+    """
+    Log the closing lines of the header block, once totals are known.
+
+    Pairs with log_header_start(); everything in between (substitution
+    counts, profile sync results, patcher config status, CSV filter
+    results, etc.) is logged directly by main() as each step completes,
+    instead of being buffered and replayed here.
+
+    Args:
+        total_jobs (int): Total number of generation jobs to process.
+        total_chars_all (int): Total character count across all jobs.
+
+    Note:
+        Logged at INFO level to both console and file.
+    """
+    lines = []
     lines.append(f"Total jobs: {total_jobs}, Total chars: {total_chars_all}")
     lines.append("=" * 70)
+    logger.info("\n".join(lines))
 
-    summary = "\n".join(lines)
-    logger.info(summary)
 
 
 def log_pregeneration_summary(npc_stats, profile_map):
@@ -872,6 +901,44 @@ def load_voice_substitutions_all():
     return substitutions, substitutions_gender, substitutions_sysname
 
 
+def resolve_voice_substitution(npc_name, gender=None, sysname=None,
+                                substitutions=None, substitutions_gender=None,
+                                substitutions_sysname=None):
+    """
+    Apply the substitution-lookup priority shared by get_voice_profile_name()
+    and get_candidate_voice_name(): system name, then NPC+gender, then NPC
+    name alone. Extracted so both callers share one implementation instead
+    of duplicating the lookup order.
+
+    Args:
+        npc_name (str): NPC name from the CSV.
+        gender (str, optional): Gender from CSV ("M", "F", or empty).
+        sysname (str, optional): System name from CSV (column 1).
+        substitutions (dict, optional): NPC name -> voice profile mappings.
+        substitutions_gender (dict, optional): NPC name|gender -> voice profile mappings.
+        substitutions_sysname (dict, optional): sysname -> voice profile mappings.
+
+    Returns:
+        str or None: The substituted profile name if any rule matches, else None.
+    """
+    substitutions = substitutions or {}
+    substitutions_gender = substitutions_gender or {}
+    substitutions_sysname = substitutions_sysname or {}
+
+    if sysname and sysname in substitutions_sysname:
+        return substitutions_sysname[sysname]
+
+    if npc_name and gender:
+        gender_key = f"{npc_name}|{gender}"
+        if gender_key in substitutions_gender:
+            return substitutions_gender[gender_key]
+
+    if npc_name and npc_name in substitutions:
+        return substitutions[npc_name]
+
+    return None
+
+
 def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None,
                            substitutions=None, substitutions_gender=None, 
                            substitutions_sysname=None):
@@ -885,6 +952,9 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
     4. NPC name as profile name (if it exists in profile_map)
     5. Gender-based fallback (if USE_VOICE_FALLBACK is True)
     6. Neutral/unknown fallback
+
+    Steps 1-3 are delegated to resolve_voice_substitution(); see that
+    function for the substitution lookup itself.
 
     Uses the substitution mappings to translate NPC names to specific
     voice profiles. This allows multiple NPCs to share a voice profile or
@@ -922,28 +992,13 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
         >>> get_voice_profile_name("Unknown NPC", "", None)
         "Unknown NPC"  # No fallback, returns the name as-is
     """
-    # Use loaded substitutions or fallback to defaults
-    if substitutions is None:
-        substitutions = {}
-    if substitutions_gender is None:
-        substitutions_gender = {}
-    if substitutions_sysname is None:
-        substitutions_sysname = {}
-    
-    # 1. Check system name substitution first (highest priority)
-    if sysname and sysname in substitutions_sysname:
-        return substitutions_sysname[sysname]
-    
-    # 2. Check NPC name + gender substitution
-    if npc_name and gender:
-        gender_key = f"{npc_name}|{gender}"
-        if gender_key in substitutions_gender:
-            return substitutions_gender[gender_key]
-    
-    # 3. Check NPC name only substitution
-    if npc_name and npc_name in substitutions:
-        return substitutions[npc_name]
-    
+    # 1-3. Substitution lookups (sysname, NPC+gender, NPC-only), highest priority
+    substituted = resolve_voice_substitution(
+        npc_name, gender, sysname, substitutions, substitutions_gender, substitutions_sysname
+    )
+    if substituted:
+        return substituted
+
     # 4. Check if the NPC name exists as a profile (only if npc_name exists)
     if npc_name and profile_map is not None and npc_name in profile_map:
         return npc_name
@@ -980,10 +1035,324 @@ def get_all_profiles():
         each containing at least "name" and "id" fields. Profiles without
         a name or ID will be silently skipped.
     """
-    resp = requests.get(f"{BASE_URL}/profiles")
+    resp = requests.get(f"{BASE_URL}{PROFILES_ENDPOINT}")
     resp.raise_for_status()
     return {p["name"]: p["id"] for p in resp.json()}
 #endregion Voice Profile Management
+
+#region Voice Profile Auto-Provisioning
+def get_candidate_voice_name(npc_name, gender=None, sysname=None,
+                              substitutions=None, substitutions_gender=None,
+                              substitutions_sysname=None):
+    """
+    Resolve the voice profile name a CSV row *would* use, without checking
+    whether that profile actually exists yet on Voicebox.
+
+    Reuses resolve_voice_substitution() for the same substitution priority
+    get_voice_profile_name() applies (sysname, NPC+gender, NPC-only), but
+    stops there instead of falling through to a profile_map membership
+    check or the USE_VOICE_FALLBACK narrator fallback. It's used purely to
+    figure out what profile *name* a row is asking for, so we can diff that
+    against what Voicebox has and what voices/ could provide - the narrator
+    fallbacks are never something we'd want to auto-compose a profile for.
+
+    Args:
+        npc_name (str): NPC name from the CSV. Empty rows are not candidates.
+        gender (str, optional): Gender from CSV ("M", "F", or empty).
+        sysname (str, optional): System name from CSV (column 1).
+        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
+            Same substitution maps used by get_voice_profile_name().
+
+    Returns:
+        str or None: The candidate profile name, or None if the row has no
+            NPC name to resolve (e.g. description/lore lines).
+    """
+    substituted = resolve_voice_substitution(
+        npc_name, gender, sysname, substitutions, substitutions_gender, substitutions_sysname
+    )
+    return substituted or npc_name or None
+
+
+def scan_csv_needed_voice_names(csv_path, filename_pattern, target_voices,
+                                 use_strref_filter, strref_filter_file,
+                                 substitutions=None, substitutions_gender=None,
+                                 substitutions_sysname=None):
+    """
+    Scan the dialog CSV and collect the set of voice profile names it needs,
+    independent of whether those profiles currently exist on Voicebox.
+
+    Shares row filtering with load_and_filter_csv() via
+    iter_filtered_csv_rows() (STRREF filter or target-voice/filename-pattern
+    filters, and the "must have text" rule) so the "needed" set matches what
+    would actually be generated, then resolves each surviving row's
+    candidate name via get_candidate_voice_name().
+
+    Args:
+        csv_path (str): Path to the CSV file.
+        filename_pattern (str): Regex pattern for filename filtering.
+        target_voices (list): List of NPC names to process (empty = all).
+        use_strref_filter (bool): Whether to use STRREF filter instead of
+            voice/filename filters.
+        strref_filter_file (str): Path to STRREF filter JSON file.
+        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
+            Same substitution maps used elsewhere.
+
+    Returns:
+        set: Voice profile names referenced by the filtered CSV rows.
+    """
+    needed = set()
+    strref_filter = set()
+
+    if use_strref_filter:
+        strref_filter = load_strref_filter(strref_filter_file)
+
+    for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows(
+        csv_path, target_voices, filename_pattern, use_strref_filter, strref_filter
+    ):
+        candidate = get_candidate_voice_name(
+            npc_name, gender, sysname,
+            substitutions, substitutions_gender, substitutions_sysname
+        )
+        if candidate:
+            needed.add(candidate)
+
+    return needed
+
+
+def scan_available_voice_dirs(voices_dir):
+    """
+    Scan a voices/ directory and group WAV+TXT sample pairs by NPC name,
+    the same way profiles-upload.py does.
+
+    Only files with both a WAV and matching TXT transcript are counted as
+    usable samples for composing a profile.
+
+    Args:
+        voices_dir (str): Path to the directory of NPC WAV/TXT samples.
+
+    Returns:
+        dict: NPC name -> list of sample dicts, each with 'number', 'wav_path',
+            'txt_path', 'transcript'. Only entries with at least one valid
+            sample pair are included.
+    """
+    voices_path = Path(voices_dir)
+    voice_groups = defaultdict(list)
+
+    if not voices_path.exists():
+        return {}
+
+    pattern = re.compile(r'^(.*?)(?:\s+(\d+))?$')
+
+    for file_path in voices_path.iterdir():
+        if not (file_path.is_file() and file_path.suffix in ('.WAV', '.wav')):
+            continue
+
+        base_name = file_path.stem
+        txt_file = file_path.with_suffix('.txt')
+        if not txt_file.exists():
+            logger.warning(f"⚠️ No transcript found for {file_path.name}, skipping sample.")
+            continue
+
+        with open(txt_file, "r", encoding="utf-8") as f:
+            transcript = f.read().strip()
+
+        match = pattern.match(base_name)
+        if match:
+            name = match.group(1).strip()
+            number = match.group(2)
+            if number is None:
+                if ' ' in name and name.split(' ')[-1].isdigit():
+                    parts = name.rsplit(' ', 1)
+                    name = parts[0]
+                    number = parts[1]
+                else:
+                    number = "1"
+        else:
+            name = base_name
+            number = "1"
+
+        voice_groups[name].append({
+            "number": int(number),
+            "wav_path": file_path,
+            "txt_path": txt_file,
+            "transcript": transcript,
+        })
+
+    return dict(voice_groups)
+
+
+def create_profile_package(voice_name, files, output_dir):
+    """
+    Build a .voicebox.zip package for a voice from its sample files.
+
+    Ported from profiles-upload.py's _create_profile_package(): writes a
+    manifest.json + samples.json + WAV files into a temp folder, then zips
+    it up. The temp folder is always cleaned up afterwards.
+
+    Args:
+        voice_name (str): The profile name to embed in the manifest.
+        files (list): Sample dicts as produced by scan_available_voice_dirs().
+        output_dir (Path): Directory to write the .voicebox.zip into.
+
+    Returns:
+        Path or None: Path to the created zip file, or None on failure.
+    """
+    output_path = Path(output_dir)
+    output_path.mkdir(parents=True, exist_ok=True)
+
+    safe_name = voice_name.lower().replace(' ', '-')
+    temp_dir = output_path / f"profile-{safe_name}.voicebox"
+    temp_dir.mkdir(exist_ok=True)
+
+    try:
+        samples_dir = temp_dir / "samples"
+        samples_dir.mkdir(exist_ok=True)
+
+        manifest = {
+            "version": "1.0",
+            "profile": {"name": voice_name, "description": "", "language": "en"},
+            "has_avatar": False,
+        }
+        with open(temp_dir / "manifest.json", "w", encoding="utf-8") as f:
+            json.dump(manifest, f, indent=2)
+
+        samples_data = {}
+        for file_info in sorted(files, key=lambda x: x["number"]):
+            sample_uuid = str(uuid.uuid4())
+            wav_filename = f"{sample_uuid}.wav"
+            shutil.copy2(file_info["wav_path"], samples_dir / wav_filename)
+            samples_data[wav_filename] = file_info["transcript"]
+
+        with open(temp_dir / "samples.json", "w", encoding="utf-8") as f:
+            json.dump(samples_data, f, indent=2)
+
+        zip_path = output_path / f"profile-{safe_name}.voicebox.zip"
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
+            for root, _, files_in_dir in os.walk(temp_dir):
+                for file in files_in_dir:
+                    file_path = Path(root) / file
+                    zipf.write(file_path, file_path.relative_to(temp_dir))
+
+        return zip_path
+
+    except Exception as e:
+        logger.error(f"❌ Error creating profile package for {voice_name}: {e}")
+        return None
+    finally:
+        if temp_dir.exists():
+            shutil.rmtree(temp_dir)
+
+
+def import_profile_zip(zip_path):
+    """
+    Import a composed .voicebox.zip package into Voicebox via PROFILES_IMPORT_ENDPOINT.
+
+    Args:
+        zip_path (Path): Path to the .voicebox.zip file.
+
+    Returns:
+        dict or None: Parsed JSON response on success, None on failure.
+    """
+    try:
+        with open(zip_path, "rb") as f:
+            files = {"file": (zip_path.name, f, "application/zip")}
+            resp = requests.post(f"{BASE_URL}{PROFILES_IMPORT_ENDPOINT}", files=files)
+            resp.raise_for_status()
+            return resp.json()
+    except requests.exceptions.RequestException as e:
+        logger.error(f"❌ Error importing {zip_path.name}: {e}")
+        return None
+
+
+def sync_missing_profiles(csv_path, filename_pattern, target_voices,
+                           use_strref_filter, strref_filter_file,
+                           substitutions=None, substitutions_gender=None,
+                           substitutions_sysname=None):
+    """
+    Reconcile Voicebox's profile list against what the CSV needs and what
+    voices/ can provide, composing and importing any missing-but-available
+    profiles before generation starts.
+
+    Process:
+        1. Fetch what Voicebox already has (get_all_profiles).
+        2. Scan the CSV for what's needed (scan_csv_needed_voice_names),
+           resolving names without requiring them to already exist.
+        3. Scan voices/ for what we could compose (scan_available_voice_dirs).
+        4. For names that are needed, missing, and available: build a
+           .voicebox.zip and import it.
+        5. Poll get_all_profiles() with a short delay, retrying up to
+           PROFILE_SYNC_MAX_ATTEMPTS times, until every imported profile is
+           visible (or attempts run out) - Voicebox may take a moment to
+           index a freshly imported profile.
+
+    Args:
+        csv_path, filename_pattern, target_voices, use_strref_filter,
+        strref_filter_file: Same as load_and_filter_csv()/scan_csv_needed_voice_names().
+        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
+            Same substitution maps used elsewhere.
+
+    Returns:
+        dict: Freshest profile name -> id map available.
+    """
+    profile_map = get_all_profiles()
+
+    if not AUTO_PROVISION_PROFILES:
+        return profile_map
+
+    needed = scan_csv_needed_voice_names(
+        csv_path, filename_pattern, target_voices, use_strref_filter, strref_filter_file,
+        substitutions, substitutions_gender, substitutions_sysname
+    )
+    missing = needed - profile_map.keys()
+
+    if not missing:
+        return profile_map
+
+    available = scan_available_voice_dirs(VOICES_DIR)
+    composable = sorted(name for name in missing if available.get(name))
+
+    if not composable:
+        logger.warning(
+            f"⚠️ {len(missing)} needed voice(s) missing from Voicebox and not found in {VOICES_DIR}/."
+        )
+        return profile_map
+
+    logger.info(f"🧩 Composing {len(composable)} missing voice profile(s) from {VOICES_DIR}/...")
+    imported = []
+    for voice_name in composable:
+        zip_path = create_profile_package(voice_name, available[voice_name], PROFILE_PACKAGES_DIR)
+        if not zip_path:
+            continue
+        result = import_profile_zip(zip_path)
+        if result:
+            imported.append(voice_name)
+            logger.info(f"  ✓ Imported: {voice_name}")
+        else:
+            logger.warning(f"  ✗ Failed to import: {voice_name}")
+
+    if not imported:
+        logger.warning(f"⚠️ Could not import any of {len(composable)} composable voice profile(s).")
+        return profile_map
+
+    # Poll until Voicebox reflects the newly imported profiles (or we give up)
+    still_missing = set(imported)
+    for attempt in range(1, PROFILE_SYNC_MAX_ATTEMPTS + 1):
+        profile_map = get_all_profiles()
+        still_missing -= profile_map.keys()
+        if not still_missing:
+            break
+        time.sleep(PROFILE_SYNC_RETRY_DELAY)
+
+    if still_missing:
+        logger.warning(
+            f"⚠️ {len(still_missing)} imported profile(s) not yet visible after "
+            f"{PROFILE_SYNC_MAX_ATTEMPTS} attempts: {', '.join(sorted(still_missing))}"
+        )
+
+    logger.info(f"Auto-provisioned {len(imported) - len(still_missing)} voice profile(s) from {VOICES_DIR}/.")
+
+    return profile_map
+#endregion Voice Profile Auto-Provisioning
 
 #region Generation Memory
 def load_generation_memory(memory_path):
@@ -1137,7 +1506,7 @@ def submit_generation(profile_id, text, engine, model_size):
         "engine": engine,
         "model_size": model_size,
     }
-    resp = requests.post(f"{BASE_URL}/generate", json=payload)
+    resp = requests.post(f"{BASE_URL}{GENERATE_ENDPOINT}", json=payload)
     resp.raise_for_status()
     data = resp.json()
     gen_id = data.get("id")
@@ -1172,7 +1541,7 @@ def wait_for_completion(gen_id):
         The function blocks until the generation completes or fails.
         For very slow generations, this may take a long time.
     """
-    url = f"{BASE_URL}/generate/{gen_id}/status"
+    url = f"{BASE_URL}{GENERATE_STATUS_ENDPOINT.format(gen_id=gen_id)}"
     headers = {"Accept": "text/event-stream"}
     final_event = None
 
@@ -1209,8 +1578,8 @@ def cancel_generation(gen_id):
     """
     Cancel a queued or running generation on the Voicebox server.
 
-    Sends a POST request to the /generate/{generation_id}/cancel endpoint
-    to stop the generation if it's still running.
+    Sends a POST request to GENERATE_CANCEL_ENDPOINT to stop the generation
+    if it's still running.
 
     Args:
         gen_id (str): The generation ID to cancel.
@@ -1221,7 +1590,7 @@ def cancel_generation(gen_id):
             - message (str): Status message describing the result.
     """
     try:
-        cancel_url = f"{BASE_URL}/generate/{gen_id}/cancel"
+        cancel_url = f"{BASE_URL}{GENERATE_CANCEL_ENDPOINT.format(gen_id=gen_id)}"
         resp = requests.post(cancel_url)
         
         if resp.status_code == 200:
@@ -1252,7 +1621,7 @@ def download_audio(gen_id, output_path):
         The function does not perform any audio conversion; it saves the
         raw audio data exactly as received from the server.
     """
-    url = f"{BASE_URL}/audio/{gen_id}"
+    url = f"{BASE_URL}{AUDIO_ENDPOINT.format(gen_id=gen_id)}"
     resp = requests.get(url)
     resp.raise_for_status()
 
@@ -1621,32 +1990,99 @@ def load_strref_filter(filter_file):
         filter_file (str): Path to the JSON file containing strref list.
         
     Returns:
-        tuple: (strref_set, messages)
-            - strref_set (set): Set of strref strings to process, or empty set
-            - messages (list): Informational messages collected during loading
+        set: Set of strref strings to process, or empty set if the filter
+            couldn't be loaded (in which case a warning is logged and the
+            caller should fall back to processing all rows).
     """
-    messages = []
-
     if not os.path.exists(filter_file):
-        messages.append(f"⚠️ STRREF filter file not found: {filter_file}")
-        messages.append("   Processing all rows (no filter).")
-        return set(), messages
-    
+        logger.warning(f"⚠️ STRREF filter file not found: {filter_file}")
+        logger.warning("   Processing all rows (no filter).")
+        return set()
+
     try:
         with open(filter_file, "r", encoding="utf-8") as f:
             data = json.load(f)
-        
+
         if not isinstance(data, list):
-            messages.append(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
-            return set(), messages
-        
+            logger.warning(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
+            return set()
+
         # Convert to set of strings for fast lookup
-        return {str(item) for item in data}, messages
-    
+        return {str(item) for item in data}
+
     except Exception as e:
-        messages.append(f"⚠️ Could not load STRREF filter: {e}")
-        messages.append("   Processing all rows (no filter).")
-        return set(), messages
+        logger.warning(f"⚠️ Could not load STRREF filter: {e}")
+        logger.warning("   Processing all rows (no filter).")
+        return set()
+
+
+def iter_filtered_csv_rows(csv_path, target_voices, filename_pattern, use_strref_filter, strref_filter):
+    """
+    Parse the dialog CSV and yield rows that pass the shared row-level
+    filters, without resolving voice names or doing anything generation-
+    specific. This is the common core used by both load_and_filter_csv()
+    (which additionally resolves voices, applies patcher/skip logic, etc.)
+    and scan_csv_needed_voice_names() (which only needs to know which rows
+    survive filtering, to resolve candidate voice names from them).
+
+    Filters applied, in order:
+        - Row must have at least 8 columns.
+        - If use_strref_filter and strref_filter is non-empty: strref must be in it.
+        - If not use_strref_filter: npc_name must be non-empty.
+        - If not use_strref_filter and target_voices given: npc_name must be in target_voices.
+        - If filename_pattern given: csv_filename must match it (when csv_filename is set).
+        - text must be non-empty.
+
+    Args:
+        csv_path (str): Path to the CSV file.
+        target_voices (list): List of NPC names to process (empty = all).
+        filename_pattern (str): Regex pattern for filename filtering.
+        use_strref_filter (bool): Whether to use STRREF filter instead of voice/filename filters.
+        strref_filter (set): Pre-loaded set of STRREFs to process (see load_strref_filter).
+
+    Yields:
+        tuple: (strref, sysname, npc_name, gender, csv_filename, text)
+    """
+    if not os.path.exists(csv_path):
+        return
+
+    with open(csv_path, "r", encoding="utf-8") as f:
+        reader = csv.reader(f)
+
+        for row in reader:
+            if len(row) < 8:
+                continue
+
+            strref = row[0].strip()
+            sysname = row[1].strip() if len(row) > 1 else ""
+            npc_name = row[2].strip() if len(row) > 2 else ""
+            gender = row[3].strip() if len(row) > 3 else ""
+            csv_filename = row[5].strip() if len(row) > 5 else ""
+            text = row[7].strip() if len(row) > 7 else ""
+
+            # Apply STRREF filter if enabled
+            if use_strref_filter and strref_filter:
+                if strref not in strref_filter:
+                    continue
+
+            # STRREF filter overrides all other filters when enabled
+            # When disabled, we fall back to voice and filename filtering
+            if not use_strref_filter and not npc_name:
+                continue
+
+            # Apply voice filter (only if not using STRREF filter)
+            if not use_strref_filter and target_voices and npc_name not in target_voices:
+                continue
+
+            # Apply filename pattern filter
+            if filename_pattern and csv_filename and not re.match(filename_pattern, csv_filename):
+                continue
+
+            # Skip rows without text
+            if not text:
+                continue
+
+            yield strref, sysname, npc_name, gender, csv_filename, text
 
 
 def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_config, 
@@ -1675,128 +2111,92 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
         substitutions_sysname (dict, optional): sysname -> voice profile mappings.
         
     Returns:
-        tuple: (selected_rows, npc_stats, messages)
+        tuple: (selected_rows, npc_stats)
             - selected_rows (list): List of (strref, display_name, voice_name, filename, text)
             - npc_stats (dict): Statistics per NPC
-            - messages (list): Informational messages collected during processing
     """
     selected_rows = []
     npc_stats = {}
     strref_filter = set()
-    messages = []
     
     # Load STRREF filter if enabled
     if use_strref_filter:
-        strref_filter, filter_messages = load_strref_filter(strref_filter_file)
-        messages.extend(filter_messages)
+        strref_filter = load_strref_filter(strref_filter_file)
         if strref_filter:
-            messages.append(f"Loaded {len(strref_filter)} STRREFs from filter file.")
+            logger.info(f"Loaded {len(strref_filter)} STRREFs from filter file.")
         else:
-            messages.append("⚠️ No STRREFs loaded from filter file. Processing all rows.")
+            logger.warning("⚠️ No STRREFs loaded from filter file. Processing all rows.")
     
     try:
-        with open(csv_path, "r", encoding="utf-8") as f:
-            reader = csv.reader(f)
-            
-            for row in reader:
-                if len(row) < 8:
-                    continue
-                
-                strref = row[0].strip()
-                sysname = row[1].strip() if len(row) > 1 else ""
-                npc_name = row[2].strip() if len(row) > 2 else ""
-                gender = row[3].strip() if len(row) > 3 else ""
-                csv_filename = row[5].strip() if len(row) > 5 else ""
-                text = row[7].strip() if len(row) > 7 else ""
-                
-                # Apply STRREF filter if enabled
-                if use_strref_filter and strref_filter:
-                    if strref not in strref_filter:
-                        continue
-
-                # STRREF filter overrides all other filters when enabled
-                # When disabled, we fall back to voice and filename filtering
-                if not use_strref_filter and not npc_name:
-                    continue                    
-                
-                # Apply voice filter (only if not using STRREF filter)
-                if not use_strref_filter and target_voices and npc_name not in target_voices:
-                    continue
-                
-                # Apply filename pattern filter
-                if filename_pattern and csv_filename and not re.match(filename_pattern, csv_filename):
-                    continue
-
-                # Skip rows without text
-                if not text:
-                    continue
-                
-                # Determine filename with fallback
-                if force_generated_filenames:
-                    # Always use generated filename
-                    filename = generate_resref(strref, RESREF_PREFIX)
+        for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows(
+            csv_path, target_voices, filename_pattern, use_strref_filter, strref_filter
+        ):
+            # Determine filename with fallback
+            if force_generated_filenames:
+                # Always use generated filename
+                filename = generate_resref(strref, RESREF_PREFIX)
+            else:
+                # Use CSV filename if it exists and is valid, otherwise fallback to generated
+                if csv_filename and csv_filename.strip():
+                    filename = csv_filename
                 else:
-                    # Use CSV filename if it exists and is valid, otherwise fallback to generated
-                    if csv_filename and csv_filename.strip():
-                        filename = csv_filename
-                    else:
-                        # CSV filename is empty or invalid - generate one
-                        filename = generate_resref(strref, RESREF_PREFIX)
-                
-                # Get voice profile with fallback
-                voice_name = get_voice_profile_name(
-                    npc_name, gender, profile_map, sysname,
-                    substitutions, substitutions_gender, substitutions_sysname
-                )
+                    # CSV filename is empty or invalid - generate one
+                    filename = generate_resref(strref, RESREF_PREFIX)
 
-                # Use npc_name for stats, or "Descriptions" if empty
-                display_name = npc_name if npc_name else "Descriptions"
-                
-                # Initialize NPC stats (ALWAYS, even if voice is missing)
-                if display_name not in npc_stats:
-                    npc_stats[display_name] = {
-                        "voice_name": voice_name if voice_name else "MISSING",
-                        "total": 0,
-                        "done": 0,
-                        "skipped": 0,
-                        "to_generate": 0,
-                        "chars": 0
-                    }
-                
-                npc_stats[display_name]["total"] += 1
-                npc_stats[display_name]["chars"] += len(text)
-                
-                # Check if voice is missing
-                if voice_name is None:
-                    npc_stats[display_name]["skipped"] += 1
-                    continue
+            # Get voice profile with fallback
+            voice_name = get_voice_profile_name(
+                npc_name, gender, profile_map, sysname,
+                substitutions, substitutions_gender, substitutions_sysname
+            )
 
-                # Check if voice_name exists in profile_map
-                if profile_map is not None and voice_name not in profile_map:
-                    npc_stats[display_name]["skipped"] += 1
-                    continue
-                
-                # Skip already generated if enabled
-                if skip_generated and is_already_generated(generation_memory, display_name, strref):
-                    npc_stats[display_name]["done"] += 1
-                    continue
-                
-                npc_stats[display_name]["to_generate"] += 1
-                
-                # Preprocess text
-                text = preprocess_text(text, patcher_config) if patcher_config else text
-                
-                # Store the row with display_name for folder structure
-                selected_rows.append((strref, display_name, voice_name, filename, text))
-                
-                if limit and len(selected_rows) >= limit:
-                    break
+            # Use npc_name for stats, or "Descriptions" if empty
+            display_name = npc_name if npc_name else "Descriptions"
+
+            # Initialize NPC stats (ALWAYS, even if voice is missing)
+            if display_name not in npc_stats:
+                npc_stats[display_name] = {
+                    "voice_name": voice_name if voice_name else "MISSING",
+                    "total": 0,
+                    "done": 0,
+                    "skipped": 0,
+                    "to_generate": 0,
+                    "chars": 0
+                }
+
+            npc_stats[display_name]["total"] += 1
+            npc_stats[display_name]["chars"] += len(text)
+
+            # Check if voice is missing
+            if voice_name is None:
+                npc_stats[display_name]["skipped"] += 1
+                continue
+
+            # Check if voice_name exists in profile_map
+            if profile_map is not None and voice_name not in profile_map:
+                npc_stats[display_name]["skipped"] += 1
+                continue
+
+            # Skip already generated if enabled
+            if skip_generated and is_already_generated(generation_memory, display_name, strref):
+                npc_stats[display_name]["done"] += 1
+                continue
+
+            npc_stats[display_name]["to_generate"] += 1
+
+            # Preprocess text
+            text = preprocess_text(text, patcher_config) if patcher_config else text
+
+            # Store the row with display_name for folder structure
+            selected_rows.append((strref, display_name, voice_name, filename, text))
+
+            if limit and len(selected_rows) >= limit:
+                break
     
     except Exception as e:
         logger.error(f"❌ Error reading CSV: {e}")
         sys.exit(1)
     
-    return selected_rows, npc_stats, messages
+    return selected_rows, npc_stats
 #endregion CSV Processing
 
 #region Generation Execution
@@ -2143,7 +2543,8 @@ def main():
 
     Orchestrates the entire generation workflow:
     1. Load voice substitution rules from JSON files (NPC name, gender, system name)
-    2. Load voice profiles from Voicebox API
+    2. Sync voice profiles: fetch what Voicebox has, diff against what the CSV
+       needs, auto-compose+import anything missing but available in VOICES_DIR
     3. Load patcher configuration for text preprocessing
     4. Load generation memory to skip already processed files
     5. Read and filter CSV data using configured filters
@@ -2151,9 +2552,12 @@ def main():
     7. Process each generation job with progress feedback and optional retries
     8. Display final summary with retry statistics and completion status
 
-    The function uses the logging system (logger) for both console and file output,
-    providing real-time feedback during generation and a complete record of
-    all activity in the log file.
+    The function uses the logging system (logger) for both console and file output.
+    log_header_start() logs the run banner immediately, before any setup work
+    begins; each step (and the functions it calls, like sync_missing_profiles()
+    and load_and_filter_csv()) logs its own outcome directly at the appropriate
+    level as soon as it happens, rather than buffering messages to replay
+    later; log_header_summary() closes the header block once totals are known.
 
     Configuration variables from the Configuration region control all aspects
     of the generation process, including:
@@ -2162,6 +2566,7 @@ def main():
         - Filters (TARGET_VOICES, FILENAME_PATTERN, USE_STRREF_FILTER)
         - Voice substitutions (VOICE_SUBSTITUTIONS_FILE)
         - Fallback settings (USE_VOICE_FALLBACK, FALLBACK_VOICE_*)
+        - Auto-provisioning (AUTO_PROVISION_PROFILES, VOICES_DIR, PROFILE_SYNC_*)
         - Retry behavior (RETRY_COUNT, RETRY_DELAY)
         - Logging (LOG_FILE_PATH)
         - Summary display (COMPACT_SUMMARY)
@@ -2179,42 +2584,47 @@ def main():
           what will be processed before any generation begins.
         - Both console and file logging are used for complete visibility.
     """
-    header_messages = []
+    # Log the run banner right away, before any setup work happens
+    log_header_start()
 
     # 1. Load voice substitution rules from JSON files
     substitutions, substitutions_gender, substitutions_sysname = load_voice_substitutions_all()
     if substitutions:
-        header_messages.append(f"Loaded {len(substitutions)} voice substitutions (NPC name).")
+        logger.info(f"Loaded {len(substitutions)} voice substitutions (NPC name).")
     if substitutions_gender:
-        header_messages.append(f"Loaded {len(substitutions_gender)} voice substitutions (NPC + gender).")
+        logger.info(f"Loaded {len(substitutions_gender)} voice substitutions (NPC + gender).")
     if substitutions_sysname:
-        header_messages.append(f"Loaded {len(substitutions_sysname)} voice substitutions (System name).")
+        logger.info(f"Loaded {len(substitutions_sysname)} voice substitutions (System name).")
 
-    # 2. Load profiles
+    # 2. Sync/load profiles - auto-provision any missing-but-available profiles first
     try:
-        profile_map = get_all_profiles()
-        header_messages.append(f"Loaded {len(profile_map)} voice profiles.")
+        profile_map = sync_missing_profiles(
+            CSV_PATH, FILENAME_PATTERN, TARGET_VOICES,
+            USE_STRREF_FILTER, STRREF_FILTER_FILE,
+            substitutions, substitutions_gender, substitutions_sysname
+        )
+        logger.info(f"Loaded {len(profile_map)} voice profiles.")
     except Exception as e:
-        logger.error(f"❌ Failed to fetch profiles: {e}")
+        logger.error(f"❌ Failed to fetch/sync profiles: {e}")
         sys.exit(1)
 
     # 3. Load patcher config
     try:
         patcher_config = load_patcher_config(PATCHER_CONFIG_PATH)
-        header_messages.append("Loaded patcher config.")
+        logger.info("Loaded patcher config.")
     except Exception as e:
         patcher_config = None
-        header_messages.append(f"⚠️ Could not load patcher config: {e}")
+        logger.warning(f"⚠️ Could not load patcher config: {e}")
 
     # 4. Load generation memory
     generation_memory = load_generation_memory(GENERATION_MEMORY_PATH)
     if SKIP_ALREADY_GENERATED:
-        header_messages.append("Already generated files will be skipped.")
+        logger.info("Already generated files will be skipped.")
     else:
-        header_messages.append("Skipping already generated files is disabled.")
+        logger.info("Skipping already generated files is disabled.")
 
     # 5. Read CSV, filter, and select rows
-    selected_rows, npc_stats, filter_messages = load_and_filter_csv(
+    selected_rows, npc_stats = load_and_filter_csv(
         CSV_PATH,
         TARGET_VOICES,
         FILENAME_PATTERN,
@@ -2231,8 +2641,6 @@ def main():
         substitutions_sysname
     )
 
-    header_messages.extend(filter_messages)
-
     selected_rows = filter_and_sort_rows(selected_rows, profile_map)
     total_jobs = len(selected_rows)
 
@@ -2243,10 +2651,11 @@ def main():
     else:
         filename_mode = "CSV with base36 fallback"
 
-    header_messages.append(f"Selected {total_jobs} rows. Total characters: {total_chars_all}")
-    header_messages.append(f"Filename mode: {filename_mode}")
+    logger.info(f"Selected {total_jobs} rows. Total characters: {total_chars_all}")
+    logger.info(f"Filename mode: {filename_mode}")
 
-    log_header(total_jobs, total_chars_all, header_messages)
+    # Close out the header block now that totals are known
+    log_header_summary(total_jobs, total_chars_all)
 
     if total_jobs == 0:
         logger.info("No jobs to process. Exiting.")
