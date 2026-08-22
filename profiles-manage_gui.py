@@ -24,7 +24,7 @@ import logging
 import requests
 import tempfile
 from pathlib import Path
-from typing import Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set
 
 import pandas as pd
 from PySide6.QtCore import Qt, QUrl
@@ -32,7 +32,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton, QComboBox,
     QScrollArea, QSplitter, QGroupBox, QFrame, QMessageBox, QStatusBar,
-    QTextEdit, QDialog, QProgressBar, QFileDialog, QCheckBox,
+    QTextEdit, QDialog, QProgressBar, QFileDialog, QCheckBox, QTableWidget, 
+    QTableWidgetItem, QHeaderView,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -1021,6 +1022,98 @@ class URLImportDialog(QDialog):
         """Return the import mode ('direct' or 'fish')."""
         return self.mode
 
+
+# ============================================================================
+# CSV Viewer
+# ============================================================================
+class CSVLinesViewer(QDialog):
+    """Dialog to display CSV lines affected by a voice assignment."""
+    
+    def __init__(self, title: str, df: pd.DataFrame, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(f"👁️ CSV Lines: {title}")
+        self.resize(1200, 700)
+        self.df = df
+        
+        layout = QVBoxLayout(self)
+        
+        # Info label with line count
+        info_label = QLabel(f"Showing {len(df)} lines affected by this assignment")
+        layout.addWidget(info_label)
+        
+        # Table
+        self.table = QTableWidget()
+        self.table.setSortingEnabled(True)
+        layout.addWidget(self.table)
+        
+        # Close button
+        btn_layout = QHBoxLayout()
+        btn_layout.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.clicked.connect(self.accept)
+        btn_layout.addWidget(close_btn)
+        layout.addLayout(btn_layout)
+        
+        self._populate_table()
+    
+    def _populate_table(self):
+        """Populate the table with CSV data."""
+        if self.df.empty:
+            return
+        
+        # Define columns to show
+        columns = ['StrRef', 'SystemName', 'Gender', 'Text', 'SoundResRef']
+        display_cols = [col for col in columns if col in self.df.columns]
+        
+        self.table.setColumnCount(len(display_cols))
+        self.table.setHorizontalHeaderLabels(display_cols)
+        
+        # Set row count
+        self.table.setRowCount(len(self.df))
+        
+        # Populate data
+        for row_idx, (_, row) in enumerate(self.df.iterrows()):
+            for col_idx, col in enumerate(display_cols):
+                value = str(row[col]) if pd.notna(row[col]) else ""
+                
+                if col == 'Text':
+                    # Use a QTextEdit for the Text column to handle multi-line properly
+                    text_edit = QTextEdit()
+                    text_edit.setPlainText(value)
+                    text_edit.setReadOnly(True)
+                    text_edit.setStyleSheet("""
+                        QTextEdit {
+                            border: none;
+                            background: transparent;
+                            padding: 4px;
+                        }
+                    """)
+                    # Set the widget
+                    self.table.setCellWidget(row_idx, col_idx, text_edit)
+                    
+                    # Estimate height based on content
+                    lines = value.count('\n') + 1
+                    if len(value) > 80:
+                        estimated_lines = max(1, (len(value) + 79) // 80)
+                        lines = max(lines, estimated_lines)
+                    height = max(30, lines * 22 + 10)
+                    self.table.setRowHeight(row_idx, min(height, 300))
+                else:
+                    # Use standard item for other columns
+                    item = QTableWidgetItem(value)
+                    self.table.setItem(row_idx, col_idx, item)
+        
+        # Resize columns
+        for col_idx, col in enumerate(display_cols):
+            if col == 'Text':
+                self.table.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Stretch)
+                self.table.setColumnWidth(col_idx, 400)
+            else:
+                self.table.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
+        
+        # Enable alternating row colors for readability
+        self.table.setAlternatingRowColors(True)
+
 # ============================================================================
 # Data Loading / Saving Functions
 # ============================================================================
@@ -1707,7 +1800,7 @@ class VoiceProfileManager(QMainWindow):
         self.filter_combo.addItems(
             ["All", "Needs Attention", "Needs Audit", "Modified", "Missing", "Has Voice File"]
         )
-        self.filter_combo.setCurrentIndex(4)  # Default: Missing
+        self.filter_combo.setCurrentIndex(1)  # Default: Needs Attention
         self.filter_combo.currentTextChanged.connect(self._on_filter_changed)
         controls_layout.addWidget(self.filter_combo)
         
@@ -1946,12 +2039,13 @@ class VoiceProfileManager(QMainWindow):
                 if sub_layout is not None:
                     self._clear_layout(sub_layout)
 
-    def _make_voice_combo_with_editor(self, current_voice: Optional[str], on_change, profile_name: str) -> QWidget:
+    def _make_voice_combo_with_editor(self, current_voice: Optional[str], on_change, profile_name: str, 
+                                    show_lines_callback: Optional[Callable] = None,
+                                    show_lines_param: Optional[Any] = None) -> QWidget:
         """
-        Create a combo box with an Edit/Create button next to it.
+        Create a combo box with an Edit/Create button and Show Lines button next to it.
         
-        Returns a widget containing the combo and button.
-        The button shows ✏️ if the profile exists, or ➕ if it doesn't.
+        Returns a widget containing the combo and buttons.
         """
         container = QWidget()
         layout = QHBoxLayout(container)
@@ -1972,6 +2066,19 @@ class VoiceProfileManager(QMainWindow):
         
         # Store reference to combo for the button callback
         setattr(container, 'combo', combo)
+        
+        # Show Lines button
+        if show_lines_callback:
+            show_btn = QPushButton("👁️")
+            show_btn.setFixedWidth(30)
+            show_btn.setToolTip("Show affected CSV lines")
+            if show_lines_param is not None:
+                # Create a lambda that passes the parameter
+                show_btn.clicked.connect(lambda: show_lines_callback(show_lines_param))
+            else:
+                show_btn.clicked.connect(show_lines_callback)
+            layout.addWidget(show_btn)
+            setattr(container, 'show_btn', show_btn)
         
         # Edit/Create button
         has_voice = current_voice in self.existing_voices
@@ -2006,7 +2113,7 @@ class VoiceProfileManager(QMainWindow):
         setattr(container, 'btn', btn)
         
         return container
-    
+
     def _open_profile_editor(self, profile_name: str, audit_mode: bool = False,
                               on_saved: Optional[Callable[[], None]] = None):
         """
@@ -2112,10 +2219,20 @@ class VoiceProfileManager(QMainWindow):
         sys_group = QGroupBox("📋 System Name Assignment")
         sys_form = QFormLayout(sys_group)
 
+        # Show lines callback for system name level
+        def show_sys_lines():
+            sys_rows = self.df[self.df['SystemName'] == sysname]
+            if not sys_rows.empty:
+                viewer = CSVLinesViewer(f"System: {sysname}", sys_rows, self)
+                viewer.exec()
+            else:
+                QMessageBox.information(self, "No Lines", f"No CSV lines found for System: {sysname}")
+
         sys_container = self._make_voice_combo_with_editor(
             sys_assigned_voice,
             lambda text, s=sysname: self._on_sys_voice_changed(s, text),
-            f"{REALNAME_NOT_FOUND}_{sysname}"
+            f"{REALNAME_NOT_FOUND}_{sysname}",
+            show_lines_callback=show_sys_lines
         )
         sys_form.addRow(f"{sysname} ({total_lines} lines):", sys_container)
         self.detail_layout.addWidget(sys_group)
@@ -2185,12 +2302,20 @@ class VoiceProfileManager(QMainWindow):
         npc_group = QGroupBox(f"📌 NPC Level Assignment ({total_lines} lines)")
         npc_form = QFormLayout(npc_group)
         
-        # Use the NPC name as the profile name for the editor
-        # This ensures the edit button appears even if the profile exists as a file
+        # Show lines callback for NPC level
+        def show_npc_lines():
+            npc_rows = self.df[self.df['RealName'] == npc_name]
+            if not npc_rows.empty:
+                viewer = CSVLinesViewer(f"NPC: {npc_name}", npc_rows, self)
+                viewer.exec()
+            else:
+                QMessageBox.information(self, "No Lines", f"No CSV lines found for NPC: {npc_name}")
+        
         npc_container = self._make_voice_combo_with_editor(
-            npc_data["assigned_voice"] or npc_name,  # Pass NPC name as default
+            npc_data["assigned_voice"] or npc_name,
             lambda text: self._on_npc_voice_changed(npc_name, text),
-            npc_name
+            npc_name,
+            show_lines_callback=show_npc_lines
         )
         npc_form.addRow("Voice:", npc_container)
         self.detail_layout.addWidget(npc_group)
@@ -2205,10 +2330,22 @@ class VoiceProfileManager(QMainWindow):
                 gender_count = npc_count.get('genders', {}).get(gender, {}).get('total_lines', 0)
                 gform = QFormLayout()
                 
+                # Show lines callback for gender level
+                def show_gender_lines(g=gender):
+                    gender_rows = self.df[(self.df['RealName'] == npc_name) & 
+                                        (self.df['Gender'].fillna('') == g)]
+                    if not gender_rows.empty:
+                        viewer = CSVLinesViewer(f"{npc_name} | Gender: {g}", gender_rows, self)
+                        viewer.exec()
+                    else:
+                        QMessageBox.information(self, "No Lines", f"No CSV lines found for {npc_name} | Gender: {g}")
+                
                 gender_container = self._make_voice_combo_with_editor(
                     gender_data["assigned_voice"],
                     lambda text, g=gender: self._on_gender_voice_changed(npc_name, g, text),
-                    f"{npc_name}_{gender}"
+                    f"{npc_name}_{gender}",
+                    show_lines_callback=show_gender_lines,
+                    show_lines_param=gender
                 )
                 gform.addRow(f"Voice for {gender} ({gender_count} lines):", gender_container)
                 gender_layout.addLayout(gform)
@@ -2230,10 +2367,21 @@ class VoiceProfileManager(QMainWindow):
                         sysname = sys["name"]
                         sys_count = npc_count.get('genders', {}).get(gender, {}).get('sysnames', {}).get(sysname, 0)
                         
+                        # Show lines callback for system name level
+                        def show_sys_lines(s=sysname):
+                            sys_rows = self.df[self.df['SystemName'] == s]
+                            if not sys_rows.empty:
+                                viewer = CSVLinesViewer(f"System: {s}", sys_rows, self)
+                                viewer.exec()
+                            else:
+                                QMessageBox.information(self, "No Lines", f"No CSV lines found for System: {s}")
+                        
                         sys_container = self._make_voice_combo_with_editor(
                             sys["assigned_voice"],
                             lambda text, s=sysname: self._on_sys_voice_changed(s, text),
-                            f"{npc_name}_{sysname}"
+                            f"{npc_name}_{sysname}",
+                            show_lines_callback=show_sys_lines,
+                            show_lines_param=sysname
                         )
                         
                         sys_form.addRow(f"{sysname} ({sys_count} lines):", sys_container)
