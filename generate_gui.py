@@ -1950,10 +1950,14 @@ class GenerationWorker(QObject):
     # ------------------------------------------------------------------
 
     def _job_progress_ticker(self, stop_event, job_idx, total_jobs, filename, strref,
-                              estimated_sec, timeout_sec, npc_name, voice_name, chars):
+                          estimated_sec, timeout_sec, npc_name, voice_name, chars):
         """
         Background thread: emits job_progress every 0.5s while a single
         generation is in flight, driving the job QProgressBar in the UI.
+
+        This function runs as a daemon thread and emits job_progress signals
+        that are safely received by the main GUI thread to update the progress
+        bar and label in real-time.
 
         Args:
             stop_event (threading.Event): Event to signal when the job completes.
@@ -1961,15 +1965,16 @@ class GenerationWorker(QObject):
             total_jobs (int): Total number of jobs.
             filename (str): The filename being generated.
             strref (str): STRREF identifier.
-            estimated_sec (float): Estimated duration for this job.
-            timeout_sec (float): Maximum allowed duration for this job.
+            estimated_sec (float): Estimated duration for this job in seconds.
+            timeout_sec (float): Maximum allowed duration for this job in seconds.
             npc_name (str): NPC name being processed.
             voice_name (str): Voice profile name used.
             chars (int): Number of characters in the text.
 
         Note:
-            This function runs as a daemon thread and exits cleanly when
-            stop_event is set.
+            The function exits cleanly when stop_event is set.
+            The emitted data dict contains all job progress information needed
+            by the GUI to update the job progress bar and label.
         """
         start_time = time.time()
         while not stop_event.is_set():
@@ -1980,6 +1985,7 @@ class GenerationWorker(QObject):
                 "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
                 "percent": percent, "elapsed": elapsed, "estimated": estimated_sec,
                 "timeout": timeout_sec,
+                # No "status" field = generation phase
             })
             time.sleep(0.5)
 
@@ -2044,8 +2050,8 @@ class GenerationWorker(QObject):
             time.sleep(1.0)
 
     def process_generation_job(self, idx, total_jobs, strref, npc_name, voice_name, filename, text,
-                                profile_id, regressor, generation_memory,
-                                retry_count=0, retry_delay=0.0):
+                            profile_id, regressor, generation_memory,
+                            retry_count=0, retry_delay=0.0):
         """
         Execute a single TTS generation job with optional retry on failure.
 
@@ -2055,9 +2061,13 @@ class GenerationWorker(QObject):
             3. Submits the generation request to the Voicebox API
             4. Starts a timeout monitor thread (if enabled)
             5. Waits for completion via SSE streaming
-            6. Downloads and converts the audio
-            7. Records success in generation memory
-            8. Returns results for statistics tracking
+            6. Emits status updates for post-processing phases:
+            - "Downloading..." during audio download
+            - "Converting to OGG..." during ffmpeg conversion
+            - "Saving memory..." during memory save
+            7. Downloads and converts the audio
+            8. Records success in generation memory
+            9. Returns results for statistics tracking
 
         If retry_count > 0, failed generations are retried up to retry_count
         times with a delay of retry_delay seconds between attempts.
@@ -2090,6 +2100,8 @@ class GenerationWorker(QObject):
             The timeout monitor cancels the generation if it exceeds the
             configured threshold (hard maximum or estimated * multiplier).
             Stop requests are honored between attempts.
+            Post-generation phases emit status updates to keep the user informed
+            of download, conversion, and save progress.
         """
         chars = len(text)
         estimated_sec = estimate_generation_time(regressor, chars)
@@ -2124,7 +2136,7 @@ class GenerationWorker(QObject):
             ticker = threading.Thread(
                 target=self._job_progress_ticker,
                 args=(stop_event, idx, total_jobs, filename, strref,
-                      estimated_sec, timeout_sec, npc_name, voice_name, chars),
+                    estimated_sec, timeout_sec, npc_name, voice_name, chars),
                 daemon=True,
             )
             ticker.start()
@@ -2155,6 +2167,15 @@ class GenerationWorker(QObject):
                     monitor_thread.join(timeout=0.5)
 
                 elapsed = time.time() - start_time
+                
+                # --- POST-GENERATION PHASE: Downloading ---
+                self.job_progress.emit({
+                    "idx": idx, "total": total_jobs, "strref": strref, "filename": filename,
+                    "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
+                    "percent": 100, "elapsed": elapsed, "estimated": estimated_sec,
+                    "timeout": timeout_sec, "status": "Downloading..."
+                })
+                
                 stop_event.set()
                 ticker.join(timeout=1.0)
                 self._current_gen_id = None
@@ -2169,12 +2190,30 @@ class GenerationWorker(QObject):
 
                     temp_path = output_path + ".tmp"
                     try:
+                        # Download
                         download_audio(gen_id, temp_path)
+                        
+                        # --- POST-GENERATION PHASE: Converting ---
                         if CONVERT_TO_OGG:
+                            self.job_progress.emit({
+                                "idx": idx, "total": total_jobs, "strref": strref, "filename": filename,
+                                "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
+                                "percent": 100, "elapsed": elapsed, "estimated": estimated_sec,
+                                "timeout": timeout_sec, "status": "Converting to OGG..."
+                            })
                             convert_to_ogg(temp_path, output_path, OGG_QUALITY)
                             os.remove(temp_path)
                         else:
                             os.rename(temp_path, output_path)
+                        
+                        # --- POST-GENERATION PHASE: Saving ---
+                        self.job_progress.emit({
+                            "idx": idx, "total": total_jobs, "strref": strref, "filename": filename,
+                            "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
+                            "percent": 100, "elapsed": elapsed, "estimated": estimated_sec,
+                            "timeout": timeout_sec, "status": "Saving memory..."
+                        })
+
                     except Exception as e:
                         if os.path.exists(temp_path):
                             os.remove(temp_path)
@@ -2680,22 +2719,65 @@ class GenerateWindow(QMainWindow):
 
     def _on_job_progress(self, data: dict):
         """
-        Update the job progress bar and label.
+        Update the job progress bar and label with status information.
+
+        Handles two modes of operation:
+            1. Generation phase: Shows elapsed/estimated time and progress bar
+            2. Post-processing phase: Shows status text (Downloading, Converting, Saving)
+                with a full progress bar
 
         Args:
-            data (dict): Job progress data containing idx, total, filename,
-                strref, chars, npc_name, voice_name, percent, elapsed, estimated, timeout.
+            data (dict): Job progress data containing:
+                - idx (int): Current job index (1-based)
+                - total (int): Total number of jobs
+                - strref (str): STRREF identifier
+                - filename (str): Output filename
+                - npc_name (str): NPC name being processed
+                - voice_name (str): Voice profile name used
+                - chars (int): Number of characters in the text
+                - percent (float): Completion percentage (0-100)
+                - elapsed (float): Elapsed time in seconds
+                - estimated (float): Estimated total time in seconds
+                - timeout (float, optional): Maximum allowed time in seconds
+                - status (str, optional): Post-processing status message
+
+        Note:
+            When status is provided, the progress bar is set to 100% and the
+            label shows the status message instead of elapsed/estimated time.
+            The status message indicates post-generation work like downloading,
+            converting, or saving.
         """
+        # If status is provided (post-generation phase), show status text
+        if data.get("status"):
+            status_text = data["status"]
+            self.job_bar.setValue(100)  # Show full bar during post-processing
+            job_width = len(str(data["total"]))
+            voice_part = f" ({data['voice_name']})" if data["voice_name"] != data["npc_name"] else ""
+            self.job_label.setText(
+                f"[{data['idx']:>{job_width}}/{data['total']:>{job_width}}] "
+                f"{data['strref']}/{data['filename']}  "
+                f"⏳ {status_text}  "
+                f"({data['chars']} chars)  {data['npc_name']}{voice_part}"
+            )
+            return
+        
+        # Normal progress update (during generation)
         self.job_bar.setValue(int(data["percent"]))
         job_width = len(str(data["total"]))
         voice_part = f" ({data['voice_name']})" if data["voice_name"] != data["npc_name"] else ""
-        timeout_part = f" (max: {format_time(data['timeout'])})" if data["timeout"] else ""
+        
+        # Build time string
+        time_part = f"{format_time(data['elapsed'])} / {format_time(data['estimated'])}"
+        if data.get("timeout"):
+            time_part += f" (max: {format_time(data['timeout'])})"
+        
         self.job_label.setText(
             f"[{data['idx']:>{job_width}}/{data['total']:>{job_width}}] "
             f"{data['strref']}/{data['filename']}  "
-            f"{format_time(data['elapsed'])} / {format_time(data['estimated'])}{timeout_part}  "
+            f"{time_part}  "
             f"({data['chars']} chars)  {data['npc_name']}{voice_part}"
         )
+
 
     def _on_overall_progress(self, data: dict):
         """
