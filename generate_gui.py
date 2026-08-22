@@ -512,27 +512,42 @@ def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_dur
     logging.log(logging.INFO if success else logging.WARNING, line)
 
 
-def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, retry_stats=None):
+def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, 
+                       retry_stats=None, was_stopped=False, successful_jobs=0):
     """
     Log the final summary after all generation jobs complete.
 
-    Args:
-        total_jobs (int): Total number of jobs processed.
-        total_chars_processed (int): Total characters processed.
-        avg_time_per_char (float): Average generation time per character.
-        npc_stats (dict): Statistics dictionary per NPC.
-        retry_stats (dict, optional): Retry statistics from the generation run.
-
-    Note:
-        The summary includes:
-        - Total files processed and characters
-        - Average time per character
+    Displays a comprehensive summary including:
+        - Job statistics (total, processed, skipped, failed)
+        - Character statistics (total, processed)
+        - Performance metrics (average time per character)
+        - Status (completed or stopped)
         - Already generated files (detailed if COMPACT_SUMMARY is False)
         - Missing voices (detailed if COMPACT_SUMMARY is False)
         - Retry statistics (if provided)
         - Completion timestamp
+
+    The summary clearly distinguishes between:
+        - Queue total (total jobs selected)
+        - Actually processed (successful + failed)
+        - Skipped (already generated, missing voices, filtered out)
+
+    Args:
+        total_jobs (int): Total number of jobs in the queue.
+        total_chars_processed (int): Total characters successfully generated.
+        avg_time_per_char (float): Average generation time per character.
+        npc_stats (dict): Statistics dictionary per NPC.
+        retry_stats (dict, optional): Retry statistics from the generation run.
+        was_stopped (bool): True if the user manually stopped the process.
+        successful_jobs (int): Number of successfully generated files.
+
+    Note:
+        Uses fixed-width labels (30 characters) and right-aligned numbers
+        with dynamic width calculation for consistent alignment.
     """
-    total_done = total_skipped = 0
+    # Extract statistics
+    total_done = 0
+    total_skipped = 0
     done_summary, skipped_summary = {}, {}
 
     for voice, stats in npc_stats.items():
@@ -545,49 +560,145 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
             total_skipped += skipped
             skipped_summary[voice] = skipped
 
-    lines = ["", "=" * 70, "FINAL SUMMARY", "=" * 70,
-              f"Processed: {total_jobs:,} files",
-              f"Total characters: {total_chars_processed:,}"]
+    total_failed = retry_stats.get('failed_tasks', 0) if retry_stats else 0
+    processed_jobs = successful_jobs + total_failed
 
-    if avg_time_per_char:
-        lines.append(f"Average time per character: {avg_time_per_char:.4f}s")
+    # Calculate chars from npc_stats
+    total_done_chars = sum(s.get("chars", 0) for s in npc_stats.values() if s.get("done", 0) > 0)
+    total_skipped_chars = sum(s.get("chars", 0) for s in npc_stats.values() if s.get("skipped", 0) > 0)
+    total_chars_all = sum(s.get("chars", 0) for s in npc_stats.values())
 
-    if total_done:
-        if COMPACT_SUMMARY:
-            lines.append(f"Skipped already generated: {total_done:,} files")
-        else:
+    # Calculate completion rate
+    completion_rate = (successful_jobs / total_jobs * 100) if total_jobs > 0 else 0
+
+    # Fixed label width for consistent alignment
+    LABEL_WIDTH = 30
+
+    # Find the maximum width needed for numbers in each section
+    job_numbers = [
+        total_jobs,
+        successful_jobs,
+        total_failed,
+        total_done,
+        total_skipped,
+        processed_jobs,
+        total_jobs,
+    ]
+    job_width = max(len(str(n)) for n in job_numbers if n > 0) + 1
+    
+    char_numbers = [
+        total_chars_all,
+        total_chars_processed,
+        total_done_chars,
+        total_skipped_chars,
+    ]
+    char_width = max(len(str(n)) for n in char_numbers if n > 0) + 1
+
+    retry_numbers = [
+        retry_stats.get('failed_attempts', 0) if retry_stats else 0,
+        retry_stats.get('successful_retries', 0) if retry_stats else 0,
+        retry_stats.get('failed_tasks', 0) if retry_stats else 0,
+    ]
+    retry_width = max(len(str(n)) for n in retry_numbers if n > 0) + 1 if retry_stats else 10
+
+    # Ensure minimum widths
+    job_width = max(job_width, 10)
+    char_width = max(char_width, 10)
+
+    lines = []
+    lines.append("")
+    lines.append("=" * 70)
+    
+    # Status header
+    if was_stopped:
+        lines.append("⏹ GENERATION STOPPED (User Request)")
+    else:
+        lines.append("✅ GENERATION COMPLETE")
+    
+    lines.append("=" * 70)
+    
+    # ----- Job Statistics -----
+    lines.append("📊 JOB STATISTICS")
+    lines.append("-" * 70)
+    
+    # Using fixed label width for alignment
+    lines.append(f"{'  Total jobs in queue:':<{LABEL_WIDTH}} {total_jobs:>{job_width},}")
+    lines.append(f"{'  ✅ Successfully generated:':<{LABEL_WIDTH - 1}} {successful_jobs:>{job_width},}")
+    
+    if total_failed > 0:
+        lines.append(f"{'  ❌ Failed:':<{LABEL_WIDTH - 1}} {total_failed:>{job_width},}")
+    
+    if total_done > 0:
+        lines.append(f"{'  ⏭️ Already generated:':<{LABEL_WIDTH}} {total_done:>{job_width},} (skipped)")
+    
+    if total_skipped > 0:
+        lines.append(f"{'  ⏭️ Missing voices:':<{LABEL_WIDTH}} {total_skipped:>{job_width},} (skipped)")
+    
+    if processed_jobs > 0 and total_jobs > 0:
+        lines.append(f"{'  📈 Completion rate:':<{LABEL_WIDTH - 1}} {completion_rate:>{job_width-1}.1f}% ({successful_jobs:,} of {total_jobs:,})")
+    
+    lines.append("")
+
+    # ----- Character Statistics -----
+    lines.append("📝 CHARACTER STATISTICS")
+    lines.append("-" * 70)
+    
+    lines.append(f"{'  Total chars in queue:':<{LABEL_WIDTH}} {total_chars_all:>{char_width},}")
+    lines.append(f"{'  ✅ Generated:':<{LABEL_WIDTH - 1}} {total_chars_processed:>{char_width},}")
+    
+    if total_done_chars > 0:
+        lines.append(f"{'  ⏭️ Already generated:':<{LABEL_WIDTH}} {total_done_chars:>{char_width},} (skipped)")
+    
+    if total_skipped_chars > 0:
+        lines.append(f"{'  ⏭️ Missing voices:':<{LABEL_WIDTH}} {total_skipped_chars:>{char_width},} (skipped)")
+    
+    if total_chars_processed > 0 and avg_time_per_char:
+        lines.append(f"{'  ⚡ Avg time/char (s):':<{LABEL_WIDTH - 1}} {avg_time_per_char:>{char_width}.4f}")
+    
+    lines.append("")
+
+    # ----- Detailed Breakdown (if COMPACT_SUMMARY is False) -----
+    if not COMPACT_SUMMARY:
+        lines.append("📋 DETAILED BREAKDOWN")
+        lines.append("-" * 70)
+        
+        if done_summary:
             done_details = ", ".join(f"{voice}: {count:,}" for voice, count in done_summary.items())
-            lines.append(f"Skipped already generated: {total_done:,} ({done_details})")
-
-    if total_skipped:
-        if COMPACT_SUMMARY:
-            lines.append(f"Skipped missing voices: {total_skipped:,} files")
-        else:
+            lines.append(f"  Already generated: {done_details}")
+        
+        if skipped_summary:
             skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
-            lines.append(f"Skipped missing voices: {total_skipped:,} ({skipped_details})")
+            lines.append(f"  Missing voices:     {skipped_details}")
 
+    # ----- Retry Statistics -----
     if retry_stats:
         lines.append("")
+        lines.append("🔄 RETRY STATISTICS")
         lines.append("-" * 70)
-        lines.append("RETRY STATISTICS")
-        lines.append(f"Total retry attempts: {retry_stats.get('failed_attempts', 0)}")
-        lines.append(f"Successful retries:   {retry_stats.get('successful_retries', 0)}")
-        lines.append(f"Failed tasks:         {retry_stats.get('failed_tasks', 0)}")
+        lines.append(f"{'  Total retry attempts:':<{LABEL_WIDTH}} {retry_stats.get('failed_attempts', 0):>{retry_width},}")
+        lines.append(f"{'  Successful retries:':<{LABEL_WIDTH}} {retry_stats.get('successful_retries', 0):>{retry_width},}")
+        lines.append(f"{'  Failed tasks:':<{LABEL_WIDTH}} {retry_stats.get('failed_tasks', 0):>{retry_width},}")
 
         failed_tasks = retry_stats.get('failed_task_details', [])
         if failed_tasks:
             lines.append("")
-            lines.append("Failed tasks:")
+            lines.append("  ❌ Failed tasks:")
             for task in failed_tasks:
-                lines.append(f"  [{task['idx']}] {task['strref']}/{task['filename']} - {task['npc_name']}")
-        lines.append("")
+                lines.append(f"    [{task['idx']}] {task['strref']}/{task['filename']} - {task['npc_name']}")
 
-    lines.append(f"# Finished at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    lines.append("")
+    lines.append("=" * 70)
+    
+    # Timestamp
+    if was_stopped:
+        lines.append(f"⏹ Stopped at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    else:
+        lines.append(f"✅ Completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    
     lines.append("=" * 70)
     lines.append("")
 
     logging.info("\n".join(lines))
-
 
 # Logger is created once the QApplication/LogSignal exist; see main().
 logger: logging.Logger = logging.getLogger()
@@ -2264,6 +2375,7 @@ class GenerationWorker(QObject):
             - Logs job completion or failure with appropriate detail
             - Tracks failed tasks for final reporting
             - Honors stop requests between jobs
+            - Tracks successful job count for accurate final summary
 
         Performance statistics:
             - Character-based linear regression (regressor) for individual job estimation
@@ -2278,21 +2390,26 @@ class GenerationWorker(QObject):
             total_chars_all (int): Total character count across all jobs.
 
         Returns:
-            tuple: (total_chars_processed, avg_time_per_char, retry_stats)
+            tuple: (total_chars_processed, avg_time_per_char, retry_stats, successful_jobs)
                 - total_chars_processed (int): Total characters successfully generated.
                 - avg_time_per_char (float): Running average seconds per character.
                 - retry_stats (dict): Statistics tracking retry behavior.
+                - successful_jobs (int): Number of successfully generated files.
 
         Note:
             Skipped rows (missing profile_id) are logged as warnings but not counted as failures.
             Retry statistics are only tracked for jobs that were actually processed.
             Stop requests are honored between jobs (current job finishes first).
+            The successful_jobs count is used in the final summary for accurate reporting.
         """
         total_chars_processed = 0
         total_start_time = time.time()
         avg_time_per_char = None
         overall_regressor = Regression()
         regressor = Regression()
+        
+        # Track successful jobs count
+        successful_jobs = 0
 
         retry_stats = {
             "failed_attempts": 0, "successful_retries": 0,
@@ -2324,6 +2441,7 @@ class GenerationWorker(QObject):
             retry_stats["failed_attempts"] += retry_attempts
 
             if success:
+                successful_jobs += 1
                 regressor.push(chars, elapsed)
                 total_chars_processed += chars
                 avg_time_per_char = (time.time() - total_start_time) / total_chars_processed
@@ -2332,11 +2450,11 @@ class GenerationWorker(QObject):
                 if retry_attempts > 0:
                     retry_stats["successful_retries"] += 1
                     log_job_summary(idx, total_jobs, strref, filename, chars, elapsed,
-                                     audio_duration, display_name, voice_name, success=True,
-                                     error_msg=f"(succeeded after {retry_attempts} retries)")
+                                    audio_duration, display_name, voice_name, success=True,
+                                    error_msg=f"(succeeded after {retry_attempts} retries)")
                 else:
                     log_job_summary(idx, total_jobs, strref, filename, chars, elapsed,
-                                     audio_duration, display_name, voice_name, success=True)
+                                    audio_duration, display_name, voice_name, success=True)
             else:
                 retry_stats["failed_tasks"] += 1
                 retry_stats["failed_task_details"].append({
@@ -2344,9 +2462,9 @@ class GenerationWorker(QObject):
                 })
                 error_msg = f"Failed after {retry_attempts} retries"
                 log_job_summary(idx, total_jobs, strref, filename, chars, elapsed,
-                                 audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
+                                audio_duration, display_name, voice_name, success=False, error_msg=error_msg)
 
-        return total_chars_processed, avg_time_per_char, retry_stats
+        return total_chars_processed, avg_time_per_char, retry_stats, successful_jobs
 
     # ------------------------------------------------------------------
     # Entry point
@@ -2447,16 +2565,30 @@ class GenerationWorker(QObject):
             log_pregeneration_summary(npc_stats, profile_map)
 
             self.stage.emit(f"Generating {total_jobs} lines...")
-            total_chars_processed, avg_time_per_char, retry_stats = self.process_generation_jobs_all(
+            total_chars_processed, avg_time_per_char, retry_stats, successful_jobs = self.process_generation_jobs_all(
                 profile_map, generation_memory, selected_rows, total_jobs, total_chars_all
             )
+            
+            was_stopped = self._stop_requested.is_set()
+            
+            log_final_summary(
+                total_jobs, 
+                total_chars_processed, 
+                avg_time_per_char, 
+                npc_stats, 
+                retry_stats, 
+                was_stopped,
+                successful_jobs
+            )
 
-            log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, retry_stats)
-
-            self.stage.emit("Stopped." if self._stop_requested.is_set() else "Done.")
+            self.stage.emit("Stopped." if was_stopped else "Done.")
             self.finished.emit({
-                "total_jobs": total_jobs, "total_chars_processed": total_chars_processed,
-                "avg_time_per_char": avg_time_per_char, "npc_stats": npc_stats, "retry_stats": retry_stats,
+                "total_jobs": total_jobs, 
+                "total_chars_processed": total_chars_processed,
+                "avg_time_per_char": avg_time_per_char, 
+                "npc_stats": npc_stats, 
+                "retry_stats": retry_stats,
+                "was_stopped": was_stopped,
             })
 
         except Exception as e:
