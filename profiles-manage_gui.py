@@ -43,6 +43,13 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 # CSV filtering
 FILENAME_PATTERN = r"^TS"      # regex pattern for filename (column 6)
 
+# Display-only placeholder for rows that have a SystemName but no RealName.
+# Used to build a per-SystemName label (f"{REALNAME_NOT_FOUND} - {SystemName}")
+# so each such row still gets its own selectable entry in the NPC list.
+# NEVER used for voice-profile/sample-file naming on its own -- the detail
+# panel builds f"{REALNAME_NOT_FOUND}_{SystemName}" for that instead.
+REALNAME_NOT_FOUND = "RealNameMissing"
+
 # Audio settings
 OGG_QUALITY = 4                # Vorbis quality (0-10, 4 = good quality/size balance)
 MAX_DURATION = 30.0            # Maximum duration in seconds for a single sample
@@ -1028,7 +1035,51 @@ def load_csv(csv_path: str) -> pd.DataFrame:
     except Exception as e:
         logger.error(f"Error loading CSV: {e}")
         return pd.DataFrame()
-    
+
+
+def is_missing_realname_npc(npc_name: str) -> bool:
+    """True if this NPC list entry is a synthetic 'missing RealName' placeholder."""
+    return npc_name.startswith(f"{REALNAME_NOT_FOUND} - ")
+
+
+def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
+    """
+    Clean up the raw CSV rows before they're used anywhere else.
+
+    - Rows with no SystemName are dropped entirely -- there's no VO to do
+      for them, and the prepare script never emits a row with a RealName
+      but no SystemName anyway.
+    - Rows that have a SystemName but no RealName are given a synthetic
+      RealName of f"{REALNAME_NOT_FOUND} - {SystemName}" so they still show
+      up in the NPC list, grouped one entry per SystemName. This label is
+      display-only; the real voice-profile/sample name for these entries
+      is built separately (see REALNAME_NOT_FOUND usage in the GUI).
+    """
+    if df.empty:
+        return df
+
+    original_count = len(df)
+    system_names = df["SystemName"].fillna("").astype(str).str.strip()
+    df = df[system_names != ""].copy()
+    system_names = system_names[system_names != ""]
+
+    dropped = original_count - len(df)
+    if dropped:
+        logger.info(f"Dropped {dropped} row(s) with no SystemName (no VO needed)")
+
+    real_names = df["RealName"].fillna("").astype(str).str.strip()
+    missing_real_name = real_names == ""
+    if missing_real_name.any():
+        df.loc[missing_real_name, "RealName"] = (
+            f"{REALNAME_NOT_FOUND} - " + system_names[missing_real_name]
+        )
+        logger.info(
+            f"Assigned placeholder RealName to {int(missing_real_name.sum())} orphan row(s)"
+        )
+
+    return df
+
+
 
 def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
     """
@@ -1275,17 +1326,47 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
     prep_npcs = prep_npcs or set()
     skipped_npcs = skipped_npcs or set()
     npc_df = df[df["RealName"] == npc_name]
+    return _build_npc_entry(
+        npc_name, npc_df, substitutions, gender_substitutions,
+        sys_substitutions, existing_voices, prep_npcs, skipped_npcs,
+    )
+
+
+def _build_npc_entry(npc_name: str, npc_df: pd.DataFrame, substitutions: Dict,
+                      gender_substitutions: Dict, sys_substitutions: Dict,
+                      existing_voices: Set[str], prep_npcs: Set[str],
+                      skipped_npcs: Set[str]) -> Dict:
+    """
+    Build a single hierarchy entry from an NPC's rows. Shared by
+    build_hierarchy() and build_hierarchy_for_npc() so both stay in sync.
+
+    For a synthetic "missing RealName" placeholder (see REALNAME_NOT_FOUND),
+    npc_df always has exactly one distinct SystemName and at most one
+    Gender value. Gender is kept (even if blank) purely for display and for
+    the coverage/filter math below, which already works off the SystemName
+    entry inside "genders" -- there's just never a NPC-level or Gender-level
+    UI shown for these in the GUI.
+    """
+    is_placeholder = is_missing_realname_npc(npc_name)
     has_existing = npc_name in existing_voices
     entry = {
         "assigned_voice": substitutions.get(npc_name),
         "has_existing_voice": has_existing,
         "needs_audit": (not has_existing) and (npc_name in prep_npcs),
         "skipped": npc_name in skipped_npcs,
+        "is_realname_missing": is_placeholder,
         "genders": {},
     }
-    gender_groups = npc_df.dropna(subset=["Gender"]).groupby("Gender", sort=False)
+
+    if is_placeholder:
+        # Keep a blank Gender as its own group instead of dropping it, so
+        # the single SystemName still surfaces below.
+        gender_groups = npc_df.groupby(npc_df["Gender"].fillna(""), sort=False)
+    else:
+        gender_groups = npc_df.dropna(subset=["Gender"]).groupby("Gender", sort=False)
+
     for gender, gender_df in gender_groups:
-        if gender == "":
+        if gender == "" and not is_placeholder:
             continue
         gender_key = f"{npc_name}|{gender}"
         entry["genders"][gender] = {
@@ -1319,31 +1400,10 @@ def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions:
     for npc_name, npc_df in df.groupby("RealName", sort=False):
         if npc_name == "":
             continue
-        has_existing = npc_name in existing_voices
-        entry = {
-            "assigned_voice": substitutions.get(npc_name),
-            "has_existing_voice": has_existing,
-            "needs_audit": (not has_existing) and (npc_name in prep_npcs),
-            "skipped": npc_name in skipped_npcs,
-            "genders": {},
-        }
-        gender_groups = npc_df.dropna(subset=["Gender"]).groupby("Gender", sort=False)
-        for gender, gender_df in gender_groups:
-            if gender == "":
-                continue
-            gender_key = f"{npc_name}|{gender}"
-            entry["genders"][gender] = {
-                "assigned_voice": gender_substitutions.get(gender_key),
-                "sysnames": [],
-            }
-            for sysname in gender_df["SystemName"].dropna().unique():
-                if sysname == "":
-                    continue
-                entry["genders"][gender]["sysnames"].append({
-                    "name": sysname,
-                    "assigned_voice": sys_substitutions.get(sysname),
-                })
-        hierarchy[npc_name] = entry
+        hierarchy[npc_name] = _build_npc_entry(
+            str(npc_name), npc_df, substitutions, gender_substitutions,
+            sys_substitutions, existing_voices, prep_npcs, skipped_npcs,
+        )
 
     logger.info(f"Built hierarchy with {len(hierarchy)} NPCs in {time.time() - start_time:.2f}s")
     return hierarchy
@@ -1372,7 +1432,10 @@ def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
             'genders': {}
         }
 
-        gender_groups = npc_df.dropna(subset=['Gender']).groupby('Gender', sort=False)
+        if npc_data.get('is_realname_missing', False):
+            gender_groups = npc_df.groupby(npc_df['Gender'].fillna(''), sort=False)
+        else:
+            gender_groups = npc_df.dropna(subset=['Gender']).groupby('Gender', sort=False)
         for gender, gender_df in gender_groups:
             if gender not in npc_data.get('genders', {}):
                 continue
@@ -1469,6 +1532,12 @@ class VoiceProfileManager(QMainWindow):
 
         # --- Load everything once at startup ---
         self.df = load_csv(CSV_PATH)
+
+        # Drop rows with no SystemName, and give orphan rows (SystemName but
+        # no RealName) a synthetic placeholder RealName so they still show
+        # up as selectable entries.
+        if not self.df.empty:
+            self.df = prepare_dataframe(self.df)
 
         # Apply the filter to remove lines with SoundResRef (except TS files)
         if not self.df.empty:
@@ -1915,6 +1984,41 @@ class VoiceProfileManager(QMainWindow):
         # Re-render detail panel to update comboboxes and voice file message
         self._render_detail_panel()
 
+    def _render_missing_realname_detail(self, npc_data: Dict, total_lines: int):
+        """
+        Render the detail panel for a synthetic 'missing RealName' entry:
+        just the single SystemName-level assignment -- no NPC-level or
+        Gender-level UI. Gender (if any) is shown as a label only, since
+        it has no effect on the assignment.
+        """
+        sysname = None
+        sys_assigned_voice = None
+        gender_label = None
+        for gender, gender_data in npc_data["genders"].items():
+            if gender:
+                gender_label = gender
+            for sys in gender_data["sysnames"]:
+                sysname = sys["name"]
+                sys_assigned_voice = sys["assigned_voice"]
+
+        if gender_label:
+            self.detail_layout.addWidget(QLabel(f"<i>Gender on file: {gender_label}</i>"))
+
+        if not sysname:
+            self.detail_layout.addWidget(QLabel("⚠️ No SystemName found for this entry."))
+            return
+
+        sys_group = QGroupBox("📋 System Name Assignment")
+        sys_form = QFormLayout(sys_group)
+
+        sys_container = self._make_voice_combo_with_editor(
+            sys_assigned_voice,
+            lambda text, s=sysname: self._on_sys_voice_changed(s, text),
+            f"{REALNAME_NOT_FOUND}_{sysname}"
+        )
+        sys_form.addRow(f"{sysname} ({total_lines} lines):", sys_container)
+        self.detail_layout.addWidget(sys_group)
+
     def _render_detail_panel(self):
         """Render the detail panel for the currently selected NPC."""
         self._clear_layout(self.detail_layout)
@@ -1971,6 +2075,10 @@ class VoiceProfileManager(QMainWindow):
             self.detail_layout.addWidget(audit_frame)
 
         self.detail_layout.addWidget(QLabel("---"))
+
+        if npc_data.get("is_realname_missing", False):
+            self._render_missing_realname_detail(npc_data, total_lines)
+            return
 
         # --- NPC level (always shown) ---
         npc_group = QGroupBox(f"📌 NPC Level Assignment ({total_lines} lines)")
@@ -2070,7 +2178,7 @@ class VoiceProfileManager(QMainWindow):
         # Get the NPC data from hierarchy
         npc_data = self.hierarchy[npc_name]
         for gender in npc_data.get('genders', {}).keys():
-            gender_rows = npc_rows[npc_rows['Gender'] == gender]
+            gender_rows = npc_rows[npc_rows['Gender'].fillna('') == gender]
             gender_count = len(gender_rows)
             
             self.line_counts[npc_name]['genders'][gender] = {
