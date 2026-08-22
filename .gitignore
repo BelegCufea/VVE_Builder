@@ -18,7 +18,7 @@ voices_prep/
 # User/profile data (compiled voice samples ready for import)
 profiles/            
 # Profile audit logs
-profiles-audit*.json 
+profiles-manage*.json 
 
 # ------------------------------------------------------------
 # WeiDU Modding Tool Files

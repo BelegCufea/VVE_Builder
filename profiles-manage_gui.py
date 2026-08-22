@@ -8,15 +8,9 @@ A native desktop GUI for managing voice profile assignments across three levels:
 
 The hierarchy is: System Name > Gender > NPC > Existing Voice File
 
-This tool is part of the Infinity Engine Voice Generation toolchain:
-1. profiles-prepare.py - Extract source samples from game files
-2. profiles-audit.py - Review and approve samples
-3. profiles-manage.py - Assign voices to NPCs (THIS TOOL)
-4. profiles-upload.py - Upload profiles to VoiceBox
-5. generate.py - Generate TTS audio
 
 Usage:
-    python profiles-manage.py
+    python profiles-manage_gui.py
 """
 
 import os
@@ -24,6 +18,7 @@ import sys
 import json
 import time
 import re
+import shutil
 import subprocess
 import logging
 import requests
@@ -37,7 +32,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton, QComboBox,
     QScrollArea, QSplitter, QGroupBox, QFrame, QMessageBox, QStatusBar,
-    QTextEdit, QDialog, QProgressBar, QFileDialog,
+    QTextEdit, QDialog, QProgressBar, QFileDialog, QCheckBox,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -54,8 +49,10 @@ MAX_DURATION = 30.0            # Maximum duration in seconds for a single sample
 
 # File paths (relative to script directory)
 CSV_PATH = "dialog-report.csv"
-VOICES_DIR = "voices"
+VOICES_DIR = "voices"                    # Approved voice profiles (assignable)
+VOICES_PREP_DIR = "voices_prep"          # Raw/unreviewed samples awaiting audit
 VOICE_SUBSTITUTIONS_FILE = "voice-substitutions.json"
+SKIPPED_CONFIG_PATH = "profiles-manage-audit_skipped.json"  # NPCs whose prep samples are unusable
 LOG_FILE_PATH = Path("logs/profiles-manage.log")
 
 # ============================================================================
@@ -138,11 +135,14 @@ class VoiceProfileEditor(QDialog):
         - etc.
     """
     
-    def __init__(self, profile_name: str, parent=None):
+    def __init__(self, profile_name: str, parent=None, source_dir: str = VOICES_DIR, audit_mode: bool = False):
         super().__init__(parent)
         self.profile_name = profile_name
         self.parent_window = parent
-        self.setWindowTitle(f"🎵 Voice Profile Editor: {profile_name}")
+        self.source_dir = source_dir
+        self.audit_mode = audit_mode
+        title_prefix = "🎧 Audit Review" if audit_mode else "🎵 Voice Profile Editor"
+        self.setWindowTitle(f"{title_prefix}: {profile_name}")
         self.resize(800, 600)
         self._current_sample = None
         self._sample_data = []
@@ -154,7 +154,7 @@ class VoiceProfileEditor(QDialog):
         
         self._build_ui()
         self._load_samples()
-        logger.info(f"Opened voice profile editor: {profile_name}")
+        logger.info(f"Opened {'audit review' if audit_mode else 'voice profile editor'}: {profile_name}")
     
     def _build_ui(self):
         """Build the editor UI."""
@@ -191,6 +191,31 @@ class VoiceProfileEditor(QDialog):
         
         layout.addWidget(details_group)
         
+        # Audit-mode banner + controls (only shown when reviewing voices_prep/)
+        if self.audit_mode:
+            audit_banner = QLabel(
+                f"🎧 Reviewing unapproved samples in <code>/{VOICES_PREP_DIR}</code> — "
+                f"approve to move them into <code>/{VOICES_DIR}</code> where they become assignable."
+            )
+            audit_banner.setWordWrap(True)
+            layout.addWidget(audit_banner)
+
+            audit_btn_layout = QHBoxLayout()
+            self.approve_btn = QPushButton("✅ Approve All Samples → Move to Voices")
+            self.approve_btn.clicked.connect(self._approve_all_samples)
+            audit_btn_layout.addWidget(self.approve_btn)
+
+            self.skip_cb = QCheckBox("🚫 Mark unusable (skip / hide from audit)")
+            is_skipped = bool(self.parent_window) and self.profile_name in getattr(self.parent_window, 'skipped_npcs', set())
+            self.skip_cb.blockSignals(True)
+            self.skip_cb.setChecked(is_skipped)
+            self.skip_cb.blockSignals(False)
+            self.skip_cb.stateChanged.connect(self._on_skip_toggled)
+            audit_btn_layout.addWidget(self.skip_cb)
+
+            audit_btn_layout.addStretch()
+            layout.addLayout(audit_btn_layout)
+
         # Action buttons
         btn_layout = QHBoxLayout()
         
@@ -233,9 +258,9 @@ class VoiceProfileEditor(QDialog):
         self.samples_list.clear()
         self._sample_data = []
         
-        voices_dir = Path(VOICES_DIR)
+        voices_dir = Path(self.source_dir)
         if not voices_dir.exists():
-            logger.debug(f"Voices directory does not exist: {VOICES_DIR}")
+            logger.debug(f"Sample directory does not exist: {self.source_dir}")
             return
         
         # Build a regex pattern to match ONLY this profile's files
@@ -424,11 +449,11 @@ class VoiceProfileEditor(QDialog):
         
         next_num = max_num + 1
         stem = f"{self.profile_name} {next_num}"
-        output_wav = Path(VOICES_DIR) / f"{stem}.WAV"
-        output_txt = Path(VOICES_DIR) / f"{stem}.txt"
+        output_wav = Path(self.source_dir) / f"{stem}.WAV"
+        output_txt = Path(self.source_dir) / f"{stem}.txt"
         
-        # Create voices directory if it doesn't exist
-        Path(VOICES_DIR).mkdir(parents=True, exist_ok=True)
+        # Create the target directory if it doesn't exist
+        Path(self.source_dir).mkdir(parents=True, exist_ok=True)
         
         # Convert to Ogg Vorbis
         self.status_label.setText(f"🔄 Converting audio...")
@@ -791,11 +816,87 @@ class VoiceProfileEditor(QDialog):
         msg = error_messages.get(error, f"Unknown error code: {error}")
         self.status_label.setText(f"⚠️ Audio error: {msg}")
         logger.warning(f"Audio error: {msg}")
+
+    # ------------------------------------------------------------------
+    # Audit Mode: Approve / Skip
+    # ------------------------------------------------------------------
+
+    def _on_skip_toggled(self, state):
+        """Mark/unmark this NPC's prep samples as unusable (audit mode only)."""
+        if not self.parent_window:
+            return
+        is_skipped = state == Qt.CheckState.Checked.value
+        skipped = getattr(self.parent_window, 'skipped_npcs', None)
+        if skipped is None:
+            return
+        if is_skipped:
+            skipped.add(self.profile_name)
+        else:
+            skipped.discard(self.profile_name)
+        save_skipped_npcs(skipped)
+        self.status_label.setText(
+            f"🚫 Marked {self.profile_name} as skipped" if is_skipped
+            else f"✅ Unmarked {self.profile_name}"
+        )
+
+    def _approve_all_samples(self):
+        """
+        Approve this NPC's samples: move all WAV/TXT files for this profile
+        from VOICES_PREP_DIR into VOICES_DIR, where they become an
+        assignable voice profile. One-way move (no "send back" path).
+        """
+        if not self._sample_data:
+            QMessageBox.information(self, "Nothing to Approve", "No samples found to approve.")
+            return
+
+        reply = QMessageBox.question(
+            self,
+            "Approve Samples",
+            f"Move {len(self._sample_data)} sample(s) for '{self.profile_name}' "
+            f"from /{VOICES_PREP_DIR} to /{VOICES_DIR}?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        # Release file handles before moving
+        self.media_player.stop()
+        self.media_player.setSource(QUrl())
+        QApplication.processEvents()
+
+        voices_dir = Path(VOICES_DIR)
+        voices_dir.mkdir(parents=True, exist_ok=True)
+
+        moved_count = 0
+        for sample in self._sample_data:
+            try:
+                if sample['wav_path'].exists():
+                    shutil.move(str(sample['wav_path']), str(voices_dir / sample['wav_path'].name))
+                if sample['txt_path'].exists():
+                    shutil.move(str(sample['txt_path']), str(voices_dir / sample['txt_path'].name))
+                moved_count += 1
+            except Exception as e:
+                logger.error(f"Error approving sample {sample['stem']}: {e}")
+
+        # Approved samples shouldn't stay in the skipped set
+        if self.parent_window is not None:
+            skipped = getattr(self.parent_window, 'skipped_npcs', None)
+            if skipped is not None and self.profile_name in skipped:
+                skipped.discard(self.profile_name)
+                save_skipped_npcs(skipped)
+
+        logger.info(f"Approved {moved_count} sample(s) for {self.profile_name}: {VOICES_PREP_DIR} -> {VOICES_DIR}")
+        self.status_label.setText(f"✅ Moved {moved_count} sample(s) to /{VOICES_DIR}")
+
+        # This profile is now approved, not prep - close the audit dialog
+        # so the caller refreshes the NPC's status from scratch.
+        self.accept()
     
     def closeEvent(self, event):
         """Clean up on close."""
         self.media_player.stop()
-        logger.info(f"Closed voice profile editor: {self.profile_name}")
+        logger.info(f"Closed {'audit review' if self.audit_mode else 'voice profile editor'}: {self.profile_name}")
         event.accept()
 
 
@@ -1097,9 +1198,59 @@ def get_existing_voice_files() -> Set[str]:
     return voices
 
 
+def get_prep_npc_names() -> Set[str]:
+    """
+    Get the set of NPC names that have unreviewed samples sitting in
+    VOICES_PREP_DIR. These names always match RealName in the CSV
+    (profiles-prepare.py guarantees this), so no extra reconciliation
+    with the CSV is needed here.
+
+    Note: if a name exists in both VOICES_PREP_DIR and VOICES_DIR, the
+    approved VOICES_DIR entry takes priority elsewhere (this function
+    just reports what prep contains).
+    """
+    prep_dir = Path(VOICES_PREP_DIR)
+    if not prep_dir.exists():
+        return set()
+
+    names = set()
+    for wav_path in list(prep_dir.glob("*.WAV")) + list(prep_dir.glob("*.wav")):
+        base_name = re.sub(r'\s+\d+$', '', wav_path.stem)
+        names.add(base_name)
+    return names
+
+
+def load_skipped_npcs() -> Set[str]:
+    """
+    Load the set of NPCs whose prep samples are marked unusable
+    ("commoner/peasant" filler lines etc.) so they stop cluttering the
+    Needs Audit view. Persisted across sessions.
+    """
+    path = Path(SKIPPED_CONFIG_PATH)
+    if path.exists():
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except Exception as e:
+            logger.error(f"Error loading {SKIPPED_CONFIG_PATH}: {e}")
+            return set()
+    return set()
+
+
+def save_skipped_npcs(skipped_set: Set[str]) -> None:
+    """Persist the set of skipped NPC names to disk."""
+    path = Path(SKIPPED_CONFIG_PATH)
+    try:
+        with open(path, "w", encoding="utf-8") as f:
+            json.dump(sorted(skipped_set), f, indent=2, ensure_ascii=False)
+    except Exception as e:
+        logger.error(f"Error saving {SKIPPED_CONFIG_PATH}: {e}")
+
+
 def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict,
                              gender_substitutions: Dict, sys_substitutions: Dict,
-                             existing_voices: Set[str]) -> Dict:
+                             existing_voices: Set[str], prep_npcs: Optional[Set[str]] = None,
+                             skipped_npcs: Optional[Set[str]] = None) -> Dict:
     """
     Build the hierarchy entry for a single NPC.
     
@@ -1107,6 +1258,10 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
         {
             "assigned_voice": str or None,     # NPC-level assignment
             "has_existing_voice": bool,        # Voice file exists in /voices/
+            "needs_audit": bool,               # Unreviewed samples in /voices_prep/
+                                                # (False if has_existing_voice is True -
+                                                #  approved voices always take priority)
+            "skipped": bool,                   # Prep samples marked unusable
             "genders": {
                 "M": {
                     "assigned_voice": str or None,  # Gender-level assignment
@@ -1117,10 +1272,15 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
             }
         }
     """
+    prep_npcs = prep_npcs or set()
+    skipped_npcs = skipped_npcs or set()
     npc_df = df[df["RealName"] == npc_name]
+    has_existing = npc_name in existing_voices
     entry = {
         "assigned_voice": substitutions.get(npc_name),
-        "has_existing_voice": npc_name in existing_voices,
+        "has_existing_voice": has_existing,
+        "needs_audit": (not has_existing) and (npc_name in prep_npcs),
+        "skipped": npc_name in skipped_npcs,
         "genders": {},
     }
     gender_groups = npc_df.dropna(subset=["Gender"]).groupby("Gender", sort=False)
@@ -1143,10 +1303,14 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
 
 
 def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions: Dict,
-                     sys_substitutions: Dict, existing_voices: Set[str]) -> Dict:
+                     sys_substitutions: Dict, existing_voices: Set[str],
+                     prep_npcs: Optional[Set[str]] = None,
+                     skipped_npcs: Optional[Set[str]] = None) -> Dict:
     """Build the full NPC hierarchy for all characters."""
     logger.info("Building NPC hierarchy...")
     start_time = time.time()
+    prep_npcs = prep_npcs or set()
+    skipped_npcs = skipped_npcs or set()
     hierarchy = {}
     if df.empty:
         return hierarchy
@@ -1155,9 +1319,12 @@ def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions:
     for npc_name, npc_df in df.groupby("RealName", sort=False):
         if npc_name == "":
             continue
+        has_existing = npc_name in existing_voices
         entry = {
             "assigned_voice": substitutions.get(npc_name),
-            "has_existing_voice": npc_name in existing_voices,
+            "has_existing_voice": has_existing,
+            "needs_audit": (not has_existing) and (npc_name in prep_npcs),
+            "skipped": npc_name in skipped_npcs,
             "genders": {},
         }
         gender_groups = npc_df.dropna(subset=["Gender"]).groupby("Gender", sort=False)
@@ -1310,6 +1477,8 @@ class VoiceProfileManager(QMainWindow):
         self.substitutions, self.gender_substitutions, self.sys_substitutions = load_json_files()
         self.available_voices = get_available_voice_profiles()
         self.existing_voices = get_existing_voice_files()
+        self.prep_npcs = get_prep_npc_names()
+        self.skipped_npcs = load_skipped_npcs()
 
         if self.df.empty:
             logger.error(f"Could not load CSV file: {CSV_PATH}")
@@ -1318,6 +1487,7 @@ class VoiceProfileManager(QMainWindow):
         self.hierarchy = build_hierarchy(
             self.df, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
+            self.prep_npcs, self.skipped_npcs,
         )
         
         self.line_counts = calculate_line_counts(self.df, self.hierarchy)
@@ -1360,6 +1530,7 @@ class VoiceProfileManager(QMainWindow):
         self.stats_total_label = QLabel()
         self.stats_voices_label = QLabel()
         self.stats_existing_label = QLabel()
+        self.stats_needs_audit_label = QLabel()
         self.stats_npc_level_label = QLabel()
         self.stats_gender_level_label = QLabel()
         self.stats_sys_level_label = QLabel()
@@ -1388,6 +1559,7 @@ class VoiceProfileManager(QMainWindow):
         stats_layout.addRow("Total NPCs:", self.stats_total_label)
         stats_layout.addRow("Available Voices:", self.stats_voices_label)
         stats_layout.addRow("NPCs with Voice Files:", self.stats_existing_label)
+        stats_layout.addRow("🎧 Needs Audit:", self.stats_needs_audit_label)
         stats_layout.addRow("NPC-level assignments:", self.stats_npc_level_label)
         stats_layout.addRow("Gender-level assignments:", self.stats_gender_level_label)
         stats_layout.addRow("SysName-level assignments:", self.stats_sys_level_label)
@@ -1415,8 +1587,8 @@ class VoiceProfileManager(QMainWindow):
         
         controls_layout.addWidget(QLabel("Filter:"))
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All", "Modified", "Missing", "Has Voice File"])
-        self.filter_combo.setCurrentIndex(2)  # Default: Missing
+        self.filter_combo.addItems(["All", "Needs Audit", "Modified", "Missing", "Has Voice File"])
+        self.filter_combo.setCurrentIndex(3)  # Default: Missing
         self.filter_combo.currentTextChanged.connect(self._on_filter_changed)
         controls_layout.addWidget(self.filter_combo)
         
@@ -1499,12 +1671,17 @@ class VoiceProfileManager(QMainWindow):
             str: Icon character
                 - 🟢 Voice file exists (full coverage)
                 - ✅ Fully covered (all lines have assignments)
+                - 🎧 Needs audit (unreviewed samples in voices_prep/)
+                - 🎧🚫 Needs audit, but marked skipped/unusable
                 - 🔵 Partially covered
                 - 🔴 Nothing assigned
         """
+        data = self.hierarchy[npc_name]
         status = self._get_coverage_status(npc_name)
         if status['has_existing']:
             return "🟢"
+        elif data.get('needs_audit', False):
+            return "🎧🚫" if data.get('skipped', False) else "🎧"
         elif status['is_fully_covered']:
             return "✅"
         elif status['has_partial']:
@@ -1533,6 +1710,7 @@ class VoiceProfileManager(QMainWindow):
             
             data = self.hierarchy[name]
             has_existing = data.get("has_existing_voice", False)
+            needs_audit = data.get("needs_audit", False)
             has_assignments = (
                 data["assigned_voice"] is not None
                 or any(g["assigned_voice"] is not None for g in data["genders"].values())
@@ -1543,7 +1721,10 @@ class VoiceProfileManager(QMainWindow):
                 )
             )
             
-            if status_filter == "Modified" and not has_assignments:
+            if status_filter == "Needs Audit":
+                if not needs_audit:
+                    continue
+            elif status_filter == "Modified" and not has_assignments:
                 continue
             elif status_filter == "Missing" and (has_assignments or has_existing):
                 continue
@@ -1694,17 +1875,26 @@ class VoiceProfileManager(QMainWindow):
         
         return container
     
-    def _open_profile_editor(self, profile_name: str):
-        """Open the voice profile editor for the given profile name."""
+    def _open_profile_editor(self, profile_name: str, audit_mode: bool = False):
+        """
+        Open the voice profile editor for the given profile name.
+
+        When audit_mode is True, the editor opens against VOICES_PREP_DIR
+        showing unreviewed samples with Approve / Skip controls instead of
+        the normal assignment-oriented sample tools.
+        """
         if not profile_name:
             profile_name = "New Profile"
         
-        editor = VoiceProfileEditor(profile_name, self)
+        source_dir = VOICES_PREP_DIR if audit_mode else VOICES_DIR
+        editor = VoiceProfileEditor(profile_name, self, source_dir=source_dir, audit_mode=audit_mode)
         editor.exec()
         
         # After editor closes, refresh available voices
         self.available_voices = get_available_voice_profiles()
         self.existing_voices = get_existing_voice_files()
+        self.prep_npcs = get_prep_npc_names()
+        self.skipped_npcs = load_skipped_npcs()
         
         # Update the current NPC's has_existing_voice flag
         if self.selected_npc:
@@ -1712,6 +1902,7 @@ class VoiceProfileManager(QMainWindow):
             self.hierarchy[self.selected_npc] = build_hierarchy_for_npc(
                 self.df, self.selected_npc, self.substitutions, self.gender_substitutions,
                 self.sys_substitutions, self.existing_voices,
+                self.prep_npcs, self.skipped_npcs,
             )
             # Update line counts for this NPC
             self._update_line_counts_for_npc(self.selected_npc)
@@ -1764,6 +1955,20 @@ class VoiceProfileManager(QMainWindow):
             self.detail_layout.addWidget(
                 QLabel(f"🎵 Voice file exists: <code>{npc_name}.WAV</code> in /{VOICES_DIR} directory")
             )
+
+        if npc_data.get("needs_audit", False):
+            audit_frame = QFrame()
+            audit_frame.setFrameShape(QFrame.Shape.StyledPanel)
+            audit_layout = QHBoxLayout(audit_frame)
+            skip_note = " (marked skipped)" if npc_data.get("skipped", False) else ""
+            audit_layout.addWidget(
+                QLabel(f"🎧 Unapproved sample(s) waiting in /{VOICES_PREP_DIR}{skip_note}"),
+                stretch=1
+            )
+            review_btn = QPushButton("🎧 Review Sample(s)")
+            review_btn.clicked.connect(lambda: self._open_profile_editor(npc_name, audit_mode=True))
+            audit_layout.addWidget(review_btn)
+            self.detail_layout.addWidget(audit_frame)
 
         self.detail_layout.addWidget(QLabel("---"))
 
@@ -1819,8 +2024,9 @@ class VoiceProfileManager(QMainWindow):
                         sys_container = self._make_voice_combo_with_editor(
                             sys["assigned_voice"],
                             lambda text, s=sysname: self._on_sys_voice_changed(s, text),
-                            sysname
+                            f"{npc_name}_{sysname}"
                         )
+                        
                         sys_form.addRow(f"{sysname} ({sys_count} lines):", sys_container)
                     gender_layout.addWidget(sys_group)
 
@@ -1845,6 +2051,7 @@ class VoiceProfileManager(QMainWindow):
         self.hierarchy[npc_name] = build_hierarchy_for_npc(
             self.df, npc_name, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
+            self.prep_npcs, self.skipped_npcs,
         )
         # Update line counts for this NPC only
         self._update_line_counts_for_npc(npc_name)
@@ -1942,10 +2149,15 @@ class VoiceProfileManager(QMainWindow):
     def _update_stats(self):
         """Update all statistics displays."""
         npcs_with_voice = sum(1 for d in self.hierarchy.values() if d.get("has_existing_voice", False))
+        npcs_needing_audit = sum(
+            1 for d in self.hierarchy.values()
+            if d.get("needs_audit", False) and not d.get("skipped", False)
+        )
         
         self.stats_total_label.setText(str(len(self.hierarchy)))
         self.stats_voices_label.setText(str(len(self.available_voices)))
         self.stats_existing_label.setText(str(npcs_with_voice))
+        self.stats_needs_audit_label.setText(str(npcs_needing_audit))
         self.stats_npc_level_label.setText(str(len(self.substitutions)))
         self.stats_gender_level_label.setText(str(len(self.gender_substitutions)))
         self.stats_sys_level_label.setText(str(len(self.sys_substitutions)))
