@@ -24,7 +24,7 @@ import logging
 import requests
 import tempfile
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Callable, Dict, List, Optional, Set
 
 import pandas as pd
 from PySide6.QtCore import Qt, QUrl
@@ -1216,6 +1216,41 @@ def clean_redundant_substitutions(substitutions: Dict, existing_voices: Set[str]
     return cleaned
 
 
+def remove_orphaned_substitutions(substitutions: Dict, gender_substitutions: Dict,
+                                   sys_substitutions: Dict, available_voices: List[str]):
+    """
+    Drop any substitution (NPC-, Gender-, or SystemName-level) whose target
+    voice profile no longer exists -- e.g. because every sample in that
+    profile was deleted, so the profile itself ceased to exist.
+
+    Returns (substitutions, gender_substitutions, sys_substitutions,
+    removed_npc_keys, removed_gender_keys, removed_sys_keys) -- the removed-*
+    lists let the caller do a targeted refresh instead of rebuilding
+    everything.
+    """
+    available = set(available_voices)
+
+    def _clean(d: Dict):
+        cleaned = {}
+        removed = []
+        for k, v in d.items():
+            if v in available:
+                cleaned[k] = v
+            else:
+                removed.append(k)
+        return cleaned, removed
+
+    new_subs, removed_npc = _clean(substitutions)
+    new_gender, removed_gender = _clean(gender_substitutions)
+    new_sys, removed_sys = _clean(sys_substitutions)
+
+    total_removed = len(removed_npc) + len(removed_gender) + len(removed_sys)
+    if total_removed:
+        logger.info(f"Removed {total_removed} substitution(s) pointing to a deleted voice profile")
+
+    return new_subs, new_gender, new_sys, removed_npc, removed_gender, removed_sys
+
+
 def get_available_voice_profiles() -> List[str]:
     """
     Get unique voice profile names from the /voices directory.
@@ -1325,6 +1360,7 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
     """
     prep_npcs = prep_npcs or set()
     skipped_npcs = skipped_npcs or set()
+    npc_name = str(npc_name)
     npc_df = df[df["RealName"] == npc_name]
     return _build_npc_entry(
         npc_name, npc_df, substitutions, gender_substitutions,
@@ -1398,10 +1434,11 @@ def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions:
 
     df = df.dropna(subset=["RealName"])
     for npc_name, npc_df in df.groupby("RealName", sort=False):
+        npc_name = str(npc_name)
         if npc_name == "":
             continue
         hierarchy[npc_name] = _build_npc_entry(
-            str(npc_name), npc_df, substitutions, gender_substitutions,
+            npc_name, npc_df, substitutions, gender_substitutions,
             sys_substitutions, existing_voices, prep_npcs, skipped_npcs,
         )
 
@@ -1549,6 +1586,17 @@ class VoiceProfileManager(QMainWindow):
         self.prep_npcs = get_prep_npc_names()
         self.skipped_npcs = load_skipped_npcs()
 
+        # Drop any substitution left over from a voice profile that no
+        # longer exists on disk (e.g. deleted outside/between sessions).
+        self.substitutions, self.gender_substitutions, self.sys_substitutions, \
+            _removed_npc, _removed_gender, _removed_sys = remove_orphaned_substitutions(
+                self.substitutions, self.gender_substitutions,
+                self.sys_substitutions, self.available_voices,
+            )
+        subs_changed = bool(_removed_npc or _removed_gender or _removed_sys)
+        if subs_changed:
+            save_json_files(self.substitutions, self.gender_substitutions, self.sys_substitutions)
+
         if self.df.empty:
             logger.error(f"Could not load CSV file: {CSV_PATH}")
             QMessageBox.critical(self, "Error", f"Could not load CSV file: {CSV_PATH}")
@@ -1656,8 +1704,10 @@ class VoiceProfileManager(QMainWindow):
         
         controls_layout.addWidget(QLabel("Filter:"))
         self.filter_combo = QComboBox()
-        self.filter_combo.addItems(["All", "Needs Audit", "Modified", "Missing", "Has Voice File"])
-        self.filter_combo.setCurrentIndex(3)  # Default: Missing
+        self.filter_combo.addItems(
+            ["All", "Needs Attention", "Needs Audit", "Modified", "Missing", "Has Voice File"]
+        )
+        self.filter_combo.setCurrentIndex(4)  # Default: Missing
         self.filter_combo.currentTextChanged.connect(self._on_filter_changed)
         controls_layout.addWidget(self.filter_combo)
         
@@ -1740,21 +1790,24 @@ class VoiceProfileManager(QMainWindow):
             str: Icon character
                 - 🟢 Voice file exists (full coverage)
                 - ✅ Fully covered (all lines have assignments)
+                - 🔵 Partially covered
                 - 🎧 Needs audit (unreviewed samples in voices_prep/)
                 - 🎧🚫 Needs audit, but marked skipped/unusable
-                - 🔵 Partially covered
                 - 🔴 Nothing assigned
+
+        Priority order only affects which icon is shown -- filtering,
+        stats, etc. still key off the underlying status fields as before.
         """
         data = self.hierarchy[npc_name]
         status = self._get_coverage_status(npc_name)
         if status['has_existing']:
             return "🟢"
-        elif data.get('needs_audit', False):
-            return "🎧🚫" if data.get('skipped', False) else "🎧"
         elif status['is_fully_covered']:
             return "✅"
         elif status['has_partial']:
             return "🔵"
+        elif data.get('needs_audit', False):
+            return "🎧🚫" if data.get('skipped', False) else "🎧"
         return "🔴"
 
     def _apply_filters(self):
@@ -1763,6 +1816,9 @@ class VoiceProfileManager(QMainWindow):
         
         Filter options:
             - All: Show all NPCs
+            - Needs Attention: Not fully covered (missing or partial) OR has unreviewed audit samples --
+              i.e. every NPC that still needs some kind of voice assignment before it's ready for VO generation
+            - Needs Audit: Show NPCs with unreviewed samples in voices_prep/
             - Modified: Show NPCs with assignments
             - Missing: Show NPCs with NO assignments and NO voice file
             - Has Voice File: Show NPCs with existing voice files
@@ -1790,7 +1846,11 @@ class VoiceProfileManager(QMainWindow):
                 )
             )
             
-            if status_filter == "Needs Audit":
+            if status_filter == "Needs Attention":
+                is_fully_covered = self._get_coverage_status(name)['is_fully_covered']
+                if is_fully_covered:
+                    continue
+            elif status_filter == "Needs Audit":
                 if not needs_audit:
                     continue
             elif status_filter == "Modified" and not has_assignments:
@@ -1926,15 +1986,18 @@ class VoiceProfileManager(QMainWindow):
         def on_btn_clicked():
             # Get the current text from the combo
             current_text = combo.currentText() or profile_name
-            # Open the editor
-            self._open_profile_editor(current_text)
-            # After editor closes, update the combo to select the profile if it exists
-            if current_text in self.available_voices:
-                combo.blockSignals(True)
-                combo.setCurrentText(current_text)
-                combo.blockSignals(False)
-                # Trigger the change event
-                on_change(current_text)
+
+            def apply_selection():
+                # Runs after the editor closes but BEFORE the hierarchy is
+                # rebuilt / the detail panel is re-rendered, so a newly
+                # created profile is picked up as the selected value
+                # instead of landing after the repaint (where it'd be
+                # writing to a combo that no longer exists).
+                if current_text in self.available_voices:
+                    on_change(current_text)
+
+            # Open the editor; the new selection is applied before repaint
+            self._open_profile_editor(current_text, on_saved=apply_selection)
         
         btn.clicked.connect(on_btn_clicked)
         layout.addWidget(btn)
@@ -1944,13 +2007,21 @@ class VoiceProfileManager(QMainWindow):
         
         return container
     
-    def _open_profile_editor(self, profile_name: str, audit_mode: bool = False):
+    def _open_profile_editor(self, profile_name: str, audit_mode: bool = False,
+                              on_saved: Optional[Callable[[], None]] = None):
         """
         Open the voice profile editor for the given profile name.
 
         When audit_mode is True, the editor opens against VOICES_PREP_DIR
         showing unreviewed samples with Approve / Skip controls instead of
         the normal assignment-oriented sample tools.
+
+        on_saved, if given, is called after the editor closes and
+        self.available_voices/self.existing_voices are refreshed, but
+        BEFORE the hierarchy is rebuilt and the detail panel re-rendered.
+        This lets a caller (e.g. a combo's Create button) apply a pending
+        selection so it's reflected in the very first repaint, rather than
+        updating state after the old widgets are already gone.
         """
         if not profile_name:
             profile_name = "New Profile"
@@ -1964,19 +2035,49 @@ class VoiceProfileManager(QMainWindow):
         self.existing_voices = get_existing_voice_files()
         self.prep_npcs = get_prep_npc_names()
         self.skipped_npcs = load_skipped_npcs()
-        
-        # Update the current NPC's has_existing_voice flag
+
+        # If the last sample in a profile was deleted, the profile itself
+        # ceased to exist -- drop any substitution still pointing at it.
+        self.substitutions, self.gender_substitutions, self.sys_substitutions, \
+            removed_npc, removed_gender, removed_sys = remove_orphaned_substitutions(
+                self.substitutions, self.gender_substitutions,
+                self.sys_substitutions, self.available_voices,
+            )
+
+        # Figure out exactly which NPCs need a refresh -- avoids a full
+        # rebuild over the whole (~300k row) dataframe. NPC- and
+        # Gender-level removals map directly to an NPC name; a removed
+        # SystemName-level substitution is looked up against the dataframe
+        # since a SystemName can appear under more than one NPC.
+        affected_npcs = set(removed_npc)
+        affected_npcs.update(key.split("|", 1)[0] for key in removed_gender)
+        if removed_sys:
+            affected_npcs.update(
+                self.df.loc[self.df["SystemName"].isin(removed_sys), "RealName"].unique()
+            )
+
+        subs_changed = bool(affected_npcs)
+        if subs_changed:
+            save_json_files(self.substitutions, self.gender_substitutions, self.sys_substitutions)
+
+        if on_saved:
+            on_saved()
+
         if self.selected_npc:
-            # Refresh the NPC entry to update has_existing_voice
-            self.hierarchy[self.selected_npc] = build_hierarchy_for_npc(
-                self.df, self.selected_npc, self.substitutions, self.gender_substitutions,
+            affected_npcs.add(self.selected_npc)
+
+        # Targeted refresh: only rebuild the hierarchy entries/line counts
+        # for the NPCs actually touched, not the entire dataset.
+        for npc_name in affected_npcs:
+            if npc_name not in self.hierarchy:
+                continue
+            self.hierarchy[npc_name] = build_hierarchy_for_npc(
+                self.df, npc_name, self.substitutions, self.gender_substitutions,
                 self.sys_substitutions, self.existing_voices,
                 self.prep_npcs, self.skipped_npcs,
             )
-            # Update line counts for this NPC
-            self._update_line_counts_for_npc(self.selected_npc)
-            # Update the list icon
-            self._refresh_npc_list_icon(self.selected_npc)
+            self._update_line_counts_for_npc(npc_name)
+            self._refresh_npc_list_icon(npc_name)
         
         # Update stats (Available Voices count)
         self._update_stats()
