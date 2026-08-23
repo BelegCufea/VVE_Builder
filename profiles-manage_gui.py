@@ -27,15 +27,16 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 import pandas as pd
-from PySide6.QtCore import Qt, QUrl
+from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton, QComboBox,
     QScrollArea, QSplitter, QGroupBox, QFrame, QMessageBox, QStatusBar,
-    QTextEdit, QDialog, QProgressBar, QFileDialog, QCheckBox, QTableWidget, 
-    QTableWidgetItem, QHeaderView,
+    QTextEdit, QDialog, QProgressBar, QFileDialog, QCheckBox, QToolTip,
+    QTableWidget, QTableWidgetItem, QHeaderView,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
+from PySide6.QtGui import QColor, QCursor
 
 # ============================================================================
 # Configuration
@@ -1044,6 +1045,8 @@ class CSVLinesViewer(QDialog):
         # Table
         self.table = QTableWidget()
         self.table.setSortingEnabled(True)
+        self.table.setWordWrap(True)
+        self.table.cellClicked.connect(self._copy_cell_to_clipboard)
         layout.addWidget(self.table)
         
         # Close button
@@ -1062,7 +1065,7 @@ class CSVLinesViewer(QDialog):
             return
         
         # Define columns to show
-        columns = ['StrRef', 'SystemName', 'Gender', 'Text', 'SoundResRef']
+        columns = ['StrRef', 'SystemName', 'Gender', 'Text']
         display_cols = [col for col in columns if col in self.df.columns]
         
         self.table.setColumnCount(len(display_cols))
@@ -1075,33 +1078,8 @@ class CSVLinesViewer(QDialog):
         for row_idx, (_, row) in enumerate(self.df.iterrows()):
             for col_idx, col in enumerate(display_cols):
                 value = str(row[col]) if pd.notna(row[col]) else ""
-                
-                if col == 'Text':
-                    # Use a QTextEdit for the Text column to handle multi-line properly
-                    text_edit = QTextEdit()
-                    text_edit.setPlainText(value)
-                    text_edit.setReadOnly(True)
-                    text_edit.setStyleSheet("""
-                        QTextEdit {
-                            border: none;
-                            background: transparent;
-                            padding: 4px;
-                        }
-                    """)
-                    # Set the widget
-                    self.table.setCellWidget(row_idx, col_idx, text_edit)
-                    
-                    # Estimate height based on content
-                    lines = value.count('\n') + 1
-                    if len(value) > 80:
-                        estimated_lines = max(1, (len(value) + 79) // 80)
-                        lines = max(lines, estimated_lines)
-                    height = max(30, lines * 22 + 10)
-                    self.table.setRowHeight(row_idx, min(height, 300))
-                else:
-                    # Use standard item for other columns
-                    item = QTableWidgetItem(value)
-                    self.table.setItem(row_idx, col_idx, item)
+                item = QTableWidgetItem(value)
+                self.table.setItem(row_idx, col_idx, item)
         
         # Resize columns
         for col_idx, col in enumerate(display_cols):
@@ -1113,6 +1091,19 @@ class CSVLinesViewer(QDialog):
         
         # Enable alternating row colors for readability
         self.table.setAlternatingRowColors(True)
+        self.table.resizeRowsToContents()
+
+    def _copy_cell_to_clipboard(self, row, col):
+        item = self.table.item(row, col)
+        if item is None:
+            return
+        
+        QApplication.clipboard().setText(item.text())
+        QToolTip.showText(QCursor.pos(), "Copied!", self.table)
+
+        original_bg = item.background()
+        item.setBackground(QColor("#a6d8ff"))
+        QTimer.singleShot(150, lambda: item.setBackground(original_bg))            
 
 # ============================================================================
 # Data Loading / Saving Functions
