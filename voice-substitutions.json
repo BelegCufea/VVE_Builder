@@ -1,8 +1,32 @@
 {
   "npc": {
-    "Machine of Lum the Mad": "BG1 Narrator"
+    "Machine of Lum the Mad": "BG1 Narrator",
+    "Officer Tutorial": "BG1 Narrator"
   },
-  "gender": {},
+  "gender": {
+    "Imp|F": "Imp_F",
+    "Imp|M": "Imp_M",
+    "Apparition|M": "Apparition_M",
+    "Apparition|F": "Apparition_F",
+    "Drow|F": "Drow_F",
+    "Drow|M": "Drow_M",
+    "Tavern Patron|M": "Tavern Patron_M",
+    "Tavern Patron|F": "Tavern Patron_F",
+    "Peasant|F": "Peasant_F",
+    "Peasant|M": "Peasant_M",
+    "Courtesan|F": "Courtesan_F",
+    "Courtesan|M": "Courtesan_M",
+    "Shadow Thief|M": "Shadow Thief_M",
+    "Shadow Thief|F": "Shadow Thief_F",
+    "Guard|M": "Guard_M",
+    "Guard|F": "Guard_F",
+    "Beggar|F": "Beggar_F",
+    "Sailor|M": "Sailor_M",
+    "Sailor|F": "Sailor_F",
+    "Elven Warrior|F": "Elven Warrior_F",
+    "Elven Warrior|M": "Elven Warrior_M",
+    "Monk|F": "Monk_F"
+  },
   "sysname": {
     "GORALT1": "BG1 Narrator",
     "RIFTG01": "BG1 Narrator"
