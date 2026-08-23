@@ -10,7 +10,9 @@ output/
 # Extracted content (dlg, cre files)
 extracted/         
 # Prepared voice data
-voices_prep/         
+voices_prep/ 
+# Generated mod
+mod/        
 
 # ------------------------------------------------------------
 # Profile & Configuration Data

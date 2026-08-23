@@ -1,0 +1,147 @@
+"""
+build_mod.py
+
+Scans OUTPUT_DIR (subdirectories per NPC) for WAV files named:
+    TSXXXXXX.WAV
+where XXXXXX = base36(strref).
+
+Filenames are left EXACTLY as-is (TSXXXXXX.WAV, 8-char resref "TSXXXXXX")
+and simply copied/flattened into the mod's WAV folder. Alongside that,
+this script writes a 2DA-style lookup table (strref -> resref) that the
+.tp2 reads at install time with WeiDU's built-in COUNT_2DA_ROWS /
+READ_2DA_ENTRY_FORMER - so WeiDU never has to know about base36 at all,
+it just looks up "which resref goes with this strref" from the table.
+
+The tp2 source (MOD_TP2) is copied alongside the WAV folder and mapping
+table, renamed to f"setup-{MOD_NAME}.tp2" as WeiDU convention expects.
+
+No CLI arguments - everything is set in the CONFIG section below. These
+constants are expected to move into a shared config.py once the rest of
+the VO-generation suite is wired together; kept inline here for now.
+"""
+
+from __future__ import annotations
+
+import re
+import shutil
+import sys
+from dataclasses import dataclass
+from pathlib import Path
+
+# ============================== CONFIG ===================================
+
+GAME_DIRECTORY = r"C:/Relax/BGEET"
+OUTPUT_DIR = r"output"
+FILENAME_PATTERN = r"^TS"
+MOD_NAME = "ievo"
+MOD_TP2 = r"setup.tp2"
+
+# =========================================================================
+
+BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+FILENAME_RE = re.compile(FILENAME_PATTERN + r"([0-9A-Za-z]{6})\.WAV$", re.IGNORECASE)
+
+
+def from_base36(s: str) -> int:
+    """Reverse of the to_base36() function used to generate filenames."""
+    s = s.upper()
+    value = 0
+    for ch in s:
+        idx = BASE36_ALPHABET.index(ch)  # raises ValueError on bad char
+        value = value * 36 + idx
+    return value
+
+
+@dataclass
+class Entry:
+    strref: int
+    resref: str          # e.g. "TS12345" (filename without .WAV, original case)
+    source_path: Path
+    npc_subdir: str
+
+
+def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
+    entries: list[Entry] = []
+    skipped: list[Path] = []
+
+    for wav_path in output_dir.rglob("*"):
+        if not wav_path.is_file():
+            continue
+        if wav_path.suffix.lower() != ".wav":
+            continue
+        m = FILENAME_RE.match(wav_path.name)
+        if not m:
+            continue
+        try:
+            strref = from_base36(m.group(1))
+        except ValueError:
+            skipped.append(wav_path)
+            continue
+
+        resref = wav_path.stem  # "TS12345", preserves original casing/length
+        npc_subdir = wav_path.parent.relative_to(output_dir).as_posix()
+        entries.append(Entry(strref=strref, resref=resref, source_path=wav_path, npc_subdir=npc_subdir))
+
+    return entries, skipped
+
+
+def write_2da(entries: list[Entry], mapping_path: Path) -> None:
+    """
+    Minimal 2DA: WeiDU's COUNT_2DA_ROWS/READ_2DA_ENTRY_FORMER treat line 1
+    as a free-form signature and line 2 as a default value; data rows start
+    at line 3. Columns are whitespace-separated.
+    """
+    mapping_path.parent.mkdir(parents=True, exist_ok=True)
+    with mapping_path.open("w", encoding="ascii", newline="\n") as f:
+        f.write("2DA V1.0\n")
+        f.write("0\n")
+        for e in sorted(entries, key=lambda x: x.strref):
+            f.write(f"{e.strref} {e.resref}\n")
+
+
+def main() -> int:
+    mod_root = Path("mod") / MOD_NAME
+    output_dir = Path(OUTPUT_DIR)
+    mod_dir = Path(mod_root / "WAV")
+    mapping_path = Path(mod_root / "mapping.2da")
+    tp2_src = Path(MOD_TP2)
+    tp2_dest = Path(mod_root / f"setup-{MOD_NAME}.tp2")
+
+    if not output_dir.is_dir():
+        print(f"ERROR: output dir not found: {output_dir}", file=sys.stderr)
+        return 1
+
+    if not tp2_src.is_file():
+        print(f"ERROR: tp2 source not found: {tp2_src}", file=sys.stderr)
+        return 1
+
+    entries, skipped = scan(output_dir)
+
+    if skipped:
+        print(f"WARNING: {len(skipped)} file(s) matched the {FILENAME_PATTERN} prefix "
+              f"but had an invalid base36 body and were skipped:")
+        for p in skipped:
+            print(f"  - {p}")
+
+    print(f"Found {len(entries)} valid voiceover file(s) across "
+          f"{len({e.npc_subdir for e in entries})} NPC folder(s).")
+
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    for e in entries:
+        dest = mod_dir / e.source_path.name  # keep original filename as-is
+        shutil.copy2(e.source_path, dest)
+
+    write_2da(entries, mapping_path)
+
+    tp2_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(tp2_src, tp2_dest)
+
+    print(f"Staged {len(entries)} WAV file(s) to: {mod_dir}")
+    print(f"Lookup table written to: {mapping_path}")
+    print(f"tp2 copied to: {tp2_dest}")
+
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
