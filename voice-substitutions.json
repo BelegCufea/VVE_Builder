@@ -1,7 +1,10 @@
 {
   "npc": {
     "Machine of Lum the Mad": "BG1 Narrator",
-    "Officer Tutorial": "BG1 Narrator"
+    "Officer Tutorial": "BG1 Narrator",
+    "Torch": "BG1 Narrator",
+    "Deck of Many Things": "BG1 Narrator",
+    "Kwana": "BG3 Narrator"
   },
   "gender": {
     "Imp|F": "Imp_F",
@@ -25,10 +28,36 @@
     "Sailor|F": "Sailor_F",
     "Elven Warrior|F": "Elven Warrior_F",
     "Elven Warrior|M": "Elven Warrior_M",
-    "Monk|F": "Monk_F"
+    "Monk|F": "Monk_F",
+    "Patron|M": "Patron_M",
+    "Patron|F": "Patron_F",
+    "Slave|F": "Slave_F",
+    "Slave|M": "Slave_M",
+    "Spider|F": "Spider_F"
   },
   "sysname": {
     "GORALT1": "BG1 Narrator",
-    "RIFTG01": "BG1 Narrator"
+    "RIFTG01": "BG1 Narrator",
+    "PROPHET2": "Prophet_PROPHET2",
+    "PROPHET3": "Prophet_PROPHET3",
+    "PROPHET4": "Prophet_PROPHET4",
+    "PROPHET1": "Prophet_PROPHET1",
+    "AEWERE1": "Fighter_AEWERE1",
+    "AEWERE5": "Fighter_AEWERE5",
+    "AEWERE2": "Fighter_AEWERE2",
+    "AEWERE3": "Fighter_AEWERE3",
+    "AEWERE4": "Fighter_AEWERE4",
+    "AEWERE6": "Fighter_AEWERE6",
+    "BDRUMOR1": "RealNameMissing_BDRUMOR1",
+    "BDRUMOR2": "RealNameMissing_BDRUMOR1",
+    "BDRUMOR3": "RealNameMissing_BDRUMOR1",
+    "VOICE": "BG1 Narrator",
+    "FIRKRA03": "Firkraag",
+    "SUDEMINX": "BG1 Narrator",
+    "OHHSPI01": "Spider_OHHSPI01",
+    "OHHSPI02": "Spider_OHHSPI02",
+    "WARSAGE": "Elven War Sage_WARSAGE",
+    "C6WARSA1": "Elven War Sage_C6WARSA1",
+    "C6WARSA2": "Elven War Sage_C6WARSA2"
   }
 }
