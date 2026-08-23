@@ -360,6 +360,9 @@ def find_cre_file(
         # 1. Try direct match
         if current in cre_file_index:
             return current
+
+        if current in dlg_to_cre_index:
+            return dlg_to_cre_index[current]
         
         # 2. Strip trailing digits and try
         no_digits = re.sub(r'\d+$', '', current)
