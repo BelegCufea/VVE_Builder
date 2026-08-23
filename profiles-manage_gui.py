@@ -62,26 +62,33 @@ VOICES_DIR = "voices"                    # Approved voice profiles (assignable)
 VOICES_PREP_DIR = "voices_prep"          # Raw/unreviewed samples awaiting audit
 VOICE_SUBSTITUTIONS_FILE = "voice-substitutions.json"
 SKIPPED_CONFIG_PATH = "profiles-manage-audit_skipped.json"  # NPCs whose prep samples are unusable
-LOG_FILE_PATH = Path("logs/profiles-manage.log")
+LOG_FILE_PATH = r"logs/profiles-manage.log"
 
 # ============================================================================
 # Logging Setup
 # ============================================================================
 
 # Ensure log directory exists
-LOG_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+log_dir = Path(LOG_FILE_PATH).parent
+log_dir.mkdir(parents=True, exist_ok=True)
 
 # Configure logging to both file and console
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(LOG_FILE_PATH, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
+
+file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+file_handler.setLevel(logging.DEBUG)
+file_handler.setFormatter(logging.Formatter(fmt='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
+
+stream_handler = logging.StreamHandler()
+stream_handler.setLevel(logging.ERROR) 
+stream_handler.setFormatter(logging.Formatter('%(message)s'))
+
+if not logger.handlers:
+    logger.addHandler(file_handler)
+    logger.addHandler(stream_handler)
+
+logger.propagate = False
 
 
 # ============================================================================
