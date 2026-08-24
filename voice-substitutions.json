@@ -58,6 +58,10 @@
     "OHHSPI02": "Spider_OHHSPI02",
     "WARSAGE": "Elven War Sage_WARSAGE",
     "C6WARSA1": "Elven War Sage_C6WARSA1",
-    "C6WARSA2": "Elven War Sage_C6WARSA2"
+    "C6WARSA2": "Elven War Sage_C6WARSA2",
+    "KPFARM02": "Citizen_KPFARM02",
+    "KPFARM01": "Citizen_KPFARM01",
+    "KPFARM03": "Citizen_KPFARM03",
+    "KPFARM04": "Citizen_KPFARM04"
   }
 }

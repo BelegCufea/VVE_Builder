@@ -25,17 +25,16 @@ import shutil
 import zipfile
 import requests
 import logging
-from collections import defaultdict
+from collections import defaultdict, deque
 from runstats import Regression
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QObject, QThread, Signal
-from PySide6.QtGui import QFont, QTextCursor, QColor
+from PySide6.QtCore import Qt, QObject, QThread, Signal, QSize, QPointF
+from PySide6.QtGui import QFont, QTextCursor, QColor, QPainter, QPen, QBrush, QPolygonF
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar,
-    QSplitter, QFrame, QSizePolicy,
+    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar, QSizePolicy,
 )
 
 # ============================================================================
@@ -2862,6 +2861,172 @@ class GenerationWorker(QObject):
             self.failed.emit(str(e))
 
 
+
+# ============================================================================
+# Throughput Graph Widget
+# ============================================================================
+
+class ThroughputGraph(QWidget):
+    """
+    A Windows Task Manager-style rolling throughput graph.
+
+    Displays the generation speed in characters per second as a filled area
+    chart, updated each time an overall_progress signal is received (once per
+    completed job). The Y-axis auto-scales to the current peak with a 20%
+    headroom. Up to MAX_SAMPLES historical data points are shown, scrolling
+    left as new samples arrive.
+
+    Colors and style intentionally match the Task Manager aesthetic:
+        - Dark (#1a1a2e) background
+        - Teal (#00b4d8) line and fill with transparency
+        - Light gray grid lines
+        - White annotation text
+
+    Usage::
+
+        graph = ThroughputGraph()
+        # On each overall_progress update:
+        graph.push(chars_per_second)
+        # Before a new run:
+        graph.reset()
+    """
+
+    MAX_SAMPLES = 500  # rolling window depth
+
+    # Colours
+    _COLOR_BG    = QColor("#1a1a2e")
+    _COLOR_GRID  = QColor("#2d2d4e")
+    _COLOR_LINE  = QColor("#00b4d8")
+    _COLOR_FILL  = QColor("#00b4d8")
+    _COLOR_FILL.setAlpha(55)  # semi-transparent
+    _COLOR_TEXT  = QColor("#e0e0e0")
+    _COLOR_LABEL = QColor("#7a8fa6")
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._samples: deque[float] = deque(maxlen=self.MAX_SAMPLES)
+        self._peak: float = 0.0
+        self.setMinimumHeight(80)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+
+    # ------------------------------------------------------------------
+    # Public API
+    # ------------------------------------------------------------------
+
+    def push(self, chars_per_second: float) -> None:
+        """
+        Append a new throughput sample and redraw the graph.
+
+        Args:
+            chars_per_second (float): Current generation speed in chars/sec.
+        """
+        value = max(0.0, chars_per_second)
+        self._samples.append(value)
+        if value > self._peak:
+            self._peak = value
+        elif self._samples:
+            # Gently re-anchor the ceiling to the window's actual max
+            self._peak = max(self._samples)
+        self.update()
+
+    def reset(self) -> None:
+        """Clear all samples and repaint to an empty graph."""
+        self._samples.clear()
+        self._peak = 0.0
+        self.update()
+
+    # ------------------------------------------------------------------
+    # Qt overrides
+    # ------------------------------------------------------------------
+
+    def sizeHint(self) -> QSize:
+        return QSize(400, 90)
+
+    def paintEvent(self, event) -> None:  # noqa: N802
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        pad_left   = 6
+        pad_right  = 6
+        pad_top    = 18   # room for top annotation
+        pad_bottom = 4
+
+        plot_w = w - pad_left - pad_right
+        plot_h = h - pad_top - pad_bottom
+
+        # Background
+        painter.fillRect(0, 0, w, h, QBrush(self._COLOR_BG))
+
+        # Border
+        painter.setPen(QPen(self._COLOR_GRID, 1))
+        painter.drawRect(pad_left, pad_top, plot_w - 1, plot_h - 1)
+
+        # Y-axis ceiling (20 % headroom)
+        y_max = self._peak * 1.20 if self._peak > 0 else 1.0
+
+        # Horizontal grid lines
+        painter.setPen(QPen(self._COLOR_GRID, 1, Qt.PenStyle.DotLine))
+        for fraction in (0.25, 0.50, 0.75):
+            y = pad_top + plot_h - int(plot_h * fraction)
+            painter.drawLine(pad_left, y, pad_left + plot_w - 1, y)
+
+        samples = list(self._samples)
+        n = len(samples)
+        if n < 1:
+            self._draw_labels(painter, w, pad_top, 0.0)
+            painter.end()
+            return
+
+        # X positions spread across the plot width
+        if n == 1:
+            xs = [pad_left + plot_w - 1]
+        else:
+            xs = [
+                pad_left + int(i * (plot_w - 1) / (self.MAX_SAMPLES - 1))
+                for i in range(self.MAX_SAMPLES - n, self.MAX_SAMPLES)
+            ]
+
+        def to_y(v):
+            return pad_top + plot_h - 1 - int((v / y_max) * (plot_h - 1))
+
+        # Filled area polygon
+        polygon = QPolygonF([QPointF(x, to_y(v)) for x, v in zip(xs, samples)])
+        polygon.append(QPointF(xs[-1], pad_top + plot_h - 1))
+        polygon.append(QPointF(xs[0],  pad_top + plot_h - 1))
+
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.setBrush(QBrush(self._COLOR_FILL))
+        painter.drawPolygon(polygon)
+
+        # Line on top
+        line_pen = QPen(self._COLOR_LINE, 1.5)
+        line_pen.setCapStyle(Qt.PenCapStyle.RoundCap)
+        line_pen.setJoinStyle(Qt.PenJoinStyle.RoundJoin)
+        painter.setPen(line_pen)
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        painter.drawPolyline(
+            QPolygonF([QPointF(x, to_y(v)) for x, v in zip(xs, samples)])
+        )
+
+        self._draw_labels(painter, w, pad_top, samples[-1])
+        painter.end()
+
+    def _draw_labels(self, painter: QPainter, w: int, pad_top: int, current: float) -> None:
+        """Draw the 'chars/sec' label and the current value."""
+        painter.setFont(QFont("Consolas", 8))
+        painter.setPen(QPen(self._COLOR_LABEL))
+        painter.drawText(8, pad_top - 3, "chars/sec")
+        if current > 0:
+            painter.setPen(QPen(self._COLOR_TEXT))
+            painter.drawText(
+                0, 0, w - 8, pad_top - 1,
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignBottom,
+                f"{current:,.1f} c/s",
+            )
+
+
 # ============================================================================
 # Main Application Window
 # ============================================================================
@@ -2987,6 +3152,9 @@ class GenerateWindow(QMainWindow):
         progress_layout.addWidget(self.overall_label)
         progress_layout.addWidget(self.overall_bar)
 
+        self.throughput_graph = ThroughputGraph()
+        progress_layout.addWidget(self.throughput_graph)
+
         layout.addWidget(progress_group)
 
         # ---------- Log panel ----------
@@ -3066,6 +3234,7 @@ class GenerateWindow(QMainWindow):
         self.log_view.clear()
         self.job_bar.setValue(0)
         self.overall_bar.setValue(0)
+        self.throughput_graph.reset()
         self.job_label.setText("Preparing...")
         self.overall_label.setText("Overall: preparing...")
 
@@ -3268,7 +3437,7 @@ class GenerateWindow(QMainWindow):
 
     def _on_overall_progress(self, data: dict):
         """
-        Update the overall progress bar and label.
+        Update the overall progress bar, label, and throughput graph.
 
         Args:
             data (dict): Overall progress data containing percent,
@@ -3284,6 +3453,11 @@ class GenerateWindow(QMainWindow):
             f"ETA: {format_time(data['eta_seconds'])}  "
             f"@ {data['finish_str']}"
         )
+        # Feed the throughput graph: cumulative chars/sec (matches what drives ETA)
+        elapsed = data.get("elapsed", 0)
+        if elapsed > 0:
+            chars_per_sec = data["chars_processed"] / elapsed
+            self.throughput_graph.push(chars_per_sec)
 
     def _on_finished(self, stats: dict):
         """
@@ -3344,7 +3518,7 @@ def main():
     Note:
         The application exits when the main window is closed.
     """
-    app = QApplication([])
+    app = QApplication(sys.argv)
     window = GenerateWindow()
     window.show()
     sys.exit(app.exec())
