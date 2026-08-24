@@ -121,6 +121,89 @@ PROFILE_SYNC_RETRY_DELAY = 3.0
 # Logging
 # ============================================================================
 
+class CaseInsensitiveDict(dict):
+    """A dictionary with case-insensitive string keys while preserving original key casing."""
+
+    def __init__(self, *args, **kwargs):
+        self._keys = {}
+        super().__init__()
+        if args or kwargs:
+            self.update(*args, **kwargs)
+
+    def __setitem__(self, key, value):
+        if isinstance(key, str):
+            lower = key.lower()
+            old_canonical = self._keys.get(lower)
+            if old_canonical is not None and old_canonical != key:
+                super().pop(old_canonical, None)
+            self._keys[lower] = key
+            super().__setitem__(key, value)
+        else:
+            super().__setitem__(key, value)
+
+    def __getitem__(self, key):
+        if isinstance(key, str):
+            lower = key.lower()
+            if lower in self._keys:
+                return super().__getitem__(self._keys[lower])
+        return super().__getitem__(key)
+
+    def __contains__(self, key):
+        if isinstance(key, str):
+            return key.lower() in self._keys
+        return super().__contains__(key)
+
+    def get(self, key, default=None):
+        if isinstance(key, str):
+            lower = key.lower()
+            if lower in self._keys:
+                return super().get(self._keys[lower], default)
+        return super().get(key, default)
+
+    def pop(self, key, *args):
+        if isinstance(key, str):
+            lower = key.lower()
+            if lower in self._keys:
+                canonical = self._keys.pop(lower)
+                return super().pop(canonical, *args)
+        return super().pop(key, *args)
+
+    def get_canonical_key(self, key):
+        if isinstance(key, str):
+            return self._keys.get(key.lower(), key)
+        return key
+
+    def update(self, *args, **kwargs):
+        if args:
+            if hasattr(args[0], "items"):
+                for k, v in args[0].items():
+                    self[k] = v
+            elif hasattr(args[0], "keys"):
+                for k in args[0]:
+                    self[k] = args[0][k]
+            else:
+                for k, v in args[0]:
+                    self[k] = v
+        for k, v in kwargs.items():
+            self[k] = v
+
+
+def get_canonical_key(mapping, key):
+    """
+    Retrieve the canonical key from a mapping or return the key as-is.
+
+    Args:
+        mapping: Mapping object (e.g. CaseInsensitiveDict or standard dict).
+        key: The key to look up.
+
+    Returns:
+        The canonical key if available, else key.
+    """
+    if hasattr(mapping, "get_canonical_key"):
+        return mapping.get_canonical_key(key)
+    return key
+
+
 class LogSignal(QObject):
     """
     Bridges Python logging records into Qt signals.
@@ -961,10 +1044,12 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
         npc_name, gender, sysname, substitutions, substitutions_gender, substitutions_sysname
     )
     if substituted:
+        if profile_map is not None and substituted in profile_map:
+            return get_canonical_key(profile_map, substituted)
         return substituted
 
     if npc_name and profile_map is not None and npc_name in profile_map:
-        return npc_name
+        return get_canonical_key(profile_map, npc_name)
 
     if USE_VOICE_FALLBACK:
         if gender == "M":
@@ -1022,7 +1107,8 @@ def get_all_profiles():
     resp = requests.get(f"{BASE_URL}{PROFILES_ENDPOINT}")
     resp.raise_for_status()
 
-    profile_map, zero_sample_profiles = {}, {}
+    profile_map = CaseInsensitiveDict()
+    zero_sample_profiles = CaseInsensitiveDict()
     total_profiles = 0
 
     for p in resp.json():
@@ -1138,10 +1224,10 @@ def scan_available_voice_dirs(voices_dir):
             sample pair are included.
     """
     voices_path = Path(voices_dir)
-    voice_groups = defaultdict(list)
+    voice_groups: defaultdict[str, list] = defaultdict(list)
 
     if not voices_path.exists():
-        return {}
+        return CaseInsensitiveDict()
 
     pattern = re.compile(r'^(.*?)(?:\s+(\d+))?$')
 
@@ -1177,7 +1263,7 @@ def scan_available_voice_dirs(voices_dir):
             "number": int(number), "wav_path": file_path, "txt_path": txt_file, "transcript": transcript,
         })
 
-    return dict(voice_groups)
+    return CaseInsensitiveDict(voice_groups)
 
 
 def create_profile_package(voice_name, files, output_dir):
@@ -1261,65 +1347,69 @@ def import_profile_zip(zip_path):
         return None
 
 
-def sync_missing_profiles(csv_path, filename_pattern, target_voices,
-                           use_strref_filter, strref_filter_file,
-                           substitutions=None, substitutions_gender=None,
-                           substitutions_sysname=None):
+def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
+                  target_voices=None, use_strref_filter=USE_STRREF_FILTER,
+                  strref_filter_file=STRREF_FILTER_FILE,
+                  substitutions=None, substitutions_gender=None,
+                  substitutions_sysname=None, sync_all=False):
     """
-    Reconcile Voicebox's profile list against what the CSV needs and what
-    voices/ can provide, composing and importing any missing-but-available
-    profiles before generation starts.
+    Reconcile Voicebox's profile list against local voices/ directory.
 
-    Also handles zero-sample profiles by deleting and re-importing them if
-    the voice files are available locally.
-
-    Process:
-        1. Fetch what Voicebox already has (get_all_profiles).
-        2. Scan the CSV for what's needed (scan_csv_needed_voice_names).
-        3. Scan voices/ for what we could compose (scan_available_voice_dirs).
-        4. For zero-sample profiles that are needed and available: delete them,
-           then rebuild and re-import.
-        5. For missing profiles that are available: build a .voicebox.zip and import.
-        6. Poll get_all_profiles() with a short delay, retrying up to
-           PROFILE_SYNC_MAX_ATTEMPTS times, until every imported profile is
-           visible (or attempts run out).
+    If sync_all is True:
+        Syncs ALL voice sample groups found in VOICES_DIR with Voicebox:
+        - Deletes and rebuilds any zero-sample profiles on Voicebox that have local samples.
+        - Composes and imports any missing profiles that have local samples.
+    If sync_all is False:
+        Reconciles Voicebox's profile list against what the filtered CSV needs and what
+        VOICES_DIR can provide, composing and importing missing/zero-sample profiles.
 
     Args:
         csv_path, filename_pattern, target_voices, use_strref_filter,
-        strref_filter_file: Same as load_and_filter_csv()/scan_csv_needed_voice_names().
-        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
-            Substitution mappings.
+        strref_filter_file: CSV filter parameters (used when sync_all=False).
+        substitutions/substitutions_gender/substitutions_sysname: Substitution mappings.
+        sync_all (bool): If True, process all available voices in VOICES_DIR.
 
     Returns:
-        dict: Freshest profile name -> id map available.
+        CaseInsensitiveDict: Freshest profile name -> id map available.
     """
+    if target_voices is None:
+        target_voices = TARGET_VOICES
+
     profile_map, zero_sample_profiles = get_all_profiles()
 
-    if not AUTO_PROVISION_PROFILES:
+    if not AUTO_PROVISION_PROFILES and not sync_all:
         return profile_map
 
-    needed = scan_csv_needed_voice_names(
-        csv_path, filename_pattern, target_voices, use_strref_filter, strref_filter_file,
-        substitutions, substitutions_gender, substitutions_sysname
-    )
-
-    zero_sample_needed = set(zero_sample_profiles.keys()) & needed
-    if zero_sample_needed:
-        logger.info(f"🔧 Found {len(zero_sample_needed)} zero-sample profile(s) that are needed:")
-        for name in sorted(zero_sample_needed):
-            logger.info(f"  - {name}")
-
-    missing = needed - profile_map.keys() - zero_sample_profiles.keys()
     available = scan_available_voice_dirs(VOICES_DIR)
-    rebuildable = sorted(name for name in zero_sample_needed if available.get(name))
-    composable = sorted(name for name in missing if available.get(name))
+
+    if sync_all:
+        logger.info(f"🔄 Starting full voice profile sync with Voicebox from {VOICES_DIR}/...")
+        target_names = list(available.keys())
+        zero_sample_targets = [name for name in zero_sample_profiles if name in available]
+        missing_targets = [name for name in target_names if name not in profile_map and name not in zero_sample_profiles]
+        already_up_to_date = [name for name in target_names if name in profile_map and name not in zero_sample_profiles]
+    else:
+        needed = scan_csv_needed_voice_names(
+            csv_path, filename_pattern, target_voices, use_strref_filter, strref_filter_file,
+            substitutions, substitutions_gender, substitutions_sysname
+        )
+        zero_sample_targets = [name for name in needed if name in zero_sample_profiles and name in available]
+        missing_targets = [name for name in needed if name not in profile_map and name not in zero_sample_profiles and name in available]
+        already_up_to_date = [name for name in needed if name in profile_map]
+
+        truly_missing = [name for name in needed if name not in profile_map and name not in zero_sample_profiles and name not in available]
+        unfixable_zero = [name for name in needed if name in zero_sample_profiles and name not in available]
+        if truly_missing or unfixable_zero:
+            logger.warning(
+                f"⚠️ {len(truly_missing)} needed voice(s) missing from Voicebox and not found in {VOICES_DIR}/, "
+                f"and {len(unfixable_zero)} zero-sample profile(s) cannot be rebuilt."
+            )
+
+    rebuildable = sorted(zero_sample_targets, key=str.lower)
+    composable = sorted(missing_targets, key=str.lower)
 
     if not rebuildable and not composable:
-        if missing or zero_sample_needed:
-            logger.warning(
-                f"⚠️ {len(missing)} needed voice(s) missing from Voicebox and not found in {VOICES_DIR}/, "
-                f"and {len(zero_sample_needed)} zero-sample profile(s) cannot be rebuilt."
-            )
+        logger.info(f"✅ All {len(already_up_to_date)} profile(s) are already up to date on Voicebox.")
         return profile_map
 
     imported, reimported, failed = [], [], []
@@ -1328,6 +1418,7 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
         logger.info(f"♻️ Rebuilding {len(rebuildable)} zero-sample profile(s) from {VOICES_DIR}/...")
         for voice_name in rebuildable:
             profile_id = zero_sample_profiles[voice_name]
+            canonical_name = get_canonical_key(available, voice_name)
             logger.info(f"  Deleting zero-sample profile: {voice_name} (ID: {profile_id})...")
             success, message = delete_profile(profile_id)
             if not success:
@@ -1337,32 +1428,33 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
             logger.info(f"  ✓ Deleted: {voice_name}")
             time.sleep(PROFILE_SYNC_RETRY_DELAY)
 
-            logger.info(f"  Rebuilding profile: {voice_name}...")
-            zip_path = create_profile_package(voice_name, available[voice_name], PROFILE_PACKAGES_DIR)
+            logger.info(f"  Rebuilding profile: {canonical_name}...")
+            zip_path = create_profile_package(canonical_name, available[voice_name], PROFILE_PACKAGES_DIR)
             if not zip_path:
                 failed.append(voice_name)
                 continue
             result = import_profile_zip(zip_path)
             if result:
-                reimported.append(voice_name)
-                logger.info(f"  ✓ Re-imported: {voice_name}")
+                reimported.append(canonical_name)
+                logger.info(f"  ✓ Re-imported: {canonical_name}")
             else:
-                logger.warning(f"  ✗ Failed to re-import: {voice_name}")
+                logger.warning(f"  ✗ Failed to re-import: {canonical_name}")
                 failed.append(voice_name)
 
     if composable:
-        logger.info(f"🧩 Composing {len(composable)} missing voice profile(s) from {VOICES_DIR}/...")
+        logger.info(f"🧩 Composing and importing {len(composable)} profile(s) from {VOICES_DIR}/...")
         for voice_name in composable:
-            zip_path = create_profile_package(voice_name, available[voice_name], PROFILE_PACKAGES_DIR)
+            canonical_name = get_canonical_key(available, voice_name)
+            zip_path = create_profile_package(canonical_name, available[voice_name], PROFILE_PACKAGES_DIR)
             if not zip_path:
                 failed.append(voice_name)
                 continue
             result = import_profile_zip(zip_path)
             if result:
-                imported.append(voice_name)
-                logger.info(f"  ✓ Imported: {voice_name}")
+                imported.append(canonical_name)
+                logger.info(f"  ✓ Imported: {canonical_name}")
             else:
-                logger.warning(f"  ✗ Failed to import: {voice_name}")
+                logger.warning(f"  ✗ Failed to import: {canonical_name}")
                 failed.append(voice_name)
 
     all_imported = imported + reimported
@@ -1373,7 +1465,7 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
     still_missing = set(all_imported)
     for attempt in range(1, PROFILE_SYNC_MAX_ATTEMPTS + 1):
         profile_map, _ = get_all_profiles()
-        still_missing -= profile_map.keys()
+        still_missing = {name for name in still_missing if name not in profile_map}
         if not still_missing:
             break
         time.sleep(PROFILE_SYNC_RETRY_DELAY)
@@ -1384,10 +1476,41 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
             f"{PROFILE_SYNC_MAX_ATTEMPTS} attempts: {', '.join(sorted(still_missing))}"
         )
 
-    if all_imported:
-        logger.info(f"Auto-provisioned {len(all_imported) - len(still_missing)} voice profile(s) from {VOICES_DIR}/.")
+    logger.info("=" * 60)
+    logger.info("VOICE PROFILE SYNC SUMMARY")
+    logger.info("=" * 60)
+    if sync_all:
+        logger.info(f"  Total local voices in {VOICES_DIR}/: {len(available)}")
+    logger.info(f"  New profiles created:             {len(imported)}")
+    logger.info(f"  Zero-sample profiles repaired:    {len(reimported)}")
+    logger.info(f"  Already up to date:               {len(already_up_to_date)}")
+    if failed:
+        logger.warning(f"  Failed:                           {len(failed)} ({', '.join(failed)})")
+    logger.info("=" * 60)
 
     return profile_map
+
+
+def sync_missing_profiles(csv_path, filename_pattern, target_voices,
+                           use_strref_filter, strref_filter_file,
+                           substitutions=None, substitutions_gender=None,
+                           substitutions_sysname=None):
+    """
+    Reconcile Voicebox's profile list against what the CSV needs and what
+    voices/ can provide, composing and importing any missing-but-available
+    profiles before generation starts.
+    """
+    return sync_profiles(
+        csv_path=csv_path,
+        filename_pattern=filename_pattern,
+        target_voices=target_voices,
+        use_strref_filter=use_strref_filter,
+        strref_filter_file=strref_filter_file,
+        substitutions=substitutions,
+        substitutions_gender=substitutions_gender,
+        substitutions_sysname=substitutions_sysname,
+        sync_all=False,
+    )
 
 
 # ============================================================================
@@ -1994,6 +2117,35 @@ def estimate_generation_time(regressor, chars):
         estimated_sec = regressor.slope() * chars + regressor.intercept()
         return max(estimated_sec, 2.0)
     return 10.0
+
+
+# ============================================================================
+# Profile Sync Worker (runs on a background QThread)
+# ============================================================================
+
+class ProfileSyncWorker(QObject):
+    """
+    Runs full voice profile synchronization with Voicebox on a background thread.
+
+    Signals:
+        stage(str): Short status message for the status bar.
+        finished(): Emitted when synchronization completes successfully.
+        failed(str): Emitted with an error message if synchronization fails.
+    """
+
+    stage = Signal(str)
+    finished = Signal()
+    failed = Signal(str)
+
+    def run(self):
+        try:
+            self.stage.emit("Syncing all voice profiles to Voicebox...")
+            sync_profiles(sync_all=True)
+            self.stage.emit("Voice profile sync complete.")
+            self.finished.emit()
+        except Exception as e:
+            logger.error(f"❌ Failed to sync profiles: {e}")
+            self.failed.emit(str(e))
 
 
 # ============================================================================
@@ -2638,6 +2790,8 @@ class GenerateWindow(QMainWindow):
 
         self.gen_thread: QThread | None = None
         self.worker: GenerationWorker | None = None
+        self.sync_thread: QThread | None = None
+        self.sync_worker: ProfileSyncWorker | None = None
 
         self._build_ui()
 
@@ -2686,8 +2840,12 @@ class GenerateWindow(QMainWindow):
         self.stop_btn = QPushButton("⏹ Stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop)
+        self.sync_btn = QPushButton("🔄 Sync All Profiles")
+        self.sync_btn.setToolTip("Scan voices/ and create/repair all voice profiles on Voicebox")
+        self.sync_btn.clicked.connect(self._start_sync_all)
         controls_layout.addWidget(self.start_btn)
         controls_layout.addWidget(self.stop_btn)
+        controls_layout.addWidget(self.sync_btn)
         controls_layout.addStretch()
         layout.addLayout(controls_layout)
 
@@ -2791,6 +2949,7 @@ class GenerateWindow(QMainWindow):
 
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.sync_btn.setEnabled(False)
 
         self.gen_thread = QThread()
         self.worker = GenerationWorker()
@@ -2832,9 +2991,58 @@ class GenerateWindow(QMainWindow):
             self.statusBar().showMessage("Stopping after current job...", 5000)
 
     def _on_thread_finished(self):
-        """Re-enable controls when the background thread finishes."""
+        """Re-enable controls when the generation background thread finishes."""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.sync_btn.setEnabled(True)
+
+    def _start_sync_all(self):
+        """
+        Start full voice profile synchronization on a background thread.
+        """
+        self.log_view.clear()
+        self.job_bar.setValue(0)
+        self.overall_bar.setValue(0)
+        self.job_label.setText("Syncing voice profiles with Voicebox...")
+        self.overall_label.setText("Overall: syncing profiles...")
+
+        self.start_btn.setEnabled(False)
+        self.stop_btn.setEnabled(False)
+        self.sync_btn.setEnabled(False)
+
+        self.sync_thread = QThread()
+        self.sync_worker = ProfileSyncWorker()
+        self.sync_worker.moveToThread(self.sync_thread)
+
+        self.sync_thread.started.connect(self.sync_worker.run)
+        self.sync_worker.stage.connect(self._on_stage)
+        self.sync_worker.finished.connect(self._on_sync_finished)
+        self.sync_worker.failed.connect(self._on_sync_failed)
+        self.sync_worker.finished.connect(self.sync_thread.quit)
+        self.sync_worker.failed.connect(self.sync_thread.quit)
+        self.sync_thread.finished.connect(self._on_sync_thread_finished)
+
+        self.sync_thread.start()
+
+    def _on_sync_finished(self):
+        """Handle successful completion of voice profile synchronization."""
+        self.job_bar.setValue(100)
+        self.overall_bar.setValue(100)
+        self.statusBar().showMessage("Voice profile sync complete.", 5000)
+        self.job_label.setText("Voice profile sync complete.")
+        self.overall_label.setText("Overall: idle")
+
+    def _on_sync_failed(self, error: str):
+        """Handle failure during voice profile synchronization."""
+        self.statusBar().showMessage(f"Voice profile sync failed: {error}", 8000)
+        self.job_label.setText(f"❌ {error}")
+        self.overall_label.setText("Overall: error")
+
+    def _on_sync_thread_finished(self):
+        """Re-enable controls when the profile sync thread finishes."""
+        self.start_btn.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        self.sync_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Worker signal handlers
@@ -2989,7 +3197,7 @@ def main():
     Note:
         The application exits when the main window is closed.
     """
-    app = QApplication(sys.argv)
+    app = QApplication([])
     window = GenerateWindow()
     window.show()
     sys.exit(app.exec())
