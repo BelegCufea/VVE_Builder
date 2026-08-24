@@ -61,7 +61,6 @@ CSV_PATH = "dialog-report.csv"
 VOICES_DIR = "voices"                    # Approved voice profiles (assignable)
 VOICES_PREP_DIR = "voices_prep"          # Raw/unreviewed samples awaiting audit
 VOICE_SUBSTITUTIONS_FILE = "voice-substitutions.json"
-SKIPPED_CONFIG_PATH = "profiles-manage-audit_skipped.json"  # NPCs whose prep samples are unusable
 LOG_FILE_PATH = r"logs/profiles-manage.log"
 
 # ============================================================================
@@ -220,14 +219,6 @@ class VoiceProfileEditor(QDialog):
             self.approve_btn = QPushButton("✅ Approve All Samples → Move to Voices")
             self.approve_btn.clicked.connect(self._approve_all_samples)
             audit_btn_layout.addWidget(self.approve_btn)
-
-            self.skip_cb = QCheckBox("🚫 Mark unusable (skip / hide from audit)")
-            is_skipped = bool(self.parent_window) and self.profile_name in getattr(self.parent_window, 'skipped_npcs', set())
-            self.skip_cb.blockSignals(True)
-            self.skip_cb.setChecked(is_skipped)
-            self.skip_cb.blockSignals(False)
-            self.skip_cb.stateChanged.connect(self._on_skip_toggled)
-            audit_btn_layout.addWidget(self.skip_cb)
 
             audit_btn_layout.addStretch()
             layout.addLayout(audit_btn_layout)
@@ -834,26 +825,8 @@ class VoiceProfileEditor(QDialog):
         logger.warning(f"Audio error: {msg}")
 
     # ------------------------------------------------------------------
-    # Audit Mode: Approve / Skip
+    # Audit Mode: Approve
     # ------------------------------------------------------------------
-
-    def _on_skip_toggled(self, state):
-        """Mark/unmark this NPC's prep samples as unusable (audit mode only)."""
-        if not self.parent_window:
-            return
-        is_skipped = state == Qt.CheckState.Checked.value
-        skipped = getattr(self.parent_window, 'skipped_npcs', None)
-        if skipped is None:
-            return
-        if is_skipped:
-            skipped.add(self.profile_name)
-        else:
-            skipped.discard(self.profile_name)
-        save_skipped_npcs(skipped)
-        self.status_label.setText(
-            f"🚫 Marked {self.profile_name} as skipped" if is_skipped
-            else f"✅ Unmarked {self.profile_name}"
-        )
 
     def _approve_all_samples(self):
         """
@@ -894,13 +867,6 @@ class VoiceProfileEditor(QDialog):
                 moved_count += 1
             except Exception as e:
                 logger.error(f"Error approving sample {sample['stem']}: {e}")
-
-        # Approved samples shouldn't stay in the skipped set
-        if self.parent_window is not None:
-            skipped = getattr(self.parent_window, 'skipped_npcs', None)
-            if skipped is not None and self.profile_name in skipped:
-                skipped.discard(self.profile_name)
-                save_skipped_npcs(skipped)
 
         logger.info(f"Approved {moved_count} sample(s) for {self.profile_name}: {VOICES_PREP_DIR} -> {VOICES_DIR}")
         self.status_label.setText(f"✅ Moved {moved_count} sample(s) to /{VOICES_DIR}")
@@ -1397,37 +1363,9 @@ def get_prep_npc_names() -> Set[str]:
     return names
 
 
-def load_skipped_npcs() -> Set[str]:
-    """
-    Load the set of NPCs whose prep samples are marked unusable
-    ("commoner/peasant" filler lines etc.) so they stop cluttering the
-    Needs Audit view. Persisted across sessions.
-    """
-    path = Path(SKIPPED_CONFIG_PATH)
-    if path.exists():
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                return set(json.load(f))
-        except Exception as e:
-            logger.error(f"Error loading {SKIPPED_CONFIG_PATH}: {e}")
-            return set()
-    return set()
-
-
-def save_skipped_npcs(skipped_set: Set[str]) -> None:
-    """Persist the set of skipped NPC names to disk."""
-    path = Path(SKIPPED_CONFIG_PATH)
-    try:
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(sorted(skipped_set), f, indent=2, ensure_ascii=False)
-    except Exception as e:
-        logger.error(f"Error saving {SKIPPED_CONFIG_PATH}: {e}")
-
-
 def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict,
                              gender_substitutions: Dict, sys_substitutions: Dict,
-                             existing_voices: Set[str], prep_npcs: Optional[Set[str]] = None,
-                             skipped_npcs: Optional[Set[str]] = None) -> Dict:
+                             existing_voices: Set[str], prep_npcs: Optional[Set[str]] = None) -> Dict:
     """
     Build the hierarchy entry for a single NPC.
     
@@ -1438,7 +1376,6 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
             "needs_audit": bool,               # Unreviewed samples in /voices_prep/
                                                 # (False if has_existing_voice is True -
                                                 #  approved voices always take priority)
-            "skipped": bool,                   # Prep samples marked unusable
             "genders": {
                 "M": {
                     "assigned_voice": str or None,  # Gender-level assignment
@@ -1450,19 +1387,17 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
         }
     """
     prep_npcs = prep_npcs or set()
-    skipped_npcs = skipped_npcs or set()
     npc_name = str(npc_name)
     npc_df = df[df["RealName"] == npc_name]
     return _build_npc_entry(
         npc_name, npc_df, substitutions, gender_substitutions,
-        sys_substitutions, existing_voices, prep_npcs, skipped_npcs,
+        sys_substitutions, existing_voices, prep_npcs,
     )
 
 
 def _build_npc_entry(npc_name: str, npc_df: pd.DataFrame, substitutions: Dict,
                       gender_substitutions: Dict, sys_substitutions: Dict,
-                      existing_voices: Set[str], prep_npcs: Set[str],
-                      skipped_npcs: Set[str]) -> Dict:
+                      existing_voices: Set[str], prep_npcs: Set[str]) -> Dict:
     """
     Build a single hierarchy entry from an NPC's rows. Shared by
     build_hierarchy() and build_hierarchy_for_npc() so both stay in sync.
@@ -1480,7 +1415,6 @@ def _build_npc_entry(npc_name: str, npc_df: pd.DataFrame, substitutions: Dict,
         "assigned_voice": substitutions.get(npc_name),
         "has_existing_voice": has_existing,
         "needs_audit": (not has_existing) and (npc_name in prep_npcs),
-        "skipped": npc_name in skipped_npcs,
         "is_realname_missing": is_placeholder,
         "genders": {},
     }
@@ -1512,13 +1446,11 @@ def _build_npc_entry(npc_name: str, npc_df: pd.DataFrame, substitutions: Dict,
 
 def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions: Dict,
                      sys_substitutions: Dict, existing_voices: Set[str],
-                     prep_npcs: Optional[Set[str]] = None,
-                     skipped_npcs: Optional[Set[str]] = None) -> Dict:
+                     prep_npcs: Optional[Set[str]] = None) -> Dict:
     """Build the full NPC hierarchy for all characters."""
     logger.info("Building NPC hierarchy...")
     start_time = time.time()
     prep_npcs = prep_npcs or set()
-    skipped_npcs = skipped_npcs or set()
     hierarchy = {}
     if df.empty:
         return hierarchy
@@ -1530,7 +1462,7 @@ def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions:
             continue
         hierarchy[npc_name] = _build_npc_entry(
             npc_name, npc_df, substitutions, gender_substitutions,
-            sys_substitutions, existing_voices, prep_npcs, skipped_npcs,
+            sys_substitutions, existing_voices, prep_npcs,
         )
 
     logger.info(f"Built hierarchy with {len(hierarchy)} NPCs in {time.time() - start_time:.2f}s")
@@ -1675,7 +1607,6 @@ class VoiceProfileManager(QMainWindow):
         self.available_voices = get_available_voice_profiles()
         self.existing_voices = get_existing_voice_files()
         self.prep_npcs = get_prep_npc_names()
-        self.skipped_npcs = load_skipped_npcs()
 
         # Drop any substitution left over from a voice profile that no
         # longer exists on disk (e.g. deleted outside/between sessions).
@@ -1695,7 +1626,7 @@ class VoiceProfileManager(QMainWindow):
         self.hierarchy = build_hierarchy(
             self.df, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
-            self.prep_npcs, self.skipped_npcs,
+            self.prep_npcs,
         )
         
         self.line_counts = calculate_line_counts(self.df, self.hierarchy)
@@ -1883,7 +1814,6 @@ class VoiceProfileManager(QMainWindow):
                 - ✅ Fully covered (all lines have assignments)
                 - 🔵 Partially covered
                 - 🎧 Needs audit (unreviewed samples in voices_prep/)
-                - 🎧🚫 Needs audit, but marked skipped/unusable
                 - 🔴 Nothing assigned
 
         Priority order only affects which icon is shown -- filtering,
@@ -1898,7 +1828,7 @@ class VoiceProfileManager(QMainWindow):
         elif status['has_partial']:
             return "🔵"
         elif data.get('needs_audit', False):
-            return "🎧🚫" if data.get('skipped', False) else "🎧"
+            return "🎧"
         return "🔴"
 
     def _apply_filters(self):
@@ -2118,7 +2048,7 @@ class VoiceProfileManager(QMainWindow):
         Open the voice profile editor for the given profile name.
 
         When audit_mode is True, the editor opens against VOICES_PREP_DIR
-        showing unreviewed samples with Approve / Skip controls instead of
+        showing unreviewed samples with Approve controls instead of
         the normal assignment-oriented sample tools.
 
         on_saved, if given, is called after the editor closes and
@@ -2139,7 +2069,6 @@ class VoiceProfileManager(QMainWindow):
         self.available_voices = get_available_voice_profiles()
         self.existing_voices = get_existing_voice_files()
         self.prep_npcs = get_prep_npc_names()
-        self.skipped_npcs = load_skipped_npcs()
 
         # If the last sample in a profile was deleted, the profile itself
         # ceased to exist -- drop any substitution still pointing at it.
@@ -2179,7 +2108,7 @@ class VoiceProfileManager(QMainWindow):
             self.hierarchy[npc_name] = build_hierarchy_for_npc(
                 self.df, npc_name, self.substitutions, self.gender_substitutions,
                 self.sys_substitutions, self.existing_voices,
-                self.prep_npcs, self.skipped_npcs,
+                self.prep_npcs,
             )
             self._update_line_counts_for_npc(npc_name)
             self._refresh_npc_list_icon(npc_name)
@@ -2280,9 +2209,8 @@ class VoiceProfileManager(QMainWindow):
             audit_frame = QFrame()
             audit_frame.setFrameShape(QFrame.Shape.StyledPanel)
             audit_layout = QHBoxLayout(audit_frame)
-            skip_note = " (marked skipped)" if npc_data.get("skipped", False) else ""
             audit_layout.addWidget(
-                QLabel(f"🎧 Unapproved sample(s) waiting in /{VOICES_PREP_DIR}{skip_note}"),
+                QLabel(f"🎧 Unapproved sample(s) waiting in /{VOICES_PREP_DIR}"),
                 stretch=1
             )
             review_btn = QPushButton("🎧 Review Sample(s)")
@@ -2406,7 +2334,7 @@ class VoiceProfileManager(QMainWindow):
         self.hierarchy[npc_name] = build_hierarchy_for_npc(
             self.df, npc_name, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
-            self.prep_npcs, self.skipped_npcs,
+            self.prep_npcs,
         )
         # Update line counts for this NPC only
         self._update_line_counts_for_npc(npc_name)
@@ -2506,7 +2434,7 @@ class VoiceProfileManager(QMainWindow):
         npcs_with_voice = sum(1 for d in self.hierarchy.values() if d.get("has_existing_voice", False))
         npcs_needing_audit = sum(
             1 for d in self.hierarchy.values()
-            if d.get("needs_audit", False) and not d.get("skipped", False)
+            if d.get("needs_audit", False)
         )
         
         self.stats_total_label.setText(str(len(self.hierarchy)))

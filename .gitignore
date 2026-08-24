@@ -66,7 +66,9 @@ venv/
 *.egg-info/          
 # Build folders
 dist/                
-build/               
+build/         
+# PyTest cache (explicitly)
+.pytest_cache/   
 
 # ------------------------------------------------------------
 # IDE & OS Specific
@@ -80,4 +82,6 @@ build/
 # MacOS folder metadata
 .DS_Store            
 # Windows thumbnail cache
-Thumbs.db            
+Thumbs.db           
+# Unit teste (temporary)
+tests/ 
