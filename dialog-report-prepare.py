@@ -14,7 +14,6 @@ import shutil
 import csv
 import json
 from datetime import datetime
-from typing import Optional, Tuple
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -27,6 +26,11 @@ CSV_PATH = r"dialog-report.csv"
 PATCHER_CONFIG_PATH = r"patcher-config.json"
 TEXT_ENCODING = "utf-8"
 GENDER_MAP = {1: "M", 2: "F", 3: "O", 4: "N"}  # GENDER.IDS: MALE, FEMALE, OTHER, NEITHER
+
+# CRE binary layout constants
+_CRE_DIALOG_RESREF_OFFSET = 0x02CC       # byte offset of the 8-byte dialog resref field
+_CRE_MIN_SIZE             = _CRE_DIALOG_RESREF_OFFSET + 8   # = 0x02D4
+_CRE_SUPPORTED_VERSIONS   = frozenset({b"V1.0", b"V1  "})   # V1.2/V2.2/V9.0 (IWD2/PST) excluded
 # =======================================================
 
 
@@ -207,22 +211,21 @@ class CreInfo:
 
 def parse_cre(path: Path) -> CreInfo | None:
     data = path.read_bytes()
-    if len(data) < 0x02cc + 8:
+    if len(data) < _CRE_MIN_SIZE:
         return None
-
-    signature = data[0:4]
-    version = data[4:8]
-    if signature != b"CRE ":
+    if data[0:4] != b"CRE ":
         return None
-    if version not in (b"V1.0", b"V1  "):
+    if data[4:8] not in _CRE_SUPPORTED_VERSIONS:
         # V1.2/V2.2/V9.0 (IWD2/PST) use different header layouts — skipped
         return None
 
-    strip_color = r"\^0x[0-9a-fA-F]{8}(.*?)\^-"
-    long_name_strref = struct.unpack_from("<i", data, 0x0008)[0]
-    short_name_strref = struct.unpack_from("<i", data, 0x000c)[0]
-    dialog_resref_raw = data[0x02cc:0x02cc + 8]
-    dialog_resref = dialog_resref_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").upper()
+    long_name_strref, short_name_strref = struct.unpack_from("<ii", data, 0x0008)
+    dialog_resref = (
+        data[_CRE_DIALOG_RESREF_OFFSET : _CRE_DIALOG_RESREF_OFFSET + 8]
+        .split(b"\x00", 1)[0]
+        .decode("ascii", errors="replace")
+        .upper()
+    )
     gender_byte = data[0x0237]
 
     return CreInfo(path.stem.upper(), long_name_strref, short_name_strref, dialog_resref, gender_byte)
@@ -256,13 +259,17 @@ def build_dlg_to_cre_info(
     # Build list of all CRE basenames for indexing
     cre_file_index = {file.stem.upper() for file in iter_files_ci(extract_dir, "cre")}
     
-    # Build mapping from dialog_resref to CRE info
-    cre_dialog_map = {}
+    # Single pass: build dialog_resref → cre_basename map and cache all CreInfo objects
+    cre_dialog_map: dict[str, str] = {}      # dialog_resref → cre_basename
+    cre_info_cache: dict[str, CreInfo] = {}  # cre_basename  → CreInfo
+
     for cre_file in iter_files_ci(extract_dir, "cre"):
         info = parse_cre(cre_file)
         if info is None or not info.dialog_resref:
             continue
-        cre_dialog_map[info.dialog_resref] = cre_file.stem.upper()
+        cre_basename = cre_file.stem.upper()
+        cre_dialog_map[info.dialog_resref] = cre_basename
+        cre_info_cache[cre_basename] = info
     
     # ITERATE THROUGH DLG FILES, not CRE files
     for dlg_file in iter_files_ci(extract_dir, "dlg"):
@@ -279,8 +286,8 @@ def build_dlg_to_cre_info(
         if cre_basename is None:
             continue
             
-        # Get the CRE info
-        cre_info = parse_cre(extract_dir / f"{cre_basename}.cre")
+        # Get the CRE info from cache — no second file read
+        cre_info = cre_info_cache.get(cre_basename)
         if cre_info is None:
             continue
             
@@ -301,47 +308,12 @@ def build_dlg_to_cre_info(
     
     return result
 
-def build_dlg_to_cre_index(extract_dir: Path) -> dict[str, str]:
-    """Builds authoritative mapping from CRE's embedded Dialog resref to CRE basename."""
-    index = {}
-    
-    for cre_file in iter_files_ci(extract_dir, "cre"):
-        # Read the dialog resref directly from the CRE binary
-        dlg_ref = read_cre_dialog_resref(cre_file)
-        if dlg_ref:
-            # TryAdd equivalent - first one wins
-            if dlg_ref not in index:
-                index[dlg_ref] = cre_file.stem.upper()
-    
-    return index
-
-def read_cre_dialog_resref(path: Path) -> Optional[str]:
-    """Read the Dialog resref from a CRE file (offset 0x02cc)."""
-    try:
-        data = path.read_bytes()
-        if len(data) < 0x02cc + 8:
-            return None
-            
-        signature = data[0:4]
-        version = data[4:8]
-        if signature != b"CRE ":
-            return None
-        if version not in (b"V1.0", b"V1  "):
-            return None
-            
-        # Read 8-byte resref field at offset 0x02cc
-        dialog_resref_raw = data[0x02cc:0x02cc + 8]
-        dialog_resref = dialog_resref_raw.split(b"\x00", 1)[0].decode("ascii", errors="replace").upper()
-        return dialog_resref if dialog_resref else None
-    except:
-        return None
-
 def find_cre_file(
     dialog_resref: str,
     dlg_to_cre_index: dict[str, str],
     cre_file_index: set[str],
     name_replacements: dict[str, str]
-) -> Optional[str]:
+) -> str | None:
     """
     Find the CRE file that owns this dialog using the same fallback logic as the C# code.
     """
@@ -356,7 +328,7 @@ def find_cre_file(
         base_name = re.sub(pattern, replacement, base_name, flags=re.IGNORECASE)
     
     # Helper to try resolving cascade
-    def try_resolve_cascade(current: str) -> Optional[str]:
+    def try_resolve_cascade(current: str) -> str | None:
         # 1. Try direct match
         if current in cre_file_index:
             return current
