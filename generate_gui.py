@@ -122,15 +122,35 @@ PROFILE_SYNC_RETRY_DELAY = 3.0
 # ============================================================================
 
 class CaseInsensitiveDict(dict):
-    """A dictionary with case-insensitive string keys while preserving original key casing."""
+    """
+    A dictionary with case-insensitive string keys while preserving original key casing.
+
+    Stores key-value pairs where string keys can be accessed, retrieved, checked,
+    or deleted with any letter casing. Tracks the canonical (original) casing
+    of keys for iteration and representation.
+    """
 
     def __init__(self, *args, **kwargs):
+        """
+        Initialize the case-insensitive dictionary.
+
+        Args:
+            *args: Optional positional arguments (mapping or iterable of key-value pairs).
+            **kwargs: Optional keyword arguments to populate the dictionary.
+        """
         self._keys = {}
         super().__init__()
         if args or kwargs:
             self.update(*args, **kwargs)
 
     def __setitem__(self, key, value):
+        """
+        Set self[key] to value with case-insensitive tracking for string keys.
+
+        Args:
+            key: The dictionary key.
+            value: The value to associate with the key.
+        """
         if isinstance(key, str):
             lower = key.lower()
             old_canonical = self._keys.get(lower)
@@ -142,6 +162,18 @@ class CaseInsensitiveDict(dict):
             super().__setitem__(key, value)
 
     def __getitem__(self, key):
+        """
+        Get self[key] using case-insensitive comparison for string keys.
+
+        Args:
+            key: The key to look up.
+
+        Returns:
+            The value associated with key.
+
+        Raises:
+            KeyError: If key is not present in the dictionary.
+        """
         if isinstance(key, str):
             lower = key.lower()
             if lower in self._keys:
@@ -149,11 +181,30 @@ class CaseInsensitiveDict(dict):
         return super().__getitem__(key)
 
     def __contains__(self, key):
+        """
+        Check if key is present using case-insensitive comparison for string keys.
+
+        Args:
+            key: The key to check.
+
+        Returns:
+            bool: True if key is found, False otherwise.
+        """
         if isinstance(key, str):
             return key.lower() in self._keys
         return super().__contains__(key)
 
     def get(self, key, default=None):
+        """
+        Return the value for key if key is in the dictionary, else default.
+
+        Args:
+            key: The key to search for.
+            default: Value to return if key is not found (defaults to None).
+
+        Returns:
+            The value for key or default.
+        """
         if isinstance(key, str):
             lower = key.lower()
             if lower in self._keys:
@@ -161,6 +212,19 @@ class CaseInsensitiveDict(dict):
         return super().get(key, default)
 
     def pop(self, key, *args):
+        """
+        Remove specified key and return the corresponding value.
+
+        Args:
+            key: The key to remove (case-insensitive for string keys).
+            *args: Optional default value if key is not found.
+
+        Returns:
+            The removed value, or default if provided and key is missing.
+
+        Raises:
+            KeyError: If key is not found and no default is provided.
+        """
         if isinstance(key, str):
             lower = key.lower()
             if lower in self._keys:
@@ -169,11 +233,27 @@ class CaseInsensitiveDict(dict):
         return super().pop(key, *args)
 
     def get_canonical_key(self, key):
+        """
+        Get the original (canonical) casing used when key was stored.
+
+        Args:
+            key: The key to check.
+
+        Returns:
+            The canonical key string if stored, otherwise key unchanged.
+        """
         if isinstance(key, str):
             return self._keys.get(key.lower(), key)
         return key
 
     def update(self, *args, **kwargs):
+        """
+        Update the dictionary with key/value pairs from mapping or iterable.
+
+        Args:
+            *args: Positional argument which can be another mapping or iterable of pairs.
+            **kwargs: Additional key/value pairs passed as keyword arguments.
+        """
         if args:
             if hasattr(args[0], "items"):
                 for k, v in args[0].items():
@@ -240,6 +320,12 @@ class QtLogHandler(logging.Handler):
     """
 
     def __init__(self, log_signal: LogSignal):
+        """
+        Initialize the handler with a target LogSignal.
+
+        Args:
+            log_signal (LogSignal): The signal instance to receive emitted log records.
+        """
         super().__init__()
         self.log_signal = log_signal
 
@@ -1499,6 +1585,21 @@ def sync_missing_profiles(csv_path, filename_pattern, target_voices,
     Reconcile Voicebox's profile list against what the CSV needs and what
     voices/ can provide, composing and importing any missing-but-available
     profiles before generation starts.
+
+    Convenience wrapper around sync_profiles(sync_all=False).
+
+    Args:
+        csv_path (str): Path to the dialog CSV file.
+        filename_pattern (str): Regex pattern for filename filtering.
+        target_voices (list): List of NPC names to target (empty = all).
+        use_strref_filter (bool): Whether to filter lines by STRREF.
+        strref_filter_file (str): Path to the STRREF JSON filter file.
+        substitutions (dict, optional): NPC name -> voice profile mappings.
+        substitutions_gender (dict, optional): NPC name|gender -> voice profile mappings.
+        substitutions_sysname (dict, optional): sysname -> voice profile mappings.
+
+    Returns:
+        CaseInsensitiveDict: Updated profile name -> ID map from Voicebox.
     """
     return sync_profiles(
         csv_path=csv_path,
@@ -2138,6 +2239,13 @@ class ProfileSyncWorker(QObject):
     failed = Signal(str)
 
     def run(self):
+        """
+        Execute full voice profile synchronization on the background thread.
+
+        Scans the local voices directory, compares profiles against Voicebox,
+        rebuilds any zero-sample profiles, and creates missing profiles. Emits
+        stage updates, finished on success, or failed with an error message.
+        """
         try:
             self.stage.emit("Syncing all voice profiles to Voicebox...")
             sync_profiles(sync_all=True)
@@ -2189,6 +2297,12 @@ class GenerationWorker(QObject):
     failed = Signal(str)
 
     def __init__(self):
+        """
+        Initialize the GenerationWorker.
+
+        Sets up the internal stop flag event and tracks active generation ID
+        for cancellation support.
+        """
         super().__init__()
         self._stop_requested = threading.Event()
         self._current_gen_id = None
@@ -2778,6 +2892,13 @@ class GenerateWindow(QMainWindow):
     """
 
     def __init__(self):
+        """
+        Initialize the TTS Voice Generator main window.
+
+        Sets up the application title, default window dimensions, logging
+        subsystem connections, worker thread references, and builds all
+        graphical user interface widgets.
+        """
         super().__init__()
         self.setWindowTitle("🎙️ TTS Voice Generator")
         self.resize(1100, 750)
@@ -2841,12 +2962,13 @@ class GenerateWindow(QMainWindow):
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop)
         self.sync_btn = QPushButton("🔄 Sync All Profiles")
+        self.sync_btn.setFlat(True)
         self.sync_btn.setToolTip("Scan voices/ and create/repair all voice profiles on Voicebox")
         self.sync_btn.clicked.connect(self._start_sync_all)
         controls_layout.addWidget(self.start_btn)
         controls_layout.addWidget(self.stop_btn)
-        controls_layout.addWidget(self.sync_btn)
         controls_layout.addStretch()
+        controls_layout.addWidget(self.sync_btn)
         layout.addLayout(controls_layout)
 
         # ---------- Progress ----------
@@ -2991,7 +3113,12 @@ class GenerateWindow(QMainWindow):
             self.statusBar().showMessage("Stopping after current job...", 5000)
 
     def _on_thread_finished(self):
-        """Re-enable controls when the generation background thread finishes."""
+        """
+        Re-enable UI controls when the generation background thread finishes.
+
+        Resets button states so the user can initiate a new generation run
+        or sync profiles.
+        """
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.sync_btn.setEnabled(True)
@@ -2999,6 +3126,10 @@ class GenerateWindow(QMainWindow):
     def _start_sync_all(self):
         """
         Start full voice profile synchronization on a background thread.
+
+        Creates a QThread and a ProfileSyncWorker, connects worker signals to UI
+        handlers, updates UI controls to disabled running state, and launches
+        the synchronization process.
         """
         self.log_view.clear()
         self.job_bar.setValue(0)
@@ -3025,7 +3156,12 @@ class GenerateWindow(QMainWindow):
         self.sync_thread.start()
 
     def _on_sync_finished(self):
-        """Handle successful completion of voice profile synchronization."""
+        """
+        Handle successful completion of voice profile synchronization.
+
+        Updates progress bars to 100%, displays completion messages in status
+        bar and job labels, and resets overall status indicator.
+        """
         self.job_bar.setValue(100)
         self.overall_bar.setValue(100)
         self.statusBar().showMessage("Voice profile sync complete.", 5000)
@@ -3033,13 +3169,24 @@ class GenerateWindow(QMainWindow):
         self.overall_label.setText("Overall: idle")
 
     def _on_sync_failed(self, error: str):
-        """Handle failure during voice profile synchronization."""
+        """
+        Handle failure during voice profile synchronization.
+
+        Args:
+            error (str): Error message describing the synchronization failure.
+
+        Displays the error in the status bar and updates labels with the error details.
+        """
         self.statusBar().showMessage(f"Voice profile sync failed: {error}", 8000)
         self.job_label.setText(f"❌ {error}")
         self.overall_label.setText("Overall: error")
 
     def _on_sync_thread_finished(self):
-        """Re-enable controls when the profile sync thread finishes."""
+        """
+        Re-enable UI controls when the profile sync thread finishes.
+
+        Restores start and sync button states so new actions can be initiated.
+        """
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.sync_btn.setEnabled(True)
