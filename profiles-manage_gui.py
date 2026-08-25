@@ -61,21 +61,22 @@ CSV_PATH = "dialog-report.csv"
 VOICES_DIR = "voices"                    # Approved voice profiles (assignable)
 VOICES_PREP_DIR = "voices_prep"          # Raw/unreviewed samples awaiting audit
 VOICE_SUBSTITUTIONS_FILE = "voice-substitutions.json"
-LOG_FILE_PATH = r"logs/profiles-manage.log"
+LOG_DIR = r"logs"
 
 # ============================================================================
 # Logging Setup
 # ============================================================================
 
 # Ensure log directory exists
-log_dir = Path(LOG_FILE_PATH).parent
+log_dir = Path(LOG_DIR)
 log_dir.mkdir(parents=True, exist_ok=True)
+log_file = log_dir / f"{Path(__file__).stem}.log"
 
 # Configure logging to both file and console
 logger = logging.getLogger(__name__)
 logger.setLevel(logging.DEBUG)
 
-file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+file_handler = logging.FileHandler(log_file, encoding='utf-8')
 file_handler.setLevel(logging.DEBUG)
 file_handler.setFormatter(logging.Formatter(fmt='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
 

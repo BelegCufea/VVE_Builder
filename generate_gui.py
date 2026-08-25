@@ -103,7 +103,7 @@ SKIP_ALREADY_GENERATED = True
 GENERATION_MEMORY_PATH = r"generation-memory.json"
 
 # Logging
-LOG_FILE_PATH = r"logs/generate.log"
+LOG_DIR = r"logs"
 
 # Pre-generation Summary Options
 COMPACT_SUMMARY = True
@@ -373,15 +373,16 @@ def log_initialize(log_signal: LogSignal):
         The console handler, when attached, shows ERROR and above; the GUI
         handler shows INFO and above.
     """
-    log_dir = Path(LOG_FILE_PATH).parent
+    log_dir = Path(LOG_DIR)
     log_dir.mkdir(parents=True, exist_ok=True)
+    log_file = log_dir / f"{Path(__file__).stem}.log"
     logger = logging.getLogger()
     if logger.hasHandlers():
         logger.handlers.clear()
-    logger.setLevel(logging.INFO)
+    logger.setLevel(logging.DEBUG)
 
     # File handler - full format with timestamp
-    file_handler = logging.FileHandler(LOG_FILE_PATH, encoding='utf-8')
+    file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(
         '%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'

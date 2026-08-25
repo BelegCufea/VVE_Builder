@@ -25,7 +25,7 @@ GAME_DIRECTORY = r"C:/Relax/BGEET"
 CSV_PATH = r"dialog-report.csv"
 VOICES_PREP_DIR = "voices_prep"
 VOICES_DIR = "voices"
-LOG_FILE_PATH = r"./logs/profiles_prepare.log"
+LOG_DIR = r"logs"
 BLACKLIST_FILE = r"./blacklist.txt"
 BLACKLIST = [
     # Add RealNames to skip processing
@@ -40,15 +40,15 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Setup logging - log to both console and file
-log_dir = Path(LOG_FILE_PATH).parent
+log_dir = Path(LOG_DIR)
 log_dir.mkdir(parents=True, exist_ok=True)
-log_file_path = Path(LOG_FILE_PATH)
+log_file = log_dir / f"{Path(__file__).stem}.log"
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     datefmt='%Y-%m-%d %H:%M:%S',
     handlers=[
-        logging.FileHandler(log_file_path, encoding='utf-8'),
+        logging.FileHandler(log_file, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )
