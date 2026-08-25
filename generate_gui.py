@@ -532,7 +532,7 @@ def log_pregeneration_summary(npc_stats, profile_map):
     missing_npcs, missing_chars_total, missing_done_total, missing_skipped_total = [], 0, 0, 0
     done_npcs, done_chars_total, done_done_total, done_skipped_total = [], 0, 0, 0
 
-    for npc_name, stats in npc_stats.items():
+    for npc_name, stats in sorted(npc_stats.items(), key=lambda item: (item[1].get("voice_name", "").lower(), item[0])):
         profile_name = stats.get("voice_name", npc_name)
         has_profile = profile_name in profile_map
         total, done, skipped, to_gen, chars = (
@@ -2018,7 +2018,7 @@ def filter_and_sort_rows(selected_rows, profile_map):
         list: Filtered and sorted rows.
     """
     valid_rows = [row for row in selected_rows if row[2] in profile_map]
-    valid_rows.sort(key=lambda row: row[2].lower())
+    valid_rows.sort(key=lambda row: (row[2].lower(), row[1]))
     return valid_rows
 
 
