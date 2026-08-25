@@ -30,11 +30,12 @@ from runstats import Regression
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, Signal, QTimer
 from PySide6.QtGui import QFont, QTextCursor, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar,
+    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar, QSizePolicy,
+    QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
 )
 
 # ============================================================================
@@ -2224,6 +2225,59 @@ def estimate_generation_time(regressor, chars):
         return max(estimated_sec, 2.0)
     return 10.0
 
+# ============================================================================
+# Accessibility of VoiceBox backend
+# ============================================================================
+
+class HealthCheckWorker(QObject):
+    """
+    Periodically polls the Voicebox /health endpoint on a background thread.
+
+    Runs its own QTimer (created after moveToThread, so it lives on the
+    worker thread) and emits health_checked(reachable, info) on every tick,
+    keeping HTTP requests off the UI thread entirely.
+    """
+    health_checked = Signal(bool, dict)
+
+    def __init__(self, interval_ms=10000):
+        super().__init__()
+        self.interval_ms = interval_ms
+        self._timer = None
+
+    def start(self):
+        """Create and start the polling QTimer. Call only after moveToThread."""
+        self._timer = QTimer()
+        self._timer.timeout.connect(self.check_now)
+        self._timer.start(self.interval_ms)
+        self.check_now()
+
+    def check_now(self):
+        """Perform a single health check immediately."""
+        try:
+            resp = requests.get(f"{BASE_URL}/health", timeout=5)
+            resp.raise_for_status()
+            self.health_checked.emit(True, resp.json())
+        except Exception as e:
+            self.health_checked.emit(False, {"error": str(e)})
+
+# ============================================================================
+# Profile fetcher
+# ============================================================================
+
+class ProfilesFetchWorker(QObject):
+    """
+    One-shot background fetch of voice profile names, used to populate
+    the fallback-voice comboboxes without blocking the UI thread.
+    """
+    profiles_loaded = Signal(dict)
+    failed = Signal(str)
+
+    def fetch(self):
+        try:
+            profile_map, _ = get_all_profiles()
+            self.profiles_loaded.emit(dict(profile_map))
+        except Exception as e:
+            self.failed.emit(str(e))
 
 # ============================================================================
 # Profile Sync Worker (runs on a background QThread)
@@ -2918,7 +2972,15 @@ class GenerateWindow(QMainWindow):
         self.sync_thread: QThread | None = None
         self.sync_worker: ProfileSyncWorker | None = None
 
+        self.health_thread = QThread()
+        self.health_worker = HealthCheckWorker(interval_ms=10000)
+        self.health_worker.moveToThread(self.health_thread)
+        self.health_thread.started.connect(self.health_worker.start)
+        self.health_worker.health_checked.connect(self._on_health_checked)
+        self.health_thread.start()
+
         self._build_ui()
+        self._refresh_fallback_voices()
 
     # ------------------------------------------------------------------
     # UI Construction
@@ -2943,19 +3005,132 @@ class GenerateWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # ---------- Configuration summary ----------
+        # ---------- Configuration ----------
         config_group = QGroupBox("⚙️ Configuration")
         config_layout = QGridLayout(config_group)
-        config_items = [
-            ("Voicebox URL", BASE_URL), ("Engine", f"{ENGINE} ({MODEL_SIZE})"),
-            ("CSV", CSV_PATH), ("Output dir", OUTPUT_DIR),
-            ("Retry", f"{RETRY_COUNT}x, {RETRY_DELAY}s delay"),
-            ("Convert to Ogg", "Yes" if CONVERT_TO_OGG else "No"),
-        ]
-        for i, (label, value) in enumerate(config_items):
-            row, col = divmod(i, 2)
-            config_layout.addWidget(QLabel(f"<b>{label}:</b>"), row, col * 2)
-            config_layout.addWidget(QLabel(value), row, col * 2 + 1)
+        row = 0
+
+        # Voicebox URL + health dot
+        config_layout.addWidget(QLabel("<b>Voicebox URL:</b>"), row, 0)
+        self.base_url_edit = QLineEdit(BASE_URL)
+        config_layout.addWidget(self.base_url_edit, row, 1)
+        self.health_dot = QLabel()
+        self.health_dot.setFixedSize(14, 14)
+        self.health_dot.setStyleSheet("background-color: gray; border-radius: 7px;")
+        self.health_dot.setToolTip("Checking Voicebox API health...")
+        config_layout.addWidget(self.health_dot, row, 2)
+        row += 1
+
+        # Engine / model size (free text — Voicebox's /generate and /models/status
+        # use inconsistent naming, so there's no reliable list to build a combobox from)
+        config_layout.addWidget(QLabel("<b>Engine:</b>"), row, 0)
+        self.engine_edit = QLineEdit(ENGINE)
+        config_layout.addWidget(self.engine_edit, row, 1)
+        config_layout.addWidget(QLabel("<b>Model size:</b>"), row, 2)
+        self.model_size_edit = QLineEdit(MODEL_SIZE)
+        config_layout.addWidget(self.model_size_edit, row, 3)
+        row += 1
+        engine_warning = QLabel(
+            "⚠️ Free text — Voicebox's /generate and /models/status use different "
+            "naming for the same model. Check /models/status before changing this."
+        )
+        engine_warning.setWordWrap(True)
+        engine_warning.setStyleSheet("color: #b8860b; font-size: 10px;")
+        config_layout.addWidget(engine_warning, row, 0, 1, 4)
+        row += 1
+
+        # Retry + timeout safeguard, grouped
+        config_layout.addWidget(QLabel("<b>Retry:</b>"), row, 0)
+        retry_box = QHBoxLayout()
+        self.retry_count_spin = QSpinBox()
+        self.retry_count_spin.setRange(0, 20)
+        self.retry_count_spin.setValue(RETRY_COUNT)
+        self.retry_delay_spin = QDoubleSpinBox()
+        self.retry_delay_spin.setRange(0.0, 120.0)
+        self.retry_delay_spin.setSingleStep(0.5)
+        self.retry_delay_spin.setSuffix(" s delay")
+        self.retry_delay_spin.setValue(RETRY_DELAY)
+        retry_box.addWidget(self.retry_count_spin)
+        retry_box.addWidget(QLabel("x,"))
+        retry_box.addWidget(self.retry_delay_spin)
+        retry_widget = QWidget()
+        retry_widget.setLayout(retry_box)
+        config_layout.addWidget(retry_widget, row, 1, 1, 3)
+        row += 1
+
+        config_layout.addWidget(QLabel("<b>Timeout safeguard:</b>"), row, 0)
+        self.timeout_enable_check = QCheckBox("Enabled")
+        self.timeout_enable_check.setChecked(ENABLE_TIMEOUT_SAFEGUARD)
+        config_layout.addWidget(self.timeout_enable_check, row, 1)
+        timeout_box = QHBoxLayout()
+        self.timeout_max_spin = QSpinBox()
+        self.timeout_max_spin.setRange(10, 7200)
+        self.timeout_max_spin.setSuffix(" s max")
+        self.timeout_max_spin.setValue(TIMEOUT_MAX_SECONDS)
+        self.timeout_multiplier_spin = QDoubleSpinBox()
+        self.timeout_multiplier_spin.setRange(1.0, 10.0)
+        self.timeout_multiplier_spin.setSingleStep(0.5)
+        self.timeout_multiplier_spin.setSuffix("x estimate")
+        self.timeout_multiplier_spin.setValue(TIMEOUT_MULTIPLIER)
+        timeout_box.addWidget(self.timeout_max_spin)
+        timeout_box.addWidget(self.timeout_multiplier_spin)
+        timeout_widget = QWidget()
+        timeout_widget.setLayout(timeout_box)
+        config_layout.addWidget(timeout_widget, row, 2, 1, 2)
+        row += 1
+
+        # Convert to Ogg / Skip already generated
+        config_layout.addWidget(QLabel("<b>Convert to Ogg:</b>"), row, 0)
+        self.convert_ogg_check = QCheckBox()
+        self.convert_ogg_check.setChecked(CONVERT_TO_OGG)
+        config_layout.addWidget(self.convert_ogg_check, row, 1)
+        config_layout.addWidget(QLabel("<b>Skip already generated:</b>"), row, 2)
+        self.skip_generated_check = QCheckBox()
+        self.skip_generated_check.setChecked(SKIP_ALREADY_GENERATED)
+        config_layout.addWidget(self.skip_generated_check, row, 3)
+        row += 1
+
+        # Limit
+        config_layout.addWidget(QLabel("<b>Limit:</b>"), row, 0)
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(0, 1_000_000)
+        self.limit_spin.setValue(LIMIT)
+        self.limit_spin.setSpecialValueText("No limit")
+        config_layout.addWidget(self.limit_spin, row, 1)
+        limit_hint = QLabel("Max jobs to process this run. Set to 0 to remove the limit.")
+        limit_hint.setStyleSheet("font-size: 10px; color: gray;")
+        config_layout.addWidget(limit_hint, row, 2, 1, 2)
+        row += 1
+
+        # Voice fallback
+        config_layout.addWidget(QLabel("<b>Voice fallback:</b>"), row, 0)
+        self.fallback_enable_check = QCheckBox("Enabled")
+        self.fallback_enable_check.setChecked(USE_VOICE_FALLBACK)
+        config_layout.addWidget(self.fallback_enable_check, row, 1)
+        self.refresh_voices_btn = QPushButton("🔄 Refresh voices")
+        self.refresh_voices_btn.clicked.connect(self._refresh_fallback_voices)
+        config_layout.addWidget(self.refresh_voices_btn, row, 2, 1, 2)
+        row += 1
+
+        self.fallback_male_combo = QComboBox()
+        self.fallback_female_combo = QComboBox()
+        self.fallback_neutral_combo = QComboBox()
+
+        for label, combo, current in [
+            ("Male:", self.fallback_male_combo, FALLBACK_VOICE_MALE),
+            ("Female:", self.fallback_female_combo, FALLBACK_VOICE_FEMALE),
+            ("Neutral:", self.fallback_neutral_combo, FALLBACK_VOICE_NEUTRAL),
+        ]:
+            config_layout.addWidget(QLabel(label), row, 0)
+            combo.setEditable(True)
+            combo.addItem(current)
+            config_layout.addWidget(combo, row, 1, 1, 3)
+            row += 1
+
+        self.save_config_btn = QPushButton("💾 Save Config")
+        self.save_config_btn.clicked.connect(self._save_config_edits)
+        config_layout.addWidget(self.save_config_btn, row, 0, 1, 4)
+
         layout.addWidget(config_group)
 
         # ---------- Run controls ----------
@@ -3334,6 +3509,78 @@ class GenerateWindow(QMainWindow):
         """
         self.statusBar().showMessage(f"Failed: {message}", 8000)
         self.job_label.setText(f"❌ {message}")
+
+    def _save_config_edits(self):
+        """Apply edited configuration fields back to the module-level settings."""
+        global BASE_URL, ENGINE, MODEL_SIZE, RETRY_COUNT, RETRY_DELAY, CONVERT_TO_OGG
+        global ENABLE_TIMEOUT_SAFEGUARD, TIMEOUT_MAX_SECONDS, TIMEOUT_MULTIPLIER
+        global SKIP_ALREADY_GENERATED, LIMIT, USE_VOICE_FALLBACK
+        global FALLBACK_VOICE_MALE, FALLBACK_VOICE_FEMALE, FALLBACK_VOICE_NEUTRAL
+
+        BASE_URL = self.base_url_edit.text().strip()
+        ENGINE = self.engine_edit.text().strip()
+        MODEL_SIZE = self.model_size_edit.text().strip()
+        RETRY_COUNT = self.retry_count_spin.value()
+        RETRY_DELAY = self.retry_delay_spin.value()
+        CONVERT_TO_OGG = self.convert_ogg_check.isChecked()
+        ENABLE_TIMEOUT_SAFEGUARD = self.timeout_enable_check.isChecked()
+        TIMEOUT_MAX_SECONDS = self.timeout_max_spin.value()
+        TIMEOUT_MULTIPLIER = self.timeout_multiplier_spin.value()
+        SKIP_ALREADY_GENERATED = self.skip_generated_check.isChecked()
+        LIMIT = self.limit_spin.value()
+        USE_VOICE_FALLBACK = self.fallback_enable_check.isChecked()
+        FALLBACK_VOICE_MALE = self.fallback_male_combo.currentText().strip()
+        FALLBACK_VOICE_FEMALE = self.fallback_female_combo.currentText().strip()
+        FALLBACK_VOICE_NEUTRAL = self.fallback_neutral_combo.currentText().strip()
+
+        logger.info("Configuration updated from UI.")
+        self.statusBar().showMessage("Configuration saved.", 3000)
+        QTimer.singleShot(0, self.health_worker.check_now)
+
+    def _on_health_checked(self, reachable: bool, info: dict):
+        """Update the health dot color and tooltip from a /health poll result."""
+        if reachable:
+            color = "#2ecc71"
+            tooltip = "Reachable\n" + "\n".join(f"{k}: {v}" for k, v in info.items())
+        else:
+            color = "#e74c3c"
+            tooltip = f"Unreachable: {info.get('error', 'unknown error')}"
+        self.health_dot.setStyleSheet(f"background-color: {color}; border-radius: 7px;")
+        self.health_dot.setToolTip(tooltip)       
+
+    def _refresh_fallback_voices(self):
+        """Fetch the current profile list in the background and repopulate the fallback combos."""
+        self.refresh_voices_btn.setEnabled(False)
+        self.profiles_thread = QThread()
+        self.profiles_worker = ProfilesFetchWorker()
+        self.profiles_worker.moveToThread(self.profiles_thread)
+        self.profiles_thread.started.connect(self.profiles_worker.fetch)
+        self.profiles_worker.profiles_loaded.connect(self._on_profiles_loaded)
+        self.profiles_worker.failed.connect(self._on_profiles_failed)
+        self.profiles_worker.profiles_loaded.connect(self.profiles_thread.quit)
+        self.profiles_worker.failed.connect(self.profiles_thread.quit)
+        self.profiles_thread.start()
+
+    def _on_profiles_loaded(self, profile_map: dict):
+        names = sorted(profile_map.keys(), key=str.lower)
+        for combo in (self.fallback_male_combo, self.fallback_female_combo, self.fallback_neutral_combo):
+            current = combo.currentText()
+            combo.clear()
+            combo.addItems(names)
+            idx = combo.findText(current)
+            combo.setCurrentIndex(idx if idx >= 0 else (combo.addItem(current) or combo.count() - 1))
+        self.refresh_voices_btn.setEnabled(True)
+        self.statusBar().showMessage(f"Loaded {len(names)} voice profiles.", 3000)
+
+    def _on_profiles_failed(self, message: str):
+        self.refresh_voices_btn.setEnabled(True)
+        self.statusBar().showMessage(f"Could not load voice profiles: {message}", 5000)        
+
+    def closeEvent(self, event):
+        """Stop background threads before the window closes."""
+        self.health_thread.quit()
+        self.health_thread.wait(2000)
+        super().closeEvent(event) 
 
 
 # ============================================================================
