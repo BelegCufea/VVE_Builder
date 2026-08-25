@@ -367,9 +367,11 @@ def log_initialize(log_signal: LogSignal):
         logging.Logger: The configured logger instance.
 
     Note:
-        The logger is configured once at application startup.
-        The file handler captures DEBUG-level logs, while console and GUI
-        handlers only show INFO and above for cleaner output.
+        The logger is configured once at application startup. Although the
+        file handler accepts DEBUG records, the root logger itself is set to
+        INFO, so DEBUG records are currently filtered before reaching it.
+        The console handler, when attached, shows ERROR and above; the GUI
+        handler shows INFO and above.
     """
     log_dir = Path(LOG_FILE_PATH).parent
     log_dir.mkdir(parents=True, exist_ok=True)
@@ -409,11 +411,10 @@ def log_header_start():
     Log the run-start banner immediately.
 
     This is the first log message, displayed before any setup work begins.
-    It provides immediate visual feedback that the process has started.
+    It includes the start timestamp and configured TTS engine/model.
 
     Note:
-        The banner includes the script name, start timestamp, and TTS engine
-        configuration. It's logged at INFO level to both console and file.
+        The message is logged at INFO level to the configured logging sinks.
     """
     lines = ["", "=" * 70, "Voice over Generation",
               f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 70,
@@ -458,13 +459,16 @@ def log_pregeneration_summary(npc_stats, profile_map):
         profile_map (dict): Voice profile name -> ID mapping.
 
     Note:
-        The table includes VALID TOTAL and GRAND TOTAL rows for quick
-        overview. Missing profiles are marked with "❌ Missing".
+        The output includes grouped summary rows and a GRAND TOTAL row.
+        Missing profiles are marked with "❌ Missing". In compact mode,
+        detail rows are limited to NPCs with pending generation work.
     """
     trunc = lambda text, width: (text[:width - 3] + "...") if len(text) > width else text
     fmt = lambda v, w: f"{v:{w},}" if v != 0 else ' ' * w
 
     class COL_WIDTH:
+        """Column widths used to format the pre-generation summary table."""
+
         NPC = 28
         PROFILE = 30
         TOTAL = 7
@@ -1939,6 +1943,7 @@ def preprocess_text(text, patcher_config):
             compiled_pattern = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
             if replacement_template and '$' in replacement_template:
                 def repl_func(match, _template=replacement_template):
+                    """Expand $1, $2, ... placeholders using the regex match groups."""
                     result = _template
                     for i in range(1, match.lastindex + 1 if match.lastindex else 0):
                         group_value = match.group(i) or ''
@@ -2059,7 +2064,7 @@ def iter_filtered_csv_rows(csv_path, target_voices, filename_pattern, use_strref
         - If use_strref_filter and strref_filter is non-empty: strref must be in it.
         - If not use_strref_filter: npc_name must be non-empty.
         - If not use_strref_filter and target_voices given: npc_name must be in target_voices.
-        - If filename_pattern given: csv_filename must match it.
+        - If filename_pattern and csv_filename are both present: csv_filename must match it.
         - text must be non-empty.
 
     Args:
@@ -2876,11 +2881,9 @@ class ThroughputGraph(QWidget):
     headroom. Up to MAX_SAMPLES historical data points are shown, scrolling
     left as new samples arrive.
 
-    Colors and style intentionally match the Task Manager aesthetic:
-        - Dark (#1a1a2e) background
-        - Teal (#00b4d8) line and fill with transparency
-        - Light gray grid lines
-        - White annotation text
+    The graph displays the cumulative characters-per-second rate reported
+    by the overall progress handler. It is fed before each job starts, so a
+    new sample represents the cumulative rate at that point in the run.
 
     Usage::
 
@@ -2903,6 +2906,7 @@ class ThroughputGraph(QWidget):
     _COLOR_LABEL = QColor("#7a8fa6")
 
     def __init__(self, parent=None):
+        """Initialize the graph with an empty rolling sample buffer."""
         super().__init__(parent)
         self._samples: deque[float] = deque(maxlen=self.MAX_SAMPLES)
         self._peak: float = 0.0
@@ -2940,9 +2944,11 @@ class ThroughputGraph(QWidget):
     # ------------------------------------------------------------------
 
     def sizeHint(self) -> QSize:
+        """Return the widget's preferred display size."""
         return QSize(400, 90)
 
     def paintEvent(self, event) -> None:  # noqa: N802
+        """Paint the rolling throughput chart and its labels."""
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
@@ -2989,6 +2995,7 @@ class ThroughputGraph(QWidget):
             ]
 
         def to_y(v):
+            """Map a throughput value to its vertical pixel coordinate."""
             return pad_top + plot_h - 1 - int((v / y_max) * (plot_h - 1))
 
         # Filled area polygon
