@@ -3057,12 +3057,18 @@ class ConfigDialog(QDialog):
         tabs.addTab(self._build_fallback_tab(), "🗣️ Voice Fallback")
 
         # ---------- Dialog buttons ----------
-        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Close)
-        buttons.button(QDialogButtonBox.StandardButton.Save).setText("💾 Save Config")
-        self.save_config_btn = buttons.button(QDialogButtonBox.StandardButton.Save)
-        buttons.rejected.connect(self.close)
-        outer.addWidget(buttons)
-        self._button_box = buttons
+        # Manual QPushButtons (rather than QDialogButtonBox's role-based
+        # auto-ordering) so we control both the left-to-right order and
+        # what each one does: Cancel just closes; Save Config saves then closes.
+        button_row = QHBoxLayout()
+        button_row.addStretch()
+        self.cancel_config_btn = QPushButton("Cancel")
+        self.cancel_config_btn.clicked.connect(self.close)
+        button_row.addWidget(self.cancel_config_btn)
+        self.save_config_btn = QPushButton("💾 Save Config")
+        self.save_config_btn.setDefault(True)
+        button_row.addWidget(self.save_config_btn)
+        outer.addLayout(button_row)
 
     # ------------------------------------------------------------------
     def _build_connection_tab(self) -> QWidget:
@@ -3146,6 +3152,23 @@ class ConfigDialog(QDialog):
         self.convert_ogg_check = QCheckBox("Convert generated audio to Ogg")
         self.convert_ogg_check.setChecked(CONVERT_TO_OGG)
         form.addRow("<b>Audio:</b>", self.convert_ogg_check)
+
+        ogg_quality_box = QHBoxLayout()
+        self.ogg_quality_spin = QSpinBox()
+        self.ogg_quality_spin.setRange(-1, 10)
+        self.ogg_quality_spin.setValue(OGG_QUALITY)
+        self.ogg_quality_spin.setToolTip(
+            "libvorbis -qscale:a. -1 = smallest/worst, 10 = largest/best. "
+            "4 is a good default (~128 kbps)."
+        )
+        ogg_quality_box.addWidget(self.ogg_quality_spin)
+        ogg_quality_hint = QLabel("Ogg quality (-1 worst … 10 best)")
+        ogg_quality_hint.setStyleSheet("font-size: 10px; color: gray;")
+        ogg_quality_box.addWidget(ogg_quality_hint)
+        ogg_quality_box.addStretch()
+        form.addRow("", ogg_quality_box)
+        self.convert_ogg_check.toggled.connect(self.ogg_quality_spin.setEnabled)
+        self.ogg_quality_spin.setEnabled(self.convert_ogg_check.isChecked())
 
         self.skip_generated_check = QCheckBox("Skip already generated")
         self.skip_generated_check.setChecked(SKIP_ALREADY_GENERATED)
@@ -3701,7 +3724,7 @@ class GenerateWindow(QMainWindow):
 
     def _save_config_edits(self):
         """Apply edited configuration fields back to the module-level settings."""
-        global BASE_URL, ENGINE, MODEL_SIZE, RETRY_COUNT, RETRY_DELAY, CONVERT_TO_OGG
+        global BASE_URL, ENGINE, MODEL_SIZE, RETRY_COUNT, RETRY_DELAY, CONVERT_TO_OGG, OGG_QUALITY
         global ENABLE_TIMEOUT_SAFEGUARD, TIMEOUT_MAX_SECONDS, TIMEOUT_MULTIPLIER
         global SKIP_ALREADY_GENERATED, LIMIT, USE_VOICE_FALLBACK
         global FALLBACK_VOICE_MALE, FALLBACK_VOICE_FEMALE, FALLBACK_VOICE_NEUTRAL
@@ -3713,6 +3736,7 @@ class GenerateWindow(QMainWindow):
         RETRY_COUNT = d.retry_count_spin.value()
         RETRY_DELAY = d.retry_delay_spin.value()
         CONVERT_TO_OGG = d.convert_ogg_check.isChecked()
+        OGG_QUALITY = d.ogg_quality_spin.value()
         ENABLE_TIMEOUT_SAFEGUARD = d.timeout_enable_check.isChecked()
         TIMEOUT_MAX_SECONDS = d.timeout_max_spin.value()
         TIMEOUT_MULTIPLIER = d.timeout_multiplier_spin.value()
@@ -3727,6 +3751,7 @@ class GenerateWindow(QMainWindow):
         self.statusBar().showMessage("Configuration saved.", 3000)
         self._update_config_summary()
         QTimer.singleShot(0, self.health_worker.check_now)
+        self.config_dialog.close()
 
     def _on_health_checked(self, reachable: bool, info: dict):
         """Update the health dot color and tooltip from a /health poll result."""
