@@ -12,12 +12,12 @@ without touching code.
 from __future__ import annotations
 
 from .base import TtsProvider
-from .omnivoice import OmniVoiceServerProvider
+from .omnivoice import OmniVoiceProvider
 from .voicebox import VoiceboxProvider
 
 _PROVIDERS = {
     "voicebox": VoiceboxProvider,
-    "omnivoice": OmniVoiceServerProvider,
+    "omnivoice": OmniVoiceProvider,
 }
 
 
@@ -27,7 +27,7 @@ def create_provider(name: str, config: dict) -> TtsProvider:
         name: one of _PROVIDERS' keys ("voicebox", "omnivoice").
         config: kwargs forwarded straight to the provider's constructor,
             e.g. for voicebox: {"base_url": ..., "engine": ..., "model_size": ...}
-            for omnivoice: {"base_url": ..., "voices_dir": ...}
+            for omnivoice: {"voices_dir": ..., "profiles_dir": ..., "device_map": ...}
 
     Raises:
         ValueError: if name isn't a known provider.

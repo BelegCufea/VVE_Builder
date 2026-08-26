@@ -1,31 +1,41 @@
 """
-OmniVoice-server provider.
+OmniVoice direct provider.
 
-Targets maemreyo/omnivoice-server (an OpenAI-compatible HTTP wrapper around
-k2-fsa/OmniVoice): POST /v1/audio/speech for generation, /v1/voices/profiles
-for profile CRUD. Confirmed against the project's published API reference.
+Runs k2-fsa/omnivoice's Python model in-process (torch/CUDA loaded inside
+this app), instead of going through maemreyo/omnivoice-server. That HTTP
+wrapper project last committed 3 months ago while omnivoice itself ships
+every few days -- staying on it meant being permanently stuck behind
+whatever omnivoice version the wrapper happened to pin, with real
+abandonment risk. Talking to omnivoice directly means `pip install -U
+omnivoice` alone gets you the latest model; there's no second project's
+maintenance to depend on. See TtsProvider's docstring for why this
+swap only touched this one file.
 
-Key differences from Voicebox that shaped this file (see planning notes):
+Key differences from both Voicebox and the old server-based approach:
 
-1. Generation is a single blocking request -- POST /v1/audio/speech returns
-   the finished audio directly. There's no gen_id, no polling, no mid-flight
-   cancel. generate() therefore does the whole job itself and returns a
-   GenerationJob with done=True already; wait() is a no-op; cancel() is
-   unsupported (see capabilities).
+1. There is no server and no HTTP call at all -- generate() runs
+   inference directly in this process. Still a single blocking call
+   from the caller's perspective (same as the server was), so
+   capabilities are unchanged: no cancel, no mid-job progress.
 
-2. A cloned profile is invoked by passing voice="clone:<profile_id>" to
-   /v1/audio/speech, per GET /v1/voices' documented id format.
+2. "Profile" = a saved VoiceClonePrompt (omnivoice's own mechanism for
+   "encode a reference once, reuse across sessions" -- see the
+   Python API docs). ensure_profile() encodes the chosen reference
+   sample once and writes a `<profile_id>.pt` file to profiles_dir;
+   generate() loads that instead of touching the raw wav again. This
+   is a better fit for "profile" than the server's per-call ref_audio
+   upload was, and it's entirely local -- no server-side state to
+   drift out of sync with.
 
-3. Profile creation takes exactly ONE ref_audio + ref_text pair, unlike
-   Voicebox which composes a profile from many numbered samples. When
-   VOICES_DIR has multiple samples for a voice (e.g. "Jaheira 1.wav",
-   "Jaheira 2.wav"), ensure_profile() picks the longest one by actual audio
-   duration (read via the stdlib wave module, cached by path+size+mtime so
-   repeat syncs don't re-open every file), falling back to transcript
-   length if a file can't be read as a plain PCM wav.
+3. The model itself is loaded lazily, once, on first use (not in
+   __init__) -- constructing this provider is cheap; the first
+   generate()/ensure_profile() call is the one that pays GPU/model
+   load time.
 
-4. Since audio comes back as the direct response body, fetch_audio() just
-   writes out bytes already held on the job -- no second network call.
+4. Same single-reference-sample constraint as before: when VOICES_DIR
+   has multiple samples for a voice, ensure_profile() still picks the
+   longest one by actual audio duration (unchanged logic, moved over
+   verbatim from the server-based provider).
 """
 
 from __future__ import annotations
@@ -35,8 +45,6 @@ import logging
 import wave
 from pathlib import Path
 from typing import Optional
-
-import requests
 
 from .base import (
     GenerationJob,
@@ -50,6 +58,7 @@ from .util import CaseInsensitiveDict
 logger = logging.getLogger("generate_gui")
 
 DURATION_CACHE_FILENAME = ".omnivoice_duration_cache.json"
+PROMPT_FILE_SUFFIX = ".pt"
 
 
 class _DurationCache:
@@ -67,7 +76,8 @@ class _DurationCache:
                 self._data = {}
         self._dirty = False
 
-    def get_duration(self, wav_path: Path) -> Optional[float]:
+    def get_duration(self, wav_path) -> Optional[float]:
+        wav_path = Path(wav_path)
         try:
             stat = wav_path.stat()
         except OSError:
@@ -112,9 +122,9 @@ def _read_wav_duration(wav_path: Path) -> Optional[float]:
 
 
 def _pick_reference_sample(files: list, voices_dir: str) -> dict:
-    """Chooses the sample to use as the single reference OmniVoice-server
-    needs: longest by actual audio duration where readable, otherwise
-    longest transcript as a fallback proxy."""
+    """Chooses the sample to use as the single reference omnivoice's
+    voice-cloning API needs: longest by actual audio duration where
+    readable, otherwise longest transcript as a fallback proxy."""
     cache = _DurationCache(Path(voices_dir) / DURATION_CACHE_FILENAME)
 
     scored = []
@@ -137,28 +147,63 @@ def _pick_reference_sample(files: list, voices_dir: str) -> dict:
     return max(files, key=lambda f: len(f.get("transcript", "")))
 
 
-class OmniVoiceServerProvider(TtsProvider):
+def _sanitize_profile_id(voice_name: str) -> str:
+    """Voice names from VOICES_DIR can have spaces/other characters --
+    normalize to something safe as a filename stem."""
+    return "".join(c if c.isalnum() or c in "-_" else "-" for c in voice_name.strip().lower())
+
+
+class OmniVoiceProvider(TtsProvider):
     def __init__(
         self,
-        base_url: str,
         voices_dir: str,
-        api_key: str = "",
-        response_format: str = "wav",
-        extra_speech_params: Optional[dict] = None,
+        profiles_dir: str = "omnivoice-profiles",
+        model_name: str = "k2-fsa/OmniVoice",
+        device_map: str = "cuda:0",
+        dtype: str = "float16",
+        extra_generate_params: Optional[dict] = None,
     ):
-        self.base_url = base_url.rstrip("/")
         self.voices_dir = voices_dir
-        self.api_key = api_key
-        self.response_format = response_format
-        # passthrough for num_step/guidance_scale/etc. if you ever want to
+        self.profiles_dir = Path(profiles_dir)
+        self.model_name = model_name
+        self.device_map = device_map
+        self.dtype = dtype
+        # passthrough for num_step/speed/duration/etc. if you ever want to
         # tune quality vs. speed later -- kept generic on purpose
-        self.extra_speech_params = extra_speech_params or {}
+        self.extra_generate_params = extra_generate_params or {}
 
-    def _headers(self) -> dict:
-        headers = {}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-        return headers
+        self._model = None
+        # Loaded VoiceClonePrompt objects, keyed by profile_ref (the .pt
+        # path) -- avoids re-loading the same prompt from disk for every
+        # line of dialogue a voice has in a batch run.
+        self._prompt_cache: dict = {}
+
+    def _ensure_model_loaded(self):
+        """Lazy singleton load -- constructing this provider is cheap;
+        the first real call pays GPU/model load time, not __init__."""
+        if self._model is not None:
+            return
+        import torch
+        from omnivoice import OmniVoice
+
+        logger.info(f"Loading OmniVoice model '{self.model_name}' onto {self.device_map} ({self.dtype})...")
+        torch_dtype = getattr(torch, self.dtype)
+        self._model = OmniVoice.from_pretrained(
+            self.model_name, device_map=self.device_map, dtype=torch_dtype,
+        )
+        logger.info("✓ OmniVoice model loaded.")
+
+    def _profile_path(self, profile_id: str) -> Path:
+        return self.profiles_dir / f"{profile_id}{PROMPT_FILE_SUFFIX}"
+
+    def _load_prompt(self, provider_ref: str):
+        cached = self._prompt_cache.get(provider_ref)
+        if cached is not None:
+            return cached
+        from omnivoice import VoiceClonePrompt
+        prompt = VoiceClonePrompt.load(provider_ref)
+        self._prompt_cache[provider_ref] = prompt
+        return prompt
 
     @property
     def capabilities(self) -> ProviderCapabilities:
@@ -172,122 +217,91 @@ class OmniVoiceServerProvider(TtsProvider):
     # -- profiles ----------------------------------------------------
 
     def list_profiles(self) -> tuple[dict, dict]:
-        """GET /v1/voices, filtered down to type == "clone" entries.
-        There's no zero-sample state here the way Voicebox has -- a
-        profile either exists (with its one reference) or it doesn't --
-        so the second map is always empty. Kept in the return shape only
-        so callers written against the interface don't need a special case."""
-        resp = requests.get(f"{self.base_url}/v1/voices", headers=self._headers())
-        resp.raise_for_status()
-        data = resp.json()
-
+        """Scans profiles_dir for `<name>.pt` files. There's no
+        zero-sample state the way Voicebox has -- a profile either
+        exists on disk or it doesn't -- so the second map is always
+        empty, kept only so callers don't need a special case."""
         profile_map = CaseInsensitiveDict()
-        for voice in data.get("voices", []):
-            if voice.get("type") == "clone" and voice.get("profile_id"):
-                profile_map[voice["profile_id"]] = voice["profile_id"]
-
+        if self.profiles_dir.exists():
+            for pt_file in self.profiles_dir.glob(f"*{PROMPT_FILE_SUFFIX}"):
+                profile_map[pt_file.stem] = str(pt_file)
         return profile_map, CaseInsensitiveDict()
 
     def ensure_profile(self, source: ProfileSource) -> Optional[ProfileInfo]:
-        """POST /v1/voices/profiles with a single reference sample.
-
-        Picks the longest sample from source.files as the reference -- see
-        module docstring point 3. overwrite=true so this doubles as
-        "create or update," matching Voicebox's ensure_profile semantics
-        (safe to call whether or not the profile already exists).
-        """
+        """Encodes the longest local sample into a VoiceClonePrompt and
+        saves it to profiles_dir. Safe to call whether or not the
+        profile already exists (overwrites), matching Voicebox's
+        ensure_profile semantics."""
         if not source.files:
-            logger.warning(f"⚠️ No local samples for {source.voice_name}, cannot provision on OmniVoice-server.")
+            logger.warning(f"⚠️ No local samples for {source.voice_name}, cannot provision an OmniVoice profile.")
             return None
 
+        self._ensure_model_loaded()
         chosen = _pick_reference_sample(source.files, self.voices_dir)
         profile_id = _sanitize_profile_id(source.voice_name)
+        profile_path = self._profile_path(profile_id)
 
         try:
-            with open(chosen["wav_path"], "rb") as f:
-                resp = requests.post(
-                    f"{self.base_url}/v1/voices/profiles",
-                    headers=self._headers(),
-                    data={
-                        "profile_id": profile_id,
-                        "ref_text": chosen["transcript"],
-                        "overwrite": "true",
-                    },
-                    files={"ref_audio": f},
-                )
-            resp.raise_for_status()
-        except requests.exceptions.RequestException as e:
+            self.profiles_dir.mkdir(parents=True, exist_ok=True)
+            prompt = self._model.create_voice_clone_prompt(
+                ref_audio=str(chosen["wav_path"]), ref_text=chosen["transcript"],
+            )
+            prompt.save(str(profile_path))
+        except Exception as e:
             logger.error(f"❌ Error creating OmniVoice profile for {source.voice_name}: {e}")
             return None
+
+        self._prompt_cache.pop(str(profile_path), None)  # drop any stale cached copy
 
         if len(source.files) > 1:
             logger.info(
                 f"ℹ️ {source.voice_name} has {len(source.files)} local samples; "
-                f"OmniVoice-server profiles use a single reference, so the "
+                f"OmniVoice profiles use a single reference, so the "
                 f"longest one (#{chosen['number']}) was used."
             )
 
-        return ProfileInfo(name=source.voice_name, provider_ref=profile_id, has_samples=True)
+        return ProfileInfo(name=source.voice_name, provider_ref=str(profile_path), has_samples=True)
 
     def delete_profile(self, provider_ref: str) -> tuple[bool, str]:
         try:
-            resp = requests.delete(f"{self.base_url}/v1/voices/profiles/{provider_ref}", headers=self._headers())
-            if resp.status_code == 200:
-                return True, "Profile deleted successfully"
-            return False, f"Deletion returned: {resp.status_code}"
-        except Exception as e:
+            Path(provider_ref).unlink(missing_ok=True)
+            self._prompt_cache.pop(provider_ref, None)
+            return True, "Profile deleted successfully"
+        except OSError as e:
             return False, f"Deletion error: {e}"
 
     # -- generation ----------------------------------------------------
 
     def generate(self, profile_ref: str, text: str) -> GenerationJob:
-        """POST /v1/audio/speech. This is the whole job -- audio comes
-        back in the response body, so the returned GenerationJob is
+        """Runs inference directly. This is the whole job -- the audio
+        array is ready the moment this returns, so the GenerationJob is
         already done=True. wait() has nothing left to do."""
-        payload = {
-            "model": "omnivoice",
-            "input": text,
-            "voice": f"clone:{profile_ref}",
-            "response_format": self.response_format,
-            **self.extra_speech_params,
-        }
         try:
-            resp = requests.post(
-                f"{self.base_url}/v1/audio/speech",
-                headers=self._headers(),
-                json=payload,
+            self._ensure_model_loaded()
+            prompt = self._load_prompt(profile_ref)
+            audio_list = self._model.generate(
+                text=text, voice_clone_prompt=prompt, **self.extra_generate_params,
             )
-            resp.raise_for_status()
-        except requests.exceptions.RequestException as e:
+        except Exception as e:
             job = GenerationJob(provider_ref=profile_ref, done=True, succeeded=False)
             job.error = str(e)
             return job
 
+        audio_array = audio_list[0]  # np.ndarray, shape (T,), 24 kHz
         job = GenerationJob(provider_ref=profile_ref, done=True, succeeded=True)
-        job._audio_bytes = resp.content
-        # OmniVoice-server doesn't report a generated-audio duration in the
-        # response headers/body, unlike Voicebox's SSE "duration" field.
-        job.audio_duration = 0.0
+        job._audio_array = audio_array
+        job.audio_duration = len(audio_array) / 24000.0
         return job
 
     def wait(self, job: GenerationJob) -> GenerationJob:
-        """No-op: generate() already ran the request to completion."""
+        """No-op: generate() already ran inference to completion."""
         return job
 
     def fetch_audio(self, job: GenerationJob, output_path: str) -> None:
-        """Writes out the bytes already captured in generate() -- no
-        second network round-trip needed, unlike Voicebox's separate
-        download step."""
-        audio_bytes = job._audio_bytes
-        if audio_bytes is None:
+        """Writes out the audio array already held on the job -- no
+        network involved at all for this provider."""
+        audio_array = job._audio_array
+        if audio_array is None:
             raise RuntimeError("No audio available on this job -- generate() may have failed.")
-        with open(output_path, "wb") as f:
-            f.write(audio_bytes)
-
-
-def _sanitize_profile_id(voice_name: str) -> str:
-    """omnivoice-server profile_id must be alphanumeric/dash/underscore
-    per its API reference -- voice names from VOICES_DIR can have spaces
-    or other characters, so normalize them the same way
-    create_profile_package() already does for Voicebox's zip filenames."""
-    return "".join(c if c.isalnum() or c in "-_" else "-" for c in voice_name.strip().lower())
+        import soundfile as sf
+        sf.write(output_path, audio_array, 24000)

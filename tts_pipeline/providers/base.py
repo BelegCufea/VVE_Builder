@@ -73,10 +73,12 @@ class GenerationJob:
     # local path to raw audio once fetch_audio() has been called, if the
     # provider chooses to cache it there
     _audio_path: Optional[Path] = field(default=None, repr=False)
-    # raw audio bytes, for providers (e.g. OmniVoice-server) whose
-    # generate() call returns the finished audio directly rather than a
-    # separate downloadable resource
+    # raw audio bytes, for providers whose generate() call returns the
+    # finished audio directly rather than a separate downloadable resource
     _audio_bytes: Optional[bytes] = field(default=None, repr=False)
+    # raw audio array (np.ndarray), for providers that run inference
+    # in-process rather than over HTTP (e.g. OmniVoiceProvider)
+    _audio_array: Optional[object] = field(default=None, repr=False)
 
 
 class TtsProvider(ABC):
@@ -87,7 +89,23 @@ class TtsProvider(ABC):
     cancel_generation -> cancel, download_audio -> fetch_audio,
     get_all_profiles -> list_profiles) so porting Voicebox's current
     logic into VoiceboxProvider is close to a rename, not a rewrite.
+
+    base_url / engine / model_size are declared here, defaulting to
+    None, even though not every provider uses all three (an in-process
+    provider like OmniVoiceProvider has no base_url at all; a provider
+    with no engine/model concept leaves those None too). Declaring them
+    on the interface itself -- rather than leaving them as attributes
+    only some concrete subclasses happen to define -- means callers
+    (the GUI's settings panel, health checks) can check `is not None`
+    instead of `hasattr`, and every provider satisfies the type a type
+    checker sees for `self.tts_provider: TtsProvider`, with no
+    per-call-site attribute-existence workarounds needed as new
+    providers are added later.
     """
+
+    base_url: Optional[str] = None
+    engine: Optional[str] = None
+    model_size: Optional[str] = None
 
     @property
     @abstractmethod

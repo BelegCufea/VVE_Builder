@@ -49,7 +49,7 @@ from tts_pipeline.profile_reconciliation import reconcile_profiles
 # constructor) are defined further down, once VOICES_DIR and
 # PROFILE_PACKAGES_DIR exist, so they can reference those instead of
 # duplicating the paths.
-TTS_PROVIDER = "omnivoice"
+TTS_PROVIDER = "voicebox"
 
 # Generation Timeout Safeguards
 ENABLE_TIMEOUT_SAFEGUARD = True
@@ -122,14 +122,18 @@ VOICEBOX_CONFIG = {
     "profile_packages_dir": PROFILE_PACKAGES_DIR,
 }
 
-# Config forwarded straight to OmniVoiceServerProvider's constructor when
-# TTS_PROVIDER == "omnivoice". voices_dir doubles as where the sample
-# duration cache is written (see tts_pipeline/providers/omnivoice.py).
+# Config forwarded straight to OmniVoiceProvider's constructor when
+# TTS_PROVIDER == "omnivoice". Runs the omnivoice model in-process on
+# this machine's GPU -- no server, no base_url. voices_dir doubles as
+# where the sample duration cache is written (see
+# tts_pipeline/providers/omnivoice.py); profiles_dir is where saved
+# voice-clone prompts (one .pt file per voice) are kept.
 OMNIVOICE_CONFIG = {
-    "base_url": "http://127.0.0.1:8880",
     "voices_dir": VOICES_DIR,
-    "api_key": "",
-    "response_format": "wav",
+    "profiles_dir": "omnivoice-profiles",
+    "model_name": "k2-fsa/OmniVoice",
+    "device_map": "cuda:0",   # "cpu" / "mps" / "xpu" if not running on an NVIDIA GPU
+    "dtype": "float16",
 }
 
 
@@ -1667,9 +1671,11 @@ def estimate_generation_time(regressor, chars):
 class HealthCheckWorker(QObject):
     """
     Periodically polls the active provider's /health endpoint on a
-    background thread. Both Voicebox and omnivoice-server document a
-    GET /health endpoint, so this stays provider-agnostic via
-    provider.base_url rather than needing its own interface method.
+    background thread, when it has one (an HTTP-based provider like
+    Voicebox). For an in-process provider with no server at all (e.g.
+    OmniVoiceProvider, which has no base_url), there's nothing to poll --
+    check_now() emits a fixed "n/a" reading once and the timer still
+    ticks harmlessly with nothing to do each time.
 
     Runs its own QTimer (created after moveToThread, so it lives on the
     worker thread) and emits health_checked(reachable, info) on every tick,
@@ -1692,6 +1698,9 @@ class HealthCheckWorker(QObject):
 
     def check_now(self):
         """Perform a single health check immediately."""
+        if self.provider.base_url is None:
+            self.health_checked.emit(True, {"status": "n/a (in-process provider, no server)"})
+            return
         try:
             resp = requests.get(f"{self.provider.base_url}/health", timeout=5)
             resp.raise_for_status()
@@ -2493,33 +2502,35 @@ class GenerateWindow(QMainWindow):
         config_layout = QGridLayout(config_group)
         row = 0
 
-        # Provider server URL + health dot. Label says which backend is
-        # active since TTS_PROVIDER picks it (see top-of-file config) --
-        # there's no provider dropdown here yet, per current scope.
-        config_layout.addWidget(QLabel(f"<b>{TTS_PROVIDER.title()} URL:</b>"), row, 0)
-        provider_base_url = getattr(self.tts_provider, "base_url", "")
-        self.base_url_edit = QLineEdit(provider_base_url)
-        config_layout.addWidget(self.base_url_edit, row, 1)
-        self.health_dot = QLabel()
-        self.health_dot.setFixedSize(14, 14)
-        self.health_dot.setStyleSheet("background-color: gray; border-radius: 7px;")
-        self.health_dot.setToolTip(f"Checking {TTS_PROVIDER} API health...")
-        config_layout.addWidget(self.health_dot, row, 2)
-        row += 1
+        # Provider server URL + health dot -- only shown for providers
+        # that actually have a server to point at (Voicebox). An
+        # in-process provider like OmniVoiceProvider leaves base_url as
+        # None (declared on TtsProvider itself, see base.py), so this
+        # section is skipped rather than shown empty/inert.
+        self.base_url_edit = None
+        self.health_dot = None
+        if self.tts_provider.base_url is not None:
+            config_layout.addWidget(QLabel(f"<b>{TTS_PROVIDER.title()} URL:</b>"), row, 0)
+            self.base_url_edit = QLineEdit(self.tts_provider.base_url)
+            config_layout.addWidget(self.base_url_edit, row, 1)
+            self.health_dot = QLabel()
+            self.health_dot.setFixedSize(14, 14)
+            self.health_dot.setStyleSheet("background-color: gray; border-radius: 7px;")
+            self.health_dot.setToolTip(f"Checking {TTS_PROVIDER} API health...")
+            config_layout.addWidget(self.health_dot, row, 2)
+            row += 1
 
-        # Engine / model size only apply to Voicebox (OmniVoice-server has
-        # no equivalent knobs) -- hidden entirely for other providers
-        # rather than shown-but-inert.
+        # Engine / model size only apply to Voicebox (OmniVoice has no
+        # equivalent knobs, so they stay None there) -- hidden entirely
+        # for other providers rather than shown-but-inert.
         self.engine_edit = None
         self.model_size_edit = None
-        engine_name = getattr(self.tts_provider, "engine", None)
-        model_size_name = getattr(self.tts_provider, "model_size", None)
-        if engine_name is not None or model_size_name is not None:
+        if self.tts_provider.engine is not None:
             config_layout.addWidget(QLabel("<b>Engine:</b>"), row, 0)
-            self.engine_edit = QLineEdit(str(engine_name or ""))
+            self.engine_edit = QLineEdit(self.tts_provider.engine)
             config_layout.addWidget(self.engine_edit, row, 1)
             config_layout.addWidget(QLabel("<b>Model size:</b>"), row, 2)
-            self.model_size_edit = QLineEdit(str(model_size_name or ""))
+            self.model_size_edit = QLineEdit(self.tts_provider.model_size or "")
             config_layout.addWidget(self.model_size_edit, row, 3)
             row += 1
             engine_warning = QLabel(
@@ -3015,13 +3026,12 @@ class GenerateWindow(QMainWindow):
         global SKIP_ALREADY_GENERATED, LIMIT, USE_VOICE_FALLBACK
         global FALLBACK_VOICE_MALE, FALLBACK_VOICE_FEMALE, FALLBACK_VOICE_NEUTRAL
 
-        if hasattr(self.tts_provider, "base_url"):
-            setattr(self.tts_provider, "base_url", self.base_url_edit.text().strip())
-        if self.engine_edit is not None and hasattr(self.tts_provider, "engine"):
-            setattr(self.tts_provider, "engine", self.engine_edit.text().strip())
-        if self.model_size_edit is not None and hasattr(self.tts_provider, "model_size"):
-            setattr(self.tts_provider, "model_size", self.model_size_edit.text().strip())
-
+        if self.base_url_edit is not None:
+            self.tts_provider.base_url = self.base_url_edit.text().strip()
+        if self.engine_edit is not None:
+            self.tts_provider.engine = self.engine_edit.text().strip()
+        if self.model_size_edit is not None:
+            self.tts_provider.model_size = self.model_size_edit.text().strip()
         RETRY_COUNT = self.retry_count_spin.value()
         RETRY_DELAY = self.retry_delay_spin.value()
         CONVERT_TO_OGG = self.convert_ogg_check.isChecked()
@@ -3040,7 +3050,11 @@ class GenerateWindow(QMainWindow):
         QTimer.singleShot(0, self.health_worker.check_now)
 
     def _on_health_checked(self, reachable: bool, info: dict):
-        """Update the health dot color and tooltip from a /health poll result."""
+        """Update the health dot color and tooltip from a /health poll
+        result. A no-op when the active provider has no health dot at
+        all (in-process providers like OmniVoiceProvider)."""
+        if self.health_dot is None:
+            return
         if reachable:
             color = "#2ecc71"
             tooltip = "Reachable\n" + "\n".join(f"{k}: {v}" for k, v in info.items())

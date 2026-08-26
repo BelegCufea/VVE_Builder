@@ -2,3 +2,8 @@ requests
 runstats
 pandas>=2.0
 PySide6>=6.5
+torch
+torchaudio
+omnivoice
+soundfile
+scipy
