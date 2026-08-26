@@ -30,12 +30,13 @@ from runstats import Regression
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal, QTimer
+from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt
 from PySide6.QtGui import QFont, QTextCursor, QColor
 from PySide6.QtWidgets import (
-    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
-    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar, QSizePolicy,
+    QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
+    QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
+    QDialog, QTabWidget, QFormLayout, QDialogButtonBox, QFrame,
 )
 
 # ============================================================================
@@ -2995,6 +2996,190 @@ class GenerationWorker(QObject):
             self.failed.emit(str(e))
 
 # ============================================================================
+# Configuration Dialog
+# ============================================================================
+
+class ConfigDialog(QDialog):
+    """
+    Modal dialog holding every user-editable setting, grouped into tabs.
+
+    Replaces the old single giant "Configuration" box on the main window.
+    All the same fields are still here (nothing was removed) - they are
+    just organized into logical tabs:
+
+        Connection  - Voicebox URL/health, engine, model size
+        Generation  - retry, timeout safeguard, limit, ogg conversion,
+                      skip-already-generated
+        Voice Fallback - enable/refresh + male/female/neutral combos
+
+    The dialog owns the widgets; GenerateWindow reaches them via
+    ``self.config_dialog.<widget_name>`` so the rest of the app's code
+    barely had to change.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("Configuration")
+        self.setMinimumWidth(480)
+        self._build_ui()
+
+    def _build_ui(self):
+        outer = QVBoxLayout(self)
+
+        tabs = QTabWidget()
+        outer.addWidget(tabs)
+
+        tabs.addTab(self._build_connection_tab(), "🔌 Connection")
+        tabs.addTab(self._build_generation_tab(), "⚙️ Generation")
+        tabs.addTab(self._build_fallback_tab(), "🗣️ Voice Fallback")
+
+        # ---------- Dialog buttons ----------
+        buttons = QDialogButtonBox(QDialogButtonBox.StandardButton.Save | QDialogButtonBox.StandardButton.Close)
+        buttons.button(QDialogButtonBox.StandardButton.Save).setText("💾 Save Config")
+        self.save_config_btn = buttons.button(QDialogButtonBox.StandardButton.Save)
+        buttons.rejected.connect(self.close)
+        outer.addWidget(buttons)
+        self._button_box = buttons
+
+    # ------------------------------------------------------------------
+    def _build_connection_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # Note: the health-status dot lives on the main window's compact
+        # configuration bar (it's created here but re-parented there in
+        # GenerateWindow._build_ui, since it needs to stay visible even
+        # when this dialog is closed).
+        self.base_url_edit = QLineEdit(BASE_URL)
+        self.health_dot = QLabel()
+        self.health_dot.setFixedSize(14, 14)
+        self.health_dot.setStyleSheet("background-color: gray; border-radius: 7px;")
+        self.health_dot.setToolTip("Checking Voicebox API health...")
+        form.addRow("<b>Voicebox URL:</b>", self.base_url_edit)
+
+        self.engine_edit = QLineEdit(ENGINE)
+        form.addRow("<b>Engine:</b>", self.engine_edit)
+
+        self.model_size_edit = QLineEdit(MODEL_SIZE)
+        form.addRow("<b>Model size:</b>", self.model_size_edit)
+
+        engine_warning = QLabel(
+            "⚠️ Engine/model size are free text - Voicebox's /generate and "
+            "/models/status use different naming for the same model. Check "
+            "/models/status before changing this."
+        )
+        engine_warning.setWordWrap(True)
+        engine_warning.setStyleSheet("color: #b8860b; font-size: 10px;")
+        form.addRow(engine_warning)
+
+        return tab
+
+    # ------------------------------------------------------------------
+    def _build_generation_tab(self) -> QWidget:
+        tab = QWidget()
+        form = QFormLayout(tab)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        # Retry
+        retry_box = QHBoxLayout()
+        self.retry_count_spin = QSpinBox()
+        self.retry_count_spin.setRange(0, 20)
+        self.retry_count_spin.setSuffix(" x times")
+        self.retry_count_spin.setValue(RETRY_COUNT)
+        self.retry_delay_spin = QDoubleSpinBox()
+        self.retry_delay_spin.setRange(0.0, 120.0)
+        self.retry_delay_spin.setSingleStep(0.5)
+        self.retry_delay_spin.setSuffix(" s delay")
+        self.retry_delay_spin.setValue(RETRY_DELAY)
+        retry_box.addWidget(self.retry_count_spin)
+        retry_box.addWidget(self.retry_delay_spin)
+        form.addRow("<b>Retry:</b>", retry_box)
+
+        # Timeout safeguard
+        self.timeout_enable_check = QCheckBox("Enabled")
+        self.timeout_enable_check.setChecked(ENABLE_TIMEOUT_SAFEGUARD)
+        form.addRow("<b>Timeout safeguard:</b>", self.timeout_enable_check)
+
+        timeout_box = QHBoxLayout()
+        self.timeout_max_spin = QSpinBox()
+        self.timeout_max_spin.setRange(10, 7200)
+        self.timeout_max_spin.setSuffix(" s max")
+        self.timeout_max_spin.setValue(TIMEOUT_MAX_SECONDS)
+        self.timeout_multiplier_spin = QDoubleSpinBox()
+        self.timeout_multiplier_spin.setRange(1.0, 10.0)
+        self.timeout_multiplier_spin.setSingleStep(0.5)
+        self.timeout_multiplier_spin.setSuffix(" x estimate")
+        self.timeout_multiplier_spin.setValue(TIMEOUT_MULTIPLIER)
+        timeout_box.addWidget(self.timeout_max_spin)
+        timeout_box.addWidget(self.timeout_multiplier_spin)
+        form.addRow("", timeout_box)
+
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.Shape.HLine)
+        form.addRow(sep1)
+
+        # Ogg / skip already generated
+        self.convert_ogg_check = QCheckBox("Convert generated audio to Ogg")
+        self.convert_ogg_check.setChecked(CONVERT_TO_OGG)
+        form.addRow("<b>Audio:</b>", self.convert_ogg_check)
+
+        self.skip_generated_check = QCheckBox("Skip already generated")
+        self.skip_generated_check.setChecked(SKIP_ALREADY_GENERATED)
+        form.addRow("", self.skip_generated_check)
+
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.Shape.HLine)
+        form.addRow(sep2)
+
+        # Limit
+        self.limit_spin = QSpinBox()
+        self.limit_spin.setRange(0, 1_000_000)
+        self.limit_spin.setValue(LIMIT)
+        self.limit_spin.setSpecialValueText("No limit")
+        form.addRow("<b>Limit:</b>", self.limit_spin)
+        limit_hint = QLabel("Max jobs to process this run. Set to 0 to remove the limit.")
+        limit_hint.setWordWrap(True)
+        limit_hint.setStyleSheet("font-size: 10px; color: gray;")
+        form.addRow("", limit_hint)
+
+        return tab
+
+    # ------------------------------------------------------------------
+    def _build_fallback_tab(self) -> QWidget:
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        form = QFormLayout()
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
+
+        enable_row = QHBoxLayout()
+        self.fallback_enable_check = QCheckBox("Enabled")
+        self.fallback_enable_check.setChecked(USE_VOICE_FALLBACK)
+        self.refresh_voices_btn = QPushButton("🔄 Refresh voices")
+        enable_row.addWidget(self.fallback_enable_check)
+        enable_row.addStretch()
+        enable_row.addWidget(self.refresh_voices_btn)
+        form.addRow("<b>Voice fallback:</b>", enable_row)
+
+        self.fallback_male_combo = QComboBox()
+        self.fallback_female_combo = QComboBox()
+        self.fallback_neutral_combo = QComboBox()
+
+        for label, combo, current in [
+            ("Male:", self.fallback_male_combo, FALLBACK_VOICE_MALE),
+            ("Female:", self.fallback_female_combo, FALLBACK_VOICE_FEMALE),
+            ("Neutral:", self.fallback_neutral_combo, FALLBACK_VOICE_NEUTRAL),
+        ]:
+            combo.setEditable(True)
+            combo.addItem(current)
+            form.addRow(label, combo)
+
+        layout.addLayout(form)
+        layout.addStretch()
+        return tab
+
+
+# ============================================================================
 # Main Application Window
 # ============================================================================
 
@@ -3079,133 +3264,22 @@ class GenerateWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # ---------- Configuration ----------
-        config_group = QGroupBox("⚙️ Configuration")
-        config_layout = QGridLayout(config_group)
-        row = 0
+        # ---------- Configuration (compact bar + dialog) ----------
+        self.config_dialog = ConfigDialog(self)
+        self.config_dialog.save_config_btn.clicked.connect(self._save_config_edits)
+        self.config_dialog.refresh_voices_btn.clicked.connect(self._refresh_fallback_voices)
 
-        # Voicebox URL + health dot
-        config_layout.addWidget(QLabel("<b>Voicebox URL:</b>"), row, 0)
-        self.base_url_edit = QLineEdit(BASE_URL)
-        config_layout.addWidget(self.base_url_edit, row, 1)
-        self.health_dot = QLabel()
-        self.health_dot.setFixedSize(14, 14)
-        self.health_dot.setStyleSheet("background-color: gray; border-radius: 7px;")
-        self.health_dot.setToolTip("Checking Voicebox API health...")
-        config_layout.addWidget(self.health_dot, row, 2)
-        row += 1
-
-        # Engine / model size (free text — Voicebox's /generate and /models/status
-        # use inconsistent naming, so there's no reliable list to build a combobox from)
-        config_layout.addWidget(QLabel("<b>Engine:</b>"), row, 0)
-        self.engine_edit = QLineEdit(ENGINE)
-        config_layout.addWidget(self.engine_edit, row, 1)
-        config_layout.addWidget(QLabel("<b>Model size:</b>"), row, 2)
-        self.model_size_edit = QLineEdit(MODEL_SIZE)
-        config_layout.addWidget(self.model_size_edit, row, 3)
-        row += 1
-        engine_warning = QLabel(
-            "⚠️ Free text — Voicebox's /generate and /models/status use different "
-            "naming for the same model. Check /models/status before changing this."
-        )
-        engine_warning.setWordWrap(True)
-        engine_warning.setStyleSheet("color: #b8860b; font-size: 10px;")
-        config_layout.addWidget(engine_warning, row, 0, 1, 4)
-        row += 1
-
-        # Retry + timeout safeguard, grouped
-        config_layout.addWidget(QLabel("<b>Retry:</b>"), row, 0)
-        retry_box = QHBoxLayout()
-        self.retry_count_spin = QSpinBox()
-        self.retry_count_spin.setRange(0, 20)
-        self.retry_count_spin.setValue(RETRY_COUNT)
-        self.retry_delay_spin = QDoubleSpinBox()
-        self.retry_delay_spin.setRange(0.0, 120.0)
-        self.retry_delay_spin.setSingleStep(0.5)
-        self.retry_delay_spin.setSuffix(" s delay")
-        self.retry_delay_spin.setValue(RETRY_DELAY)
-        retry_box.addWidget(self.retry_count_spin)
-        retry_box.addWidget(QLabel("x,"))
-        retry_box.addWidget(self.retry_delay_spin)
-        retry_widget = QWidget()
-        retry_widget.setLayout(retry_box)
-        config_layout.addWidget(retry_widget, row, 1, 1, 3)
-        row += 1
-
-        config_layout.addWidget(QLabel("<b>Timeout safeguard:</b>"), row, 0)
-        self.timeout_enable_check = QCheckBox("Enabled")
-        self.timeout_enable_check.setChecked(ENABLE_TIMEOUT_SAFEGUARD)
-        config_layout.addWidget(self.timeout_enable_check, row, 1)
-        timeout_box = QHBoxLayout()
-        self.timeout_max_spin = QSpinBox()
-        self.timeout_max_spin.setRange(10, 7200)
-        self.timeout_max_spin.setSuffix(" s max")
-        self.timeout_max_spin.setValue(TIMEOUT_MAX_SECONDS)
-        self.timeout_multiplier_spin = QDoubleSpinBox()
-        self.timeout_multiplier_spin.setRange(1.0, 10.0)
-        self.timeout_multiplier_spin.setSingleStep(0.5)
-        self.timeout_multiplier_spin.setSuffix("x estimate")
-        self.timeout_multiplier_spin.setValue(TIMEOUT_MULTIPLIER)
-        timeout_box.addWidget(self.timeout_max_spin)
-        timeout_box.addWidget(self.timeout_multiplier_spin)
-        timeout_widget = QWidget()
-        timeout_widget.setLayout(timeout_box)
-        config_layout.addWidget(timeout_widget, row, 2, 1, 2)
-        row += 1
-
-        # Convert to Ogg / Skip already generated
-        config_layout.addWidget(QLabel("<b>Convert to Ogg:</b>"), row, 0)
-        self.convert_ogg_check = QCheckBox()
-        self.convert_ogg_check.setChecked(CONVERT_TO_OGG)
-        config_layout.addWidget(self.convert_ogg_check, row, 1)
-        config_layout.addWidget(QLabel("<b>Skip already generated:</b>"), row, 2)
-        self.skip_generated_check = QCheckBox()
-        self.skip_generated_check.setChecked(SKIP_ALREADY_GENERATED)
-        config_layout.addWidget(self.skip_generated_check, row, 3)
-        row += 1
-
-        # Limit
-        config_layout.addWidget(QLabel("<b>Limit:</b>"), row, 0)
-        self.limit_spin = QSpinBox()
-        self.limit_spin.setRange(0, 1_000_000)
-        self.limit_spin.setValue(LIMIT)
-        self.limit_spin.setSpecialValueText("No limit")
-        config_layout.addWidget(self.limit_spin, row, 1)
-        limit_hint = QLabel("Max jobs to process this run. Set to 0 to remove the limit.")
-        limit_hint.setStyleSheet("font-size: 10px; color: gray;")
-        config_layout.addWidget(limit_hint, row, 2, 1, 2)
-        row += 1
-
-        # Voice fallback
-        config_layout.addWidget(QLabel("<b>Voice fallback:</b>"), row, 0)
-        self.fallback_enable_check = QCheckBox("Enabled")
-        self.fallback_enable_check.setChecked(USE_VOICE_FALLBACK)
-        config_layout.addWidget(self.fallback_enable_check, row, 1)
-        self.refresh_voices_btn = QPushButton("🔄 Refresh voices")
-        self.refresh_voices_btn.clicked.connect(self._refresh_fallback_voices)
-        config_layout.addWidget(self.refresh_voices_btn, row, 2, 1, 2)
-        row += 1
-
-        self.fallback_male_combo = QComboBox()
-        self.fallback_female_combo = QComboBox()
-        self.fallback_neutral_combo = QComboBox()
-
-        for label, combo, current in [
-            ("Male:", self.fallback_male_combo, FALLBACK_VOICE_MALE),
-            ("Female:", self.fallback_female_combo, FALLBACK_VOICE_FEMALE),
-            ("Neutral:", self.fallback_neutral_combo, FALLBACK_VOICE_NEUTRAL),
-        ]:
-            config_layout.addWidget(QLabel(label), row, 0)
-            combo.setEditable(True)
-            combo.addItem(current)
-            config_layout.addWidget(combo, row, 1, 1, 3)
-            row += 1
-
-        self.save_config_btn = QPushButton("💾 Save Config")
-        self.save_config_btn.clicked.connect(self._save_config_edits)
-        config_layout.addWidget(self.save_config_btn, row, 0, 1, 4)
-
-        layout.addWidget(config_group)
+        config_bar = QGroupBox("⚙️ Configuration")
+        config_bar_layout = QHBoxLayout(config_bar)
+        config_bar_layout.addWidget(self.config_dialog.health_dot)
+        self.config_summary_label = QLabel()
+        self.config_summary_label.setStyleSheet("color: gray;")
+        config_bar_layout.addWidget(self.config_summary_label, stretch=1)
+        self.open_config_btn = QPushButton("🛠️ Settings…")
+        self.open_config_btn.clicked.connect(self._open_config_dialog)
+        config_bar_layout.addWidget(self.open_config_btn)
+        layout.addWidget(config_bar)
+        self._update_config_summary()
 
         # ---------- Run controls ----------
         controls_layout = QHBoxLayout()
@@ -3584,6 +3658,24 @@ class GenerateWindow(QMainWindow):
         self.statusBar().showMessage(f"Failed: {message}", 8000)
         self.job_label.setText(f"❌ {message}")
 
+    def _open_config_dialog(self):
+        """Show the configuration dialog (non-modal so the log/progress stay visible)."""
+        self.config_dialog.show()
+        self.config_dialog.raise_()
+        self.config_dialog.activateWindow()
+
+    def _update_config_summary(self):
+        """Refresh the one-line summary shown on the compact configuration bar."""
+        d = self.config_dialog
+        bits = [
+            d.base_url_edit.text().strip(),
+            f"{d.engine_edit.text().strip()}/{d.model_size_edit.text().strip()}",
+            f"retry {d.retry_count_spin.value()}x",
+        ]
+        if d.fallback_enable_check.isChecked():
+            bits.append("fallback on")
+        self.config_summary_label.setText("  •  ".join(bits))
+
     def _save_config_edits(self):
         """Apply edited configuration fields back to the module-level settings."""
         global BASE_URL, ENGINE, MODEL_SIZE, RETRY_COUNT, RETRY_DELAY, CONVERT_TO_OGG
@@ -3591,24 +3683,26 @@ class GenerateWindow(QMainWindow):
         global SKIP_ALREADY_GENERATED, LIMIT, USE_VOICE_FALLBACK
         global FALLBACK_VOICE_MALE, FALLBACK_VOICE_FEMALE, FALLBACK_VOICE_NEUTRAL
 
-        BASE_URL = self.base_url_edit.text().strip()
-        ENGINE = self.engine_edit.text().strip()
-        MODEL_SIZE = self.model_size_edit.text().strip()
-        RETRY_COUNT = self.retry_count_spin.value()
-        RETRY_DELAY = self.retry_delay_spin.value()
-        CONVERT_TO_OGG = self.convert_ogg_check.isChecked()
-        ENABLE_TIMEOUT_SAFEGUARD = self.timeout_enable_check.isChecked()
-        TIMEOUT_MAX_SECONDS = self.timeout_max_spin.value()
-        TIMEOUT_MULTIPLIER = self.timeout_multiplier_spin.value()
-        SKIP_ALREADY_GENERATED = self.skip_generated_check.isChecked()
-        LIMIT = self.limit_spin.value()
-        USE_VOICE_FALLBACK = self.fallback_enable_check.isChecked()
-        FALLBACK_VOICE_MALE = self.fallback_male_combo.currentText().strip()
-        FALLBACK_VOICE_FEMALE = self.fallback_female_combo.currentText().strip()
-        FALLBACK_VOICE_NEUTRAL = self.fallback_neutral_combo.currentText().strip()
+        d = self.config_dialog
+        BASE_URL = d.base_url_edit.text().strip()
+        ENGINE = d.engine_edit.text().strip()
+        MODEL_SIZE = d.model_size_edit.text().strip()
+        RETRY_COUNT = d.retry_count_spin.value()
+        RETRY_DELAY = d.retry_delay_spin.value()
+        CONVERT_TO_OGG = d.convert_ogg_check.isChecked()
+        ENABLE_TIMEOUT_SAFEGUARD = d.timeout_enable_check.isChecked()
+        TIMEOUT_MAX_SECONDS = d.timeout_max_spin.value()
+        TIMEOUT_MULTIPLIER = d.timeout_multiplier_spin.value()
+        SKIP_ALREADY_GENERATED = d.skip_generated_check.isChecked()
+        LIMIT = d.limit_spin.value()
+        USE_VOICE_FALLBACK = d.fallback_enable_check.isChecked()
+        FALLBACK_VOICE_MALE = d.fallback_male_combo.currentText().strip()
+        FALLBACK_VOICE_FEMALE = d.fallback_female_combo.currentText().strip()
+        FALLBACK_VOICE_NEUTRAL = d.fallback_neutral_combo.currentText().strip()
 
         logger.info("Configuration updated from UI.")
         self.statusBar().showMessage("Configuration saved.", 3000)
+        self._update_config_summary()
         QTimer.singleShot(0, self.health_worker.check_now)
 
     def _on_health_checked(self, reachable: bool, info: dict):
@@ -3619,12 +3713,12 @@ class GenerateWindow(QMainWindow):
         else:
             color = "#e74c3c"
             tooltip = f"Unreachable: {info.get('error', 'unknown error')}"
-        self.health_dot.setStyleSheet(f"background-color: {color}; border-radius: 7px;")
-        self.health_dot.setToolTip(tooltip)       
+        self.config_dialog.health_dot.setStyleSheet(f"background-color: {color}; border-radius: 7px;")
+        self.config_dialog.health_dot.setToolTip(tooltip)       
 
     def _refresh_fallback_voices(self):
         """Fetch the current profile list in the background and repopulate the fallback combos."""
-        self.refresh_voices_btn.setEnabled(False)
+        self.config_dialog.refresh_voices_btn.setEnabled(False)
         self.profiles_thread = QThread()
         self.profiles_worker = ProfilesFetchWorker()
         self.profiles_worker.moveToThread(self.profiles_thread)
@@ -3637,17 +3731,18 @@ class GenerateWindow(QMainWindow):
 
     def _on_profiles_loaded(self, profile_map: dict):
         names = sorted(profile_map.keys(), key=str.lower)
-        for combo in (self.fallback_male_combo, self.fallback_female_combo, self.fallback_neutral_combo):
+        d = self.config_dialog
+        for combo in (d.fallback_male_combo, d.fallback_female_combo, d.fallback_neutral_combo):
             current = combo.currentText()
             combo.clear()
             combo.addItems(names)
             idx = combo.findText(current)
             combo.setCurrentIndex(idx if idx >= 0 else (combo.addItem(current) or combo.count() - 1))
-        self.refresh_voices_btn.setEnabled(True)
+        d.refresh_voices_btn.setEnabled(True)
         self.statusBar().showMessage(f"Loaded {len(names)} voice profiles.", 3000)
 
     def _on_profiles_failed(self, message: str):
-        self.refresh_voices_btn.setEnabled(True)
+        self.config_dialog.refresh_voices_btn.setEnabled(True)
         self.statusBar().showMessage(f"Could not load voice profiles: {message}", 5000)        
 
     def closeEvent(self, event):
