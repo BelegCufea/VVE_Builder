@@ -439,11 +439,12 @@ def log_header_summary(total_jobs, total_chars_all):
     logger.info("\n".join([f"Total jobs: {total_jobs}, Total chars: {total_chars_all}", "=" * 70]))
 
 
-def log_pregeneration_summary(npc_stats, profile_map):
+def log_pregeneration_summary(voice_stats, profile_map):
     """
     Build and log the pre-generation summary table.
 
-    Displays a formatted table showing for each NPC:
+    Displays a formatted table showing for each NPC + voice profile combination:
+        - NPC name
         - Voice profile status (valid or missing)
         - Total lines to process
         - Lines already generated (Done)
@@ -457,7 +458,7 @@ def log_pregeneration_summary(npc_stats, profile_map):
         - NPCs with valid voices but nothing to generate are summarized
 
     Args:
-        npc_stats (dict): Statistics dictionary per NPC.
+        voice_stats (dict): Statistics dictionary per voice profile + NPC combination.
         profile_map (dict): Voice profile name -> ID mapping.
 
     Note:
@@ -533,18 +534,28 @@ def log_pregeneration_summary(npc_stats, profile_map):
     missing_npcs, missing_chars_total, missing_done_total, missing_skipped_total = [], 0, 0, 0
     done_npcs, done_chars_total, done_done_total, done_skipped_total = [], 0, 0, 0
 
-    for npc_name, stats in sorted(npc_stats.items(), key=lambda item: (item[1].get("voice_name", "").lower(), item[0])):
-        profile_name = stats.get("voice_name", npc_name)
-        has_profile = profile_name in profile_map
-        total, done, skipped, to_gen, chars = (
-            stats["total"], stats["done"], stats["skipped"], stats["to_generate"], stats["chars"]
-        )
+    # Sort by NPC name then vice name
+    for key, stats in sorted(voice_stats.items(), key=lambda item: ((item[1].get("display_name") or "").lower(), (item[1].get("voice_name") or "").lower())):
+        voice_name = stats.get("voice_name") or "None"
+        display_name = stats.get("display_name") or "Unknown"
+        has_profile = voice_name in profile_map if voice_name else False
+        
+        total = stats["total"]
+        done = stats.get("done", 0)
+        skipped = stats.get("skipped", 0)
+        to_gen = stats["to_generate"]
+
+        # Get character counts from the chars dict
+        chars_total = stats["chars"]["total"]
+        chars_done = stats["chars"].get("done", 0)
+        chars_skipped = stats["chars"].get("skipped", 0)
+        chars_to_gen = stats["chars"].get("to_generate", 0)
 
         grand_total += total
         grand_done += done
         grand_skipped += skipped
         grand_to_gen += to_gen
-        grand_chars += chars
+        grand_chars += chars_total
 
         show_in_detail = False
         profile_str = ""
@@ -552,16 +563,16 @@ def log_pregeneration_summary(npc_stats, profile_map):
         if has_profile:
             if to_gen > 0:
                 generate_total += to_gen
-                generate_chars += chars
-            done_npcs.append(npc_name)
-            done_chars_total += chars
+                generate_chars += chars_to_gen
+            done_npcs.append(display_name)
+            done_chars_total += chars_done
             done_done_total += done
             done_skipped_total += skipped
             show_in_detail = (not COMPACT_SUMMARY) or (to_gen > 0)
-            profile_str = f"✅ {profile_name}"
+            profile_str = f"✅ {voice_name}"
         else:
-            missing_npcs.append(npc_name)
-            missing_chars_total += chars
+            missing_npcs.append(display_name)
+            missing_chars_total += chars_skipped
             missing_done_total += done
             missing_skipped_total += skipped
             if not COMPACT_SUMMARY:
@@ -570,13 +581,13 @@ def log_pregeneration_summary(npc_stats, profile_map):
 
         if show_in_detail:
             detail_lines.append(
-                f"{trunc(npc_name, COL_WIDTH.NPC):<{COL_WIDTH.NPC}} "
+                f"{trunc(display_name, COL_WIDTH.NPC):<{COL_WIDTH.NPC}} "
                 f"{trunc(profile_str, COL_WIDTH.PROFILE):<{COL_WIDTH.PROFILE}} "
                 f"{fmt(total, COL_WIDTH.TOTAL)} "
                 f"{fmt(done, COL_WIDTH.DONE)} "
                 f"{fmt(skipped, COL_WIDTH.SKIPPED)} "
                 f"{fmt(to_gen, COL_WIDTH.TO_GEN)} "
-                f"{fmt(chars, COL_WIDTH.CHARS)}"
+                f"{fmt(chars_total, COL_WIDTH.CHARS)}"
             )
 
     detail_lines.append("=" * LINE_LENGTH)
@@ -638,7 +649,7 @@ def log_pregeneration_summary(npc_stats, profile_map):
     )
     totals_lines.append("=" * LINE_LENGTH + "\n")
 
-    logger.info("\n".join(header_lines + totals_lines + detail_lines))
+    logger.info("\n".join(header_lines + detail_lines + totals_lines))
 
 
 def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration,
@@ -686,7 +697,7 @@ def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_dur
     logging.log(logging.INFO if success else logging.WARNING, line)
 
 
-def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_stats, 
+def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voice_stats, 
                        retry_stats=None, was_stopped=False, successful_jobs=0):
     """
     Log the final summary after all generation jobs complete.
@@ -710,7 +721,7 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
         total_jobs (int): Total number of jobs in the queue.
         total_chars_processed (int): Total characters successfully generated.
         avg_time_per_char (float): Average generation time per character.
-        npc_stats (dict): Statistics dictionary per NPC.
+        voice_stats (dict): Statistics dictionary per voice profile + NPC combination.
         retry_stats (dict, optional): Retry statistics from the generation run.
         was_stopped (bool): True if the user manually stopped the process.
         successful_jobs (int): Number of successfully generated files.
@@ -719,28 +730,38 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
         Uses fixed-width labels (30 characters) and right-aligned numbers
         with dynamic width calculation for consistent alignment.
     """
-    # Extract statistics
+    # Extract statistics from voice_stats
     total_done = 0
     total_skipped = 0
     done_summary, skipped_summary = {}, {}
 
-    for voice, stats in npc_stats.items():
+    for key, stats in voice_stats.items():
+        display_name = stats.get("display_name", "Unknown")
+        voice_name = stats.get("voice_name", "Unknown")
         done = stats.get("done", 0)
         skipped = stats.get("skipped", 0)
+        
         if done > 0:
             total_done += done
-            done_summary[voice] = done
+            # Use display_name as the key for the summary
+            done_summary[display_name] = done_summary.get(display_name, 0) + done
         if skipped > 0:
             total_skipped += skipped
-            skipped_summary[voice] = skipped
+            skipped_summary[display_name] = skipped_summary.get(display_name, 0) + skipped
 
     total_failed = retry_stats.get('failed_tasks', 0) if retry_stats else 0
     processed_jobs = successful_jobs + total_failed
 
-    # Calculate chars from npc_stats
-    total_done_chars = sum(s.get("chars", 0) for s in npc_stats.values() if s.get("done", 0) > 0)
-    total_skipped_chars = sum(s.get("chars", 0) for s in npc_stats.values() if s.get("skipped", 0) > 0)
-    total_chars_all = sum(s.get("chars", 0) for s in npc_stats.values())
+    # Calculate chars from voice_stats using the chars dict
+    total_done_chars = 0
+    total_skipped_chars = 0
+    total_chars_all = 0
+    
+    for key, stats in voice_stats.items():
+        chars = stats.get("chars", {})
+        total_chars_all += chars.get("total", 0)
+        total_done_chars += chars.get("done", 0)
+        total_skipped_chars += chars.get("skipped", 0)
 
     # Calculate completion rate
     completion_rate = (successful_jobs / total_jobs * 100) if total_jobs > 0 else 0
@@ -837,11 +858,11 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, npc_
         lines.append("-" * 70)
         
         if done_summary:
-            done_details = ", ".join(f"{voice}: {count:,}" for voice, count in done_summary.items())
+            done_details = ", ".join(f"{npc}: {count:,}" for npc, count in done_summary.items())
             lines.append(f"  Already generated: {done_details}")
         
         if skipped_summary:
-            skipped_details = ", ".join(f"{voice}: {count:,}" for voice, count in skipped_summary.items())
+            skipped_details = ", ".join(f"{npc}: {count:,}" for npc, count in skipped_summary.items())
             lines.append(f"  Missing voices:     {skipped_details}")
 
     # ----- Retry Statistics -----
@@ -2087,7 +2108,7 @@ def iter_filtered_csv_rows(csv_path, target_voices, filename_pattern, use_strref
     Filters applied, in order:
         - Row must have at least 8 columns.
         - If use_strref_filter and strref_filter is non-empty: strref must be in it.
-        - If not use_strref_filter: npc_name must be non-empty.
+        - If not use_strref_filter: sysname must be non-empty.
         - If not use_strref_filter and target_voices given: npc_name must be in target_voices.
         - If filename_pattern and csv_filename are both present: csv_filename must match it.
         - text must be non-empty.
@@ -2121,7 +2142,7 @@ def iter_filtered_csv_rows(csv_path, target_voices, filename_pattern, use_strref
             if use_strref_filter and strref_filter:
                 if strref not in strref_filter:
                     continue
-            if not use_strref_filter and not npc_name:
+            if not use_strref_filter and not sysname:
                 continue
             if not use_strref_filter and target_voices and npc_name not in target_voices:
                 continue
@@ -2141,6 +2162,9 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                          substitutions_sysname=None):
     """
     Load CSV data, apply filters, and prepare rows for generation.
+    
+    Statistics are grouped by voice profile + NPC name combination,
+    so we can see how each NPC uses each voice profile.
 
     Args:
         csv_path (str): Path to the CSV file.
@@ -2158,17 +2182,12 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
             Substitution mappings.
 
     Returns:
-        tuple: (selected_rows, npc_stats)
+        tuple: (selected_rows, voice_stats)
             - selected_rows (list): List of (strref, display_name, voice_name, filename, text)
-            - npc_stats (dict): Statistics per NPC
-
-    Note:
-        Unlike the console version, CSV read errors are *raised* instead of
-        calling sys.exit(1) - the GUI worker catches this and reports it
-        through the failed signal instead of killing the whole application.
+            - voice_stats (dict): Statistics per voice profile + NPC combination
     """
     selected_rows = []
-    npc_stats = {}
+    voice_stats = {}
     strref_filter = set()
 
     if use_strref_filter:
@@ -2192,31 +2211,64 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
                 substitutions, substitutions_gender, substitutions_sysname
             )
 
-            display_name = npc_name if npc_name else "Descriptions"
+            if npc_name:
+                display_name = npc_name
+            elif sysname:
+                display_name = f"Unknown ({sysname})"
+            else:
+                display_name = "Description"
 
-            if display_name not in npc_stats:
-                npc_stats[display_name] = {
-                    "voice_name": voice_name if voice_name else "MISSING",
-                    "total": 0, "done": 0, "skipped": 0, "to_generate": 0, "chars": 0,
+            # Preprocess text first (before any stats)
+            text = preprocess_text(text, patcher_config) if patcher_config else text
+
+            # skip lines with invalid text
+            if not is_valid_text(text):
+                continue
+
+            # Create a unique key: voice_name + display_name
+            key = f"{voice_name}|{display_name}" if voice_name else f"None|{display_name}"
+
+            # Initialize stats for this voice + NPC combination if not exists
+            if key not in voice_stats:
+                voice_stats[key] = {
+                    "voice_name": voice_name,
+                    "display_name": display_name,
+                    "total": 0,
+                    "done": 0,
+                    "skipped": 0,
+                    "to_generate": 0,
+                    "chars": {
+                        "total": 0,
+                        "done": 0,
+                        "skipped": 0,
+                        "to_generate": 0,
+                    },
                 }
 
-            npc_stats[display_name]["total"] += 1
-            npc_stats[display_name]["chars"] += len(text)
+            voice_stats[key]["total"] += 1
+            voice_stats[key]["chars"]["total"] += len(text)
 
+            # If no voice_name, skip - can't generate
             if voice_name is None:
-                npc_stats[display_name]["skipped"] += 1
+                voice_stats[key]["skipped"] += 1
+                voice_stats[key]["chars"]["skipped"] += len(text)
                 continue
 
+            # If voice_name not in profile_map, skip
             if profile_map is not None and voice_name not in profile_map:
-                npc_stats[display_name]["skipped"] += 1
+                voice_stats[key]["skipped"] += 1
+                voice_stats[key]["chars"]["skipped"] += len(text)
                 continue
 
+            # If already generated, skip
             if skip_generated and is_already_generated(generation_memory, display_name, strref):
-                npc_stats[display_name]["done"] += 1
+                voice_stats[key]["done"] += 1
+                voice_stats[key]["chars"]["done"] += len(text)
                 continue
 
-            npc_stats[display_name]["to_generate"] += 1
-            text = preprocess_text(text, patcher_config) if patcher_config else text
+            voice_stats[key]["to_generate"] += 1
+            voice_stats[key]["chars"]["to_generate"] += len(text)
+
             selected_rows.append((strref, display_name, voice_name, filename, text))
 
             if limit and len(selected_rows) >= limit:
@@ -2226,8 +2278,7 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
         logger.error(f"❌ Error reading CSV: {e}")
         raise
 
-    return selected_rows, npc_stats
-
+    return selected_rows, voice_stats
 
 def estimate_generation_time(regressor, chars):
     """
@@ -2883,7 +2934,7 @@ class GenerationWorker(QObject):
 
             self.stage.emit("Reading and filtering dialog CSV...")
             try:
-                selected_rows, npc_stats = load_and_filter_csv(
+                selected_rows, voice_stats = load_and_filter_csv(
                     CSV_PATH, TARGET_VOICES, FILENAME_PATTERN, patcher_config,
                     generation_memory, SKIP_ALREADY_GENERATED, LIMIT, profile_map,
                     USE_STRREF_FILTER, STRREF_FILTER_FILE, FORCE_GENERATED_FILENAMES,
@@ -2906,11 +2957,11 @@ class GenerationWorker(QObject):
                 logger.info("No jobs to process. Exiting.")
                 self.finished.emit({
                     "total_jobs": 0, "total_chars_processed": 0,
-                    "avg_time_per_char": None, "npc_stats": npc_stats, "retry_stats": None,
+                    "avg_time_per_char": None, "npc_stats": voice_stats, "retry_stats": None,
                 })
                 return
 
-            log_pregeneration_summary(npc_stats, profile_map)
+            log_pregeneration_summary(voice_stats, profile_map)
 
             self.stage.emit(f"Generating {total_jobs} lines...")
             total_chars_processed, avg_time_per_char, retry_stats, successful_jobs = self.process_generation_jobs_all(
@@ -2923,7 +2974,7 @@ class GenerationWorker(QObject):
                 total_jobs, 
                 total_chars_processed, 
                 avg_time_per_char, 
-                npc_stats, 
+                voice_stats, 
                 retry_stats, 
                 was_stopped,
                 successful_jobs
@@ -2934,7 +2985,7 @@ class GenerationWorker(QObject):
                 "total_jobs": total_jobs, 
                 "total_chars_processed": total_chars_processed,
                 "avg_time_per_char": avg_time_per_char, 
-                "npc_stats": npc_stats, 
+                "npc_stats": voice_stats, 
                 "retry_stats": retry_stats,
                 "was_stopped": was_stopped,
             })
