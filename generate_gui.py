@@ -490,7 +490,7 @@ def log_pregeneration_summary(voice_stats, profile_map):
         CHARS = 12
 
     _widths = [v for k, v in COL_WIDTH.__dict__.items() if not k.startswith('__') and isinstance(v, int)]
-    LINE_LENGTH = sum(_widths) + len(_widths)
+    LINE_LENGTH = sum(_widths) + len(_widths) - 1
 
     header_lines, detail_lines, totals_lines = [], [], []
 
@@ -591,7 +591,7 @@ def log_pregeneration_summary(voice_stats, profile_map):
         if show_in_detail:
             detail_lines.append(
                 f"{trunc(display_name, COL_WIDTH.NPC):<{COL_WIDTH.NPC}} "
-                f"{trunc(profile_str, COL_WIDTH.PROFILE):<{COL_WIDTH.PROFILE}} "
+                f"{trunc(profile_str, COL_WIDTH.PROFILE):<{COL_WIDTH.PROFILE - 1}} "
                 f"{fmt(total, COL_WIDTH.TOTAL)} "
                 f"{fmt(done, COL_WIDTH.DONE)} "
                 f"{fmt(skipped, COL_WIDTH.SKIPPED)} "
@@ -628,7 +628,7 @@ def log_pregeneration_summary(voice_stats, profile_map):
     if done_npcs:
         done_total = done_done_total + done_skipped_total
         totals_lines.append(
-            f"{'✅ Already done':<{COL_WIDTH.NPC - 1}} "
+            f"{'🔊 Already done':<{COL_WIDTH.NPC - 1}} "
             f"{'':<{COL_WIDTH.PROFILE}} "
             f"{fmt(done_total, COL_WIDTH.TOTAL)} "
             f"{fmt(done_done_total, COL_WIDTH.DONE)} "
