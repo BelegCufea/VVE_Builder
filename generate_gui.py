@@ -30,7 +30,7 @@ from runstats import Regression
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt
+from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt, Slot, QMetaObject
 from PySide6.QtGui import QFont, QTextCursor, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
@@ -404,6 +404,14 @@ def log_initialize(log_signal: LogSignal):
     gui_handler.setLevel(logging.INFO)
     gui_handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(gui_handler)
+
+    # Third-party libraries (requests/urllib3) log their own DEBUG chatter
+    # ("Starting new HTTP connection", "GET /health HTTP/1.1 200 ...") which
+    # would otherwise flood the log file since the root logger is DEBUG.
+    # Silence them specifically rather than raising the root level, so our
+    # own DEBUG records (if any are added later) still get through.
+    for noisy_logger in ("urllib3", "urllib3.connectionpool", "requests"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     logger.propagate = False
     return logger
@@ -2326,6 +2334,21 @@ class HealthCheckWorker(QObject):
         self._timer.start(self.interval_ms)
         self.check_now()
 
+    @Slot()
+    def stop(self):
+        """
+        Stop the polling QTimer.
+
+        Must run on the worker thread (the one the timer lives on) - never
+        called directly from the UI thread. Invoke it via
+        ``QMetaObject.invokeMethod(worker, "stop", Qt.ConnectionType.QueuedConnection)``
+        so Qt marshals the call onto the correct thread first.
+        """
+        if self._timer is not None:
+            self._timer.stop()
+            self._timer.deleteLater()
+            self._timer = None
+
     def check_now(self):
         """Perform a single health check immediately."""
         try:
@@ -3746,9 +3769,34 @@ class GenerateWindow(QMainWindow):
         self.statusBar().showMessage(f"Could not load voice profiles: {message}", 5000)        
 
     def closeEvent(self, event):
-        """Stop background threads before the window closes."""
+        """
+        Stop background threads cleanly before the window closes.
+
+        The health-check QTimer lives on health_thread, so it must be
+        stopped *from* that thread - calling `_timer.stop()` directly here
+        (from the UI/main thread) is exactly what produces:
+            QObject::killTimer: Timers cannot be stopped from another thread
+        `QMetaObject.invokeMethod(..., QueuedConnection)` marshals the call
+        onto the worker thread's event loop instead, so the timer is
+        stopped and deleted by the thread that owns it. Only once that's
+        done do we quit() and wait() for the thread to actually finish.
+        """
+        QMetaObject.invokeMethod(self.health_worker, "stop", Qt.ConnectionType.QueuedConnection)
         self.health_thread.quit()
         self.health_thread.wait(2000)
+
+        # If a generation or profile-sync job is still running, ask it to
+        # stop and give it a moment to unwind before we tear down the window.
+        if self.gen_thread is not None and self.gen_thread.isRunning():
+            if self.worker:
+                self.worker.request_stop()
+            self.gen_thread.quit()
+            self.gen_thread.wait(2000)
+
+        if self.sync_thread is not None and self.sync_thread.isRunning():
+            self.sync_thread.quit()
+            self.sync_thread.wait(2000)
+
         super().closeEvent(event) 
 
 
