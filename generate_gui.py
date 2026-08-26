@@ -20,9 +20,6 @@ import subprocess
 import sys
 import threading
 import time
-import uuid
-import shutil
-import zipfile
 import requests
 import logging
 from collections import defaultdict
@@ -38,21 +35,21 @@ from PySide6.QtWidgets import (
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
 )
 
+from tts_pipeline.providers.registry import create_provider
+from tts_pipeline.providers.util import CaseInsensitiveDict, get_canonical_key
+from tts_pipeline.profile_reconciliation import reconcile_profiles
+
 # ============================================================================
 # Configuration Constants
 # ============================================================================
-# Voicebox API Configuration
-BASE_URL = "http://10.0.50.5:17600"    # VoiceBox API - http://localhost:17493 for local server, or remote URL for remote server
-ENGINE = "qwen"
-MODEL_SIZE = "1.7B"
-
-# Voicebox API Endpoints (relative to BASE_URL)
-PROFILES_ENDPOINT = "/profiles"
-PROFILES_IMPORT_ENDPOINT = "/profiles/import"
-GENERATE_ENDPOINT = "/generate"
-GENERATE_STATUS_ENDPOINT = "/generate/{gen_id}/status"
-GENERATE_CANCEL_ENDPOINT = "/generate/{gen_id}/cancel"
-AUDIO_ENDPOINT = "/audio/{gen_id}"
+# Which TTS backend to use. One of: "voicebox", "omnivoice".
+# See tts_pipeline/providers/registry.py -- this is the whole "provider selection
+# UI" for now, per current scope (no dropdown/settings-panel work yet).
+# VOICEBOX_CONFIG / OMNIVOICE_CONFIG (forwarded to the provider's
+# constructor) are defined further down, once VOICES_DIR and
+# PROFILE_PACKAGES_DIR exist, so they can reference those instead of
+# duplicating the paths.
+TTS_PROVIDER = "omnivoice"
 
 # Generation Timeout Safeguards
 ENABLE_TIMEOUT_SAFEGUARD = True
@@ -116,173 +113,29 @@ PROFILE_PACKAGES_DIR = r"profiles"
 PROFILE_SYNC_MAX_ATTEMPTS = 10
 PROFILE_SYNC_RETRY_DELAY = 3.0
 
+# Config forwarded straight to VoiceboxProvider's constructor when
+# TTS_PROVIDER == "voicebox". Endpoints are relative to base_url.
+VOICEBOX_CONFIG = {
+    "base_url": "http://10.0.50.5:17600",  # http://localhost:17493 for local server, or remote URL
+    "engine": "qwen",
+    "model_size": "1.7B",
+    "profile_packages_dir": PROFILE_PACKAGES_DIR,
+}
+
+# Config forwarded straight to OmniVoiceServerProvider's constructor when
+# TTS_PROVIDER == "omnivoice". voices_dir doubles as where the sample
+# duration cache is written (see tts_pipeline/providers/omnivoice.py).
+OMNIVOICE_CONFIG = {
+    "base_url": "http://127.0.0.1:8880",
+    "voices_dir": VOICES_DIR,
+    "api_key": "",
+    "response_format": "wav",
+}
+
 
 # ============================================================================
 # Logging
 # ============================================================================
-
-class CaseInsensitiveDict(dict):
-    """
-    A dictionary with case-insensitive string keys while preserving original key casing.
-
-    Stores key-value pairs where string keys can be accessed, retrieved, checked,
-    or deleted with any letter casing. Tracks the canonical (original) casing
-    of keys for iteration and representation.
-    """
-
-    def __init__(self, *args, **kwargs):
-        """
-        Initialize the case-insensitive dictionary.
-
-        Args:
-            *args: Optional positional arguments (mapping or iterable of key-value pairs).
-            **kwargs: Optional keyword arguments to populate the dictionary.
-        """
-        self._keys = {}
-        super().__init__()
-        if args or kwargs:
-            self.update(*args, **kwargs)
-
-    def __setitem__(self, key, value):
-        """
-        Set self[key] to value with case-insensitive tracking for string keys.
-
-        Args:
-            key: The dictionary key.
-            value: The value to associate with the key.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            old_canonical = self._keys.get(lower)
-            if old_canonical is not None and old_canonical != key:
-                super().pop(old_canonical, None)
-            self._keys[lower] = key
-            super().__setitem__(key, value)
-        else:
-            super().__setitem__(key, value)
-
-    def __getitem__(self, key):
-        """
-        Get self[key] using case-insensitive comparison for string keys.
-
-        Args:
-            key: The key to look up.
-
-        Returns:
-            The value associated with key.
-
-        Raises:
-            KeyError: If key is not present in the dictionary.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            if lower in self._keys:
-                return super().__getitem__(self._keys[lower])
-        return super().__getitem__(key)
-
-    def __contains__(self, key):
-        """
-        Check if key is present using case-insensitive comparison for string keys.
-
-        Args:
-            key: The key to check.
-
-        Returns:
-            bool: True if key is found, False otherwise.
-        """
-        if isinstance(key, str):
-            return key.lower() in self._keys
-        return super().__contains__(key)
-
-    def get(self, key, default=None):
-        """
-        Return the value for key if key is in the dictionary, else default.
-
-        Args:
-            key: The key to search for.
-            default: Value to return if key is not found (defaults to None).
-
-        Returns:
-            The value for key or default.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            if lower in self._keys:
-                return super().get(self._keys[lower], default)
-        return super().get(key, default)
-
-    def pop(self, key, *args):
-        """
-        Remove specified key and return the corresponding value.
-
-        Args:
-            key: The key to remove (case-insensitive for string keys).
-            *args: Optional default value if key is not found.
-
-        Returns:
-            The removed value, or default if provided and key is missing.
-
-        Raises:
-            KeyError: If key is not found and no default is provided.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            if lower in self._keys:
-                canonical = self._keys.pop(lower)
-                return super().pop(canonical, *args)
-        return super().pop(key, *args)
-
-    def get_canonical_key(self, key):
-        """
-        Get the original (canonical) casing used when key was stored.
-
-        Args:
-            key: The key to check.
-
-        Returns:
-            The canonical key string if stored, otherwise key unchanged.
-        """
-        if isinstance(key, str):
-            return self._keys.get(key.lower(), key)
-        return key
-
-    def update(self, *args, **kwargs):
-        """
-        Update the dictionary with key/value pairs from mapping or iterable.
-
-        Args:
-            *args: Positional argument which can be another mapping or iterable of pairs.
-            **kwargs: Additional key/value pairs passed as keyword arguments.
-        """
-        if args:
-            if hasattr(args[0], "items"):
-                for k, v in args[0].items():
-                    self[k] = v
-            elif hasattr(args[0], "keys"):
-                for k in args[0]:
-                    self[k] = args[0][k]
-            else:
-                for k, v in args[0]:
-                    self[k] = v
-        for k, v in kwargs.items():
-            self[k] = v
-
-
-def get_canonical_key(mapping, key):
-    """
-    Retrieve the canonical key from a mapping or return the key as-is.
-
-    Args:
-        mapping: Mapping object (e.g. CaseInsensitiveDict or standard dict).
-        key: The key to look up.
-
-    Returns:
-        The canonical key if available, else key.
-    """
-    if hasattr(mapping, "get_canonical_key"):
-        return mapping.get_canonical_key(key)
-    return key
-
 
 class LogSignal(QObject):
     """
@@ -408,19 +261,27 @@ def log_initialize(log_signal: LogSignal):
     return logger
 
 
-def log_header_start():
+def log_header_start(provider=None):
     """
     Log the run-start banner immediately.
 
     This is the first log message, displayed before any setup work begins.
-    It includes the start timestamp and configured TTS engine/model.
+    It includes the start timestamp and, for providers that have an
+    engine/model concept (currently only Voicebox), which one is configured.
+
+    Args:
+        provider (TtsProvider, optional): the active provider. When it
+            doesn't expose engine/model_size (e.g. OmniVoice-server), that
+            line is simply omitted rather than showing stale values.
 
     Note:
         The message is logged at INFO level to the configured logging sinks.
     """
     lines = ["", "=" * 70, "Voice over Generation",
-              f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 70,
-              f"TTS Engine: {ENGINE}" + (f" ({MODEL_SIZE})" if MODEL_SIZE and MODEL_SIZE.strip() else "")]
+              f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 70]
+    if provider is not None and hasattr(provider, "engine"):
+        model_size = getattr(provider, "model_size", "")
+        lines.append(f"TTS Engine: {provider.engine}" + (f" ({model_size})" if model_size and model_size.strip() else ""))
     logger.info("\n".join(lines))
 
 
@@ -1153,83 +1014,15 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
     return None
 
 
-def delete_profile(profile_id):
-    """
-    Delete a voice profile from the Voicebox server.
-
-    Sends a DELETE request to the /profiles/{profile_id} endpoint.
-
-    Args:
-        profile_id (str or int): The ID of the profile to delete.
-
-    Returns:
-        tuple: (success, message)
-            - success (bool): True if deletion was successful.
-            - message (str): Status message describing the result.
-    """
-    try:
-        delete_url = f"{BASE_URL}{PROFILES_ENDPOINT}/{profile_id}"
-        resp = requests.delete(delete_url)
-        if resp.status_code == 200:
-            return True, "Profile deleted successfully"
-        return False, f"Deletion returned: {resp.status_code}"
-    except Exception as e:
-        return False, f"Deletion error: {e}"
-
-
-def get_all_profiles():
-    """
-    Fetch all voice profiles from Voicebox, filtering out zero-sample ones.
-
-    Profiles with sample_count == 0 are unusable for generation and are
-    tracked separately for potential rebuilding.
-
-    Returns:
-        tuple: (profile_map, zero_sample_profiles)
-            - profile_map (dict): Profile name -> ID mapping (valid profiles only)
-            - zero_sample_profiles (dict): Profile name -> ID mapping for zero-sample profiles
-
-    Raises:
-        requests.exceptions.RequestException: If the API request fails.
-
-    Note:
-        Profiles without a name or ID are silently skipped.
-    """
-    resp = requests.get(f"{BASE_URL}{PROFILES_ENDPOINT}")
-    resp.raise_for_status()
-
-    profile_map = CaseInsensitiveDict()
-    zero_sample_profiles = CaseInsensitiveDict()
-    total_profiles = 0
-
-    for p in resp.json():
-        total_profiles += 1
-        profile_id = p.get("id")
-        profile_name = p.get("name")
-        sample_count = p.get("sample_count", 0)
-
-        if not profile_name or not profile_id:
-            continue
-        if sample_count == 0:
-            zero_sample_profiles[profile_name] = profile_id
-            continue
-        profile_map[profile_name] = profile_id
-
-    if zero_sample_profiles:
-        logger.warning(
-            f"⚠️ Found {len(zero_sample_profiles)} zero-sample profile(s) "
-            f"out of {total_profiles} total: {', '.join(list(zero_sample_profiles.keys())[:5])}"
-            + (f" and {len(zero_sample_profiles) - 5} more" if len(zero_sample_profiles) > 5 else "")
-        )
-    else:
-        logger.info(f"Loaded {len(profile_map)} voice profiles (all with samples).")
-
-    return profile_map, zero_sample_profiles
-
-
 # ============================================================================
 # Voice Profile Auto-Provisioning
 # ============================================================================
+# Note: profile CRUD (create/list/delete) now lives behind the active
+# TtsProvider -- see tts_pipeline/providers/voicebox.py, tts_pipeline/providers/omnivoice.py.
+# What stays here is provider-agnostic: figuring out what the CSV needs
+# and what VOICES_DIR can supply. reconcile_profiles() (profile_sync.py)
+# does the actual create/rebuild decisions against whichever provider is
+# active.
 
 def get_candidate_voice_name(npc_name, gender=None, sysname=None,
                               substitutions=None, substitutions_gender=None,
@@ -1357,265 +1150,40 @@ def scan_available_voice_dirs(voices_dir):
     return CaseInsensitiveDict(voice_groups)
 
 
-def create_profile_package(voice_name, files, output_dir):
-    """
-    Build a .voicebox.zip package for a voice from its sample files.
-
-    Writes a manifest.json + samples.json + WAV files into a temp folder,
-    then zips it up. The temp folder is always cleaned up afterwards.
-
-    Args:
-        voice_name (str): The profile name to embed in the manifest.
-        files (list): Sample dicts as produced by scan_available_voice_dirs().
-        output_dir (Path): Directory to write the .voicebox.zip into.
-
-    Returns:
-        Path or None: Path to the created zip file, or None on failure.
-    """
-    output_path = Path(output_dir)
-    output_path.mkdir(parents=True, exist_ok=True)
-
-    safe_name = voice_name.lower().replace(' ', '-')
-    temp_dir = output_path / f"profile-{safe_name}.voicebox"
-    temp_dir.mkdir(exist_ok=True)
-
-    try:
-        samples_dir = temp_dir / "samples"
-        samples_dir.mkdir(exist_ok=True)
-
-        manifest = {
-            "version": "1.0",
-            "profile": {"name": voice_name, "description": "", "language": "en"},
-            "has_avatar": False,
-        }
-        with open(temp_dir / "manifest.json", "w", encoding="utf-8") as f:
-            json.dump(manifest, f, indent=2)
-
-        samples_data = {}
-        for file_info in sorted(files, key=lambda x: x["number"]):
-            sample_uuid = str(uuid.uuid4())
-            wav_filename = f"{sample_uuid}.wav"
-            shutil.copy2(file_info["wav_path"], samples_dir / wav_filename)
-            samples_data[wav_filename] = file_info["transcript"]
-
-        with open(temp_dir / "samples.json", "w", encoding="utf-8") as f:
-            json.dump(samples_data, f, indent=2)
-
-        zip_path = output_path / f"profile-{safe_name}.voicebox.zip"
-        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zipf:
-            for root, _, files_in_dir in os.walk(temp_dir):
-                for file in files_in_dir:
-                    file_path = Path(root) / file
-                    zipf.write(file_path, file_path.relative_to(temp_dir))
-
-        return zip_path
-    except Exception as e:
-        logger.error(f"❌ Error creating profile package for {voice_name}: {e}")
-        return None
-    finally:
-        if temp_dir.exists():
-            shutil.rmtree(temp_dir)
-
-
-def import_profile_zip(zip_path):
-    """
-    Import a composed .voicebox.zip package into Voicebox.
-
-    Args:
-        zip_path (Path): Path to the .voicebox.zip file.
-
-    Returns:
-        dict or None: Parsed JSON response on success, None on failure.
-    """
-    try:
-        with open(zip_path, "rb") as f:
-            files = {"file": (zip_path.name, f, "application/zip")}
-            resp = requests.post(f"{BASE_URL}{PROFILES_IMPORT_ENDPOINT}", files=files)
-            resp.raise_for_status()
-            return resp.json()
-    except requests.exceptions.RequestException as e:
-        logger.error(f"❌ Error importing {zip_path.name}: {e}")
-        return None
-
-
-def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
-                  target_voices=None, use_strref_filter=USE_STRREF_FILTER,
-                  strref_filter_file=STRREF_FILTER_FILE,
-                  substitutions=None, substitutions_gender=None,
-                  substitutions_sysname=None, sync_all=False):
-    """
-    Reconcile Voicebox's profile list against local voices/ directory.
-
-    If sync_all is True:
-        Syncs ALL voice sample groups found in VOICES_DIR with Voicebox:
-        - Deletes and rebuilds any zero-sample profiles on Voicebox that have local samples.
-        - Composes and imports any missing profiles that have local samples.
-    If sync_all is False:
-        Reconciles Voicebox's profile list against what the filtered CSV needs and what
-        VOICES_DIR can provide, composing and importing missing/zero-sample profiles.
-
-    Args:
-        csv_path, filename_pattern, target_voices, use_strref_filter,
-        strref_filter_file: CSV filter parameters (used when sync_all=False).
-        substitutions/substitutions_gender/substitutions_sysname: Substitution mappings.
-        sync_all (bool): If True, process all available voices in VOICES_DIR.
-
-    Returns:
-        CaseInsensitiveDict: Freshest profile name -> id map available.
-    """
-    if target_voices is None:
-        target_voices = TARGET_VOICES
-
-    profile_map, zero_sample_profiles = get_all_profiles()
-
-    if not AUTO_PROVISION_PROFILES and not sync_all:
-        return profile_map
-
-    available = scan_available_voice_dirs(VOICES_DIR)
-
-    if sync_all:
-        logger.info(f"🔄 Starting full voice profile sync with Voicebox from {VOICES_DIR}/...")
-        target_names = list(available.keys())
-        zero_sample_targets = [name for name in zero_sample_profiles if name in available]
-        missing_targets = [name for name in target_names if name not in profile_map and name not in zero_sample_profiles]
-        already_up_to_date = [name for name in target_names if name in profile_map and name not in zero_sample_profiles]
-    else:
-        needed = scan_csv_needed_voice_names(
-            csv_path, filename_pattern, target_voices, use_strref_filter, strref_filter_file,
-            substitutions, substitutions_gender, substitutions_sysname
-        )
-        zero_sample_targets = [name for name in needed if name in zero_sample_profiles and name in available]
-        missing_targets = [name for name in needed if name not in profile_map and name not in zero_sample_profiles and name in available]
-        already_up_to_date = [name for name in needed if name in profile_map]
-
-        truly_missing = [name for name in needed if name not in profile_map and name not in zero_sample_profiles and name not in available]
-        unfixable_zero = [name for name in needed if name in zero_sample_profiles and name not in available]
-        if truly_missing or unfixable_zero:
-            logger.warning(
-                f"⚠️ {len(truly_missing)} needed voice(s) missing from Voicebox and not found in {VOICES_DIR}/, "
-                f"and {len(unfixable_zero)} zero-sample profile(s) cannot be rebuilt."
-            )
-
-    rebuildable = sorted(zero_sample_targets, key=str.lower)
-    composable = sorted(missing_targets, key=str.lower)
-
-    if not rebuildable and not composable:
-        logger.info(f"✅ All {len(already_up_to_date)} profile(s) are already up to date on Voicebox.")
-        return profile_map
-
-    imported, reimported, failed = [], [], []
-
-    if rebuildable:
-        logger.info(f"♻️ Rebuilding {len(rebuildable)} zero-sample profile(s) from {VOICES_DIR}/...")
-        for voice_name in rebuildable:
-            profile_id = zero_sample_profiles[voice_name]
-            canonical_name = get_canonical_key(available, voice_name)
-            logger.info(f"  Deleting zero-sample profile: {voice_name} (ID: {profile_id})...")
-            success, message = delete_profile(profile_id)
-            if not success:
-                logger.warning(f"  ✗ Failed to delete {voice_name}: {message}")
-                failed.append(voice_name)
-                continue
-            logger.info(f"  ✓ Deleted: {voice_name}")
-            time.sleep(PROFILE_SYNC_RETRY_DELAY)
-
-            logger.info(f"  Rebuilding profile: {canonical_name}...")
-            zip_path = create_profile_package(canonical_name, available[voice_name], PROFILE_PACKAGES_DIR)
-            if not zip_path:
-                failed.append(voice_name)
-                continue
-            result = import_profile_zip(zip_path)
-            if result:
-                reimported.append(canonical_name)
-                logger.info(f"  ✓ Re-imported: {canonical_name}")
-            else:
-                logger.warning(f"  ✗ Failed to re-import: {canonical_name}")
-                failed.append(voice_name)
-
-    if composable:
-        logger.info(f"🧩 Composing and importing {len(composable)} profile(s) from {VOICES_DIR}/...")
-        for voice_name in composable:
-            canonical_name = get_canonical_key(available, voice_name)
-            zip_path = create_profile_package(canonical_name, available[voice_name], PROFILE_PACKAGES_DIR)
-            if not zip_path:
-                failed.append(voice_name)
-                continue
-            result = import_profile_zip(zip_path)
-            if result:
-                imported.append(canonical_name)
-                logger.info(f"  ✓ Imported: {canonical_name}")
-            else:
-                logger.warning(f"  ✗ Failed to import: {canonical_name}")
-                failed.append(voice_name)
-
-    all_imported = imported + reimported
-    if not all_imported:
-        logger.warning("⚠️ Could not import any profiles.")
-        return profile_map
-
-    still_missing = set(all_imported)
-    for attempt in range(1, PROFILE_SYNC_MAX_ATTEMPTS + 1):
-        profile_map, _ = get_all_profiles()
-        still_missing = {name for name in still_missing if name not in profile_map}
-        if not still_missing:
-            break
-        time.sleep(PROFILE_SYNC_RETRY_DELAY)
-
-    if still_missing:
-        logger.warning(
-            f"⚠️ {len(still_missing)} imported/re-imported profile(s) not yet visible after "
-            f"{PROFILE_SYNC_MAX_ATTEMPTS} attempts: {', '.join(sorted(still_missing))}"
-        )
-
-    logger.info("=" * 60)
-    logger.info("VOICE PROFILE SYNC SUMMARY")
-    logger.info("=" * 60)
-    if sync_all:
-        logger.info(f"  Total local voices in {VOICES_DIR}/: {len(available)}")
-    logger.info(f"  New profiles created:             {len(imported)}")
-    logger.info(f"  Zero-sample profiles repaired:    {len(reimported)}")
-    logger.info(f"  Already up to date:               {len(already_up_to_date)}")
-    if failed:
-        logger.warning(f"  Failed:                           {len(failed)} ({', '.join(failed)})")
-    logger.info("=" * 60)
-
-    return profile_map
-
-
-def sync_missing_profiles(csv_path, filename_pattern, target_voices,
+def sync_missing_profiles(provider, csv_path, filename_pattern, target_voices,
                            use_strref_filter, strref_filter_file,
                            substitutions=None, substitutions_gender=None,
                            substitutions_sysname=None):
     """
-    Reconcile Voicebox's profile list against what the CSV needs and what
-    voices/ can provide, composing and importing any missing-but-available
+    Reconcile the active provider's profile list against what the CSV
+    needs and what voices/ can provide, creating any missing-but-available
     profiles before generation starts.
 
-    Convenience wrapper around sync_profiles(sync_all=False).
+    Thin wrapper: scans the CSV + VOICES_DIR (provider-agnostic), then
+    hands the result to reconcile_profiles() (profile_sync.py) which does
+    the actual create/rebuild decisions against `provider`.
 
     Args:
-        csv_path (str): Path to the dialog CSV file.
-        filename_pattern (str): Regex pattern for filename filtering.
-        target_voices (list): List of NPC names to target (empty = all).
-        use_strref_filter (bool): Whether to filter lines by STRREF.
-        strref_filter_file (str): Path to the STRREF JSON filter file.
-        substitutions (dict, optional): NPC name -> voice profile mappings.
-        substitutions_gender (dict, optional): NPC name|gender -> voice profile mappings.
-        substitutions_sysname (dict, optional): sysname -> voice profile mappings.
+        provider (TtsProvider): the active TTS backend.
+        csv_path, filename_pattern, target_voices, use_strref_filter,
+        strref_filter_file: CSV filter parameters.
+        substitutions/substitutions_gender/substitutions_sysname: Substitution mappings.
 
     Returns:
-        CaseInsensitiveDict: Updated profile name -> ID map from Voicebox.
+        dict: Updated profile name -> provider_ref map.
     """
-    return sync_profiles(
-        csv_path=csv_path,
-        filename_pattern=filename_pattern,
-        target_voices=target_voices,
-        use_strref_filter=use_strref_filter,
-        strref_filter_file=strref_filter_file,
-        substitutions=substitutions,
-        substitutions_gender=substitutions_gender,
-        substitutions_sysname=substitutions_sysname,
-        sync_all=False,
+    if not AUTO_PROVISION_PROFILES:
+        profile_map, _ = provider.list_profiles()
+        return profile_map
+
+    needed = scan_csv_needed_voice_names(
+        csv_path, filename_pattern, target_voices, use_strref_filter, strref_filter_file,
+        substitutions, substitutions_gender, substitutions_sysname
+    )
+    available = scan_available_voice_dirs(VOICES_DIR)
+    return reconcile_profiles(
+        provider, available, needed=needed, sync_all=False,
+        max_attempts=PROFILE_SYNC_MAX_ATTEMPTS, retry_delay=PROFILE_SYNC_RETRY_DELAY,
     )
 
 
@@ -1731,139 +1299,6 @@ def mark_as_generated(memory, npc_name, strref):
     """
     voice_memory = memory.setdefault(npc_name, {})
     voice_memory[str(strref)] = True
-
-
-# ============================================================================
-# TTS API Client
-# ============================================================================
-
-def submit_generation(profile_id, text, engine, model_size):
-    """
-    Submit a text-to-speech generation request to the Voicebox API.
-
-    Args:
-        profile_id (int): The numeric ID of the voice profile to use.
-        text (str): The text content to convert to speech.
-        engine (str): The TTS engine to use (e.g., "qwen").
-        model_size (str): The model size (e.g., "0.6B", "1.5B").
-
-    Returns:
-        str: The generation ID assigned by the Voicebox server.
-
-    Raises:
-        requests.exceptions.RequestException: If the API request fails.
-        RuntimeError: If the response does not contain an "id" field.
-
-    Note:
-        The generation ID is required for subsequent status polling
-        and audio download operations.
-    """
-    payload = {
-        "text": text, "profile_id": profile_id, "language": "en",
-        "engine": engine, "model_size": model_size,
-    }
-    resp = requests.post(f"{BASE_URL}{GENERATE_ENDPOINT}", json=payload)
-    resp.raise_for_status()
-    data = resp.json()
-    gen_id = data.get("id")
-    if not gen_id:
-        raise RuntimeError(f"Response missing 'id': {data}")
-    return gen_id
-
-
-def wait_for_completion(gen_id):
-    """
-    Wait for a generation job to complete by streaming Server-Sent Events.
-
-    Connects to the Voicebox API's status endpoint and listens for SSE events
-    until the generation reaches either "completed" or "failed" status.
-
-    Args:
-        gen_id (str): The generation ID returned by submit_generation().
-
-    Returns:
-        dict: The final event data containing at least "status" and
-            potentially "duration" (for completed jobs) or "error"
-            (for failed jobs).
-
-    Raises:
-        requests.exceptions.RequestException: If the SSE connection fails.
-
-    Note:
-        The function blocks until the generation completes or fails.
-        For very slow generations, this may take a long time.
-    """
-    url = f"{BASE_URL}{GENERATE_STATUS_ENDPOINT.format(gen_id=gen_id)}"
-    headers = {"Accept": "text/event-stream"}
-    final_event = None
-
-    with requests.get(url, headers=headers, stream=True) as response:
-        response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
-            if isinstance(line, bytes):
-                line = line.decode("utf-8")
-            if not line or not line.startswith("data: "):
-                continue
-            try:
-                event = json.loads(line[6:])
-            except json.JSONDecodeError:
-                continue
-            if event.get("status") in ("completed", "failed"):
-                final_event = event
-                break
-
-    return final_event
-
-
-def cancel_generation(gen_id):
-    """
-    Cancel a queued or running generation on the Voicebox server.
-
-    Sends a POST request to the /generate/{generation_id}/cancel endpoint.
-
-    Args:
-        gen_id (str): The generation ID to cancel.
-
-    Returns:
-        tuple: (success, message)
-            - success (bool): True if cancellation was successful.
-            - message (str): Status message describing the result.
-    """
-    try:
-        cancel_url = f"{BASE_URL}{GENERATE_CANCEL_ENDPOINT.format(gen_id=gen_id)}"
-        resp = requests.post(cancel_url)
-        if resp.status_code == 200:
-            return True, "Cancellation successful"
-        return False, f"Cancellation returned: {resp.status_code}"
-    except Exception as e:
-        return False, f"Cancellation error: {e}"
-
-
-def download_audio(gen_id, output_path):
-    """
-    Download the generated audio file from the Voicebox API.
-
-    Retrieves the audio for a completed generation job and saves it to
-    the specified output path. The audio is downloaded as raw WAV data
-    (or whatever format the server provides).
-
-    Args:
-        gen_id (str): The generation ID to download.
-        output_path (str): Filesystem path where the audio should be saved.
-
-    Raises:
-        requests.exceptions.RequestException: If the download request fails.
-        OSError: If the output file cannot be written.
-
-    Note:
-        The function does not perform any audio conversion; it saves the
-        raw audio data exactly as received from the server.
-    """
-    url = f"{BASE_URL}{AUDIO_ENDPOINT.format(gen_id=gen_id)}"
-    resp = requests.get(url)
-    resp.raise_for_status()
-    with open(output_path, "wb") as f:
-        f.write(resp.content)
 
 
 # ============================================================================
@@ -2231,7 +1666,10 @@ def estimate_generation_time(regressor, chars):
 
 class HealthCheckWorker(QObject):
     """
-    Periodically polls the Voicebox /health endpoint on a background thread.
+    Periodically polls the active provider's /health endpoint on a
+    background thread. Both Voicebox and omnivoice-server document a
+    GET /health endpoint, so this stays provider-agnostic via
+    provider.base_url rather than needing its own interface method.
 
     Runs its own QTimer (created after moveToThread, so it lives on the
     worker thread) and emits health_checked(reachable, info) on every tick,
@@ -2239,8 +1677,9 @@ class HealthCheckWorker(QObject):
     """
     health_checked = Signal(bool, dict)
 
-    def __init__(self, interval_ms=10000):
+    def __init__(self, provider, interval_ms=10000):
         super().__init__()
+        self.provider = provider
         self.interval_ms = interval_ms
         self._timer = None
 
@@ -2254,7 +1693,7 @@ class HealthCheckWorker(QObject):
     def check_now(self):
         """Perform a single health check immediately."""
         try:
-            resp = requests.get(f"{BASE_URL}/health", timeout=5)
+            resp = requests.get(f"{self.provider.base_url}/health", timeout=5)
             resp.raise_for_status()
             self.health_checked.emit(True, resp.json())
         except Exception as e:
@@ -2272,9 +1711,13 @@ class ProfilesFetchWorker(QObject):
     profiles_loaded = Signal(dict)
     failed = Signal(str)
 
+    def __init__(self, provider):
+        super().__init__()
+        self.provider = provider
+
     def fetch(self):
         try:
-            profile_map, _ = get_all_profiles()
+            profile_map, _ = self.provider.list_profiles()
             self.profiles_loaded.emit(dict(profile_map))
         except Exception as e:
             self.failed.emit(str(e))
@@ -2285,7 +1728,8 @@ class ProfilesFetchWorker(QObject):
 
 class ProfileSyncWorker(QObject):
     """
-    Runs full voice profile synchronization with Voicebox on a background thread.
+    Runs full voice profile synchronization with the active provider on a
+    background thread.
 
     Signals:
         stage(str): Short status message for the status bar.
@@ -2297,17 +1741,24 @@ class ProfileSyncWorker(QObject):
     finished = Signal()
     failed = Signal(str)
 
+    def __init__(self, provider):
+        super().__init__()
+        self.provider = provider
+
     def run(self):
         """
         Execute full voice profile synchronization on the background thread.
 
-        Scans the local voices directory, compares profiles against Voicebox,
-        rebuilds any zero-sample profiles, and creates missing profiles. Emits
-        stage updates, finished on success, or failed with an error message.
+        Scans the local voices directory, compares profiles against the
+        active provider, rebuilds any zero-sample profiles (a no-op for
+        providers without that concept, e.g. OmniVoice-server), and
+        creates missing profiles. Emits stage updates, finished on
+        success, or failed with an error message.
         """
         try:
-            self.stage.emit("Syncing all voice profiles to Voicebox...")
-            sync_profiles(sync_all=True)
+            self.stage.emit("Syncing all voice profiles...")
+            available = scan_available_voice_dirs(VOICES_DIR)
+            reconcile_profiles(self.provider, available, sync_all=True)
             self.stage.emit("Voice profile sync complete.")
             self.finished.emit()
         except Exception as e:
@@ -2355,29 +1806,38 @@ class GenerationWorker(QObject):
     finished = Signal(dict)
     failed = Signal(str)
 
-    def __init__(self):
+    def __init__(self, provider):
         """
         Initialize the GenerationWorker.
 
-        Sets up the internal stop flag event and tracks active generation ID
+        Args:
+            provider (TtsProvider): the active TTS backend. All
+                generation/profile calls go through this instead of
+                module-level Voicebox functions.
+
+        Sets up the internal stop flag event and tracks the active job
         for cancellation support.
         """
         super().__init__()
+        self.provider = provider
         self._stop_requested = threading.Event()
-        self._current_gen_id = None
+        self._current_job = None
 
     def request_stop(self):
         """
         Ask the worker to stop after the current job.
 
-        Attempts to cancel any in-flight generation for a snappier response.
+        Attempts to cancel any in-flight generation for a snappier
+        response, if the active provider supports it (capabilities.
+        supports_cancel -- e.g. OmniVoice-server's single blocking
+        request can't be cancelled mid-flight, so this is a no-op there).
         The worker will finish the current job then halt before starting
         the next one.
         """
         self._stop_requested.set()
-        if self._current_gen_id:
+        if self._current_job and self.provider.capabilities.supports_cancel:
             try:
-                cancel_generation(self._current_gen_id)
+                self.provider.cancel(self._current_job)
             except Exception:
                 pass
 
@@ -2465,13 +1925,21 @@ class GenerationWorker(QObject):
     # Job execution
     # ------------------------------------------------------------------
 
-    def _timeout_monitor(self, stop_event, gen_id, timeout_sec, start_time):
+    def _timeout_monitor(self, stop_event, job, timeout_sec, start_time):
         """
         Monitor thread that checks for timeout and cancels the generation.
 
+        Only ever started when self.provider.capabilities.supports_cancel
+        is True (see process_generation_job) -- for a provider that can't
+        cancel mid-flight (e.g. OmniVoice-server's single blocking
+        request), there is nothing this thread could do once generate()
+        has already been called, so it's skipped entirely rather than
+        spun up to no effect. The timeout safeguard is therefore only
+        meaningful for async, cancellable providers.
+
         Args:
             stop_event (threading.Event): Event to signal when generation completes.
-            gen_id (str): The generation ID to cancel.
+            job (GenerationJob): The job to cancel.
             timeout_sec (float): Timeout in seconds.
             start_time (float): Timestamp when the job started.
 
@@ -2481,27 +1949,28 @@ class GenerationWorker(QObject):
         """
         while not stop_event.is_set():
             if time.time() - start_time > timeout_sec:
-                cancel_generation(gen_id)
+                self.provider.cancel(job)
                 break
             time.sleep(1.0)
 
     def process_generation_job(self, idx, total_jobs, strref, npc_name, voice_name, filename, text,
-                            profile_id, regressor, generation_memory,
+                            profile_ref, regressor, generation_memory,
                             retry_count=0, retry_delay=0.0):
         """
         Execute a single TTS generation job with optional retry on failure.
 
-        Handles the complete lifecycle of one generation:
+        Handles the complete lifecycle of one generation via the active
+        provider (self.provider):
             1. Estimates time based on historical data
             2. Starts a progress ticker thread (emits job_progress every 0.5s)
-            3. Submits the generation request to the Voicebox API
-            4. Starts a timeout monitor thread (if enabled)
-            5. Waits for completion via SSE streaming
+            3. Calls provider.generate() to start the job
+            4. Starts a timeout monitor thread (only if the provider can cancel)
+            5. Calls provider.wait() for completion (a no-op for sync providers)
             6. Emits status updates for post-processing phases:
-            - "Downloading..." during audio download
+            - "Downloading..." while fetching audio
             - "Converting to OGG..." during ffmpeg conversion
             - "Saving memory..." during memory save
-            7. Downloads and converts the audio
+            7. Fetches and converts the audio
             8. Records success in generation memory
             9. Returns results for statistics tracking
 
@@ -2516,7 +1985,7 @@ class GenerationWorker(QObject):
             voice_name (str): Voice profile name.
             filename (str): Output filename base.
             text (str): Preprocessed text to generate.
-            profile_id (int): Voice profile ID.
+            profile_ref (str): Opaque provider-specific profile reference.
             regressor (Regression): Regression for time estimation.
             generation_memory (dict): Generation memory dictionary.
             retry_count (int): Number of retry attempts on failure.
@@ -2532,15 +2001,18 @@ class GenerationWorker(QObject):
 
         Note:
             The progress ticker thread runs in the background and emits
-            job_progress signals to update the GUI's progress bar.
-            The timeout monitor cancels the generation if it exceeds the
-            configured threshold (hard maximum or estimated * multiplier).
+            job_progress signals to update the GUI's progress bar. For
+            providers without supports_mid_job_progress (e.g. OmniVoice-
+            server), the ticker still runs -- it just won't reflect real
+            server-side progress since there's nothing to poll, only
+            elapsed-vs-estimated time.
             Stop requests are honored between attempts.
             Post-generation phases emit status updates to keep the user informed
             of download, conversion, and save progress.
         """
         chars = len(text)
         estimated_sec = estimate_generation_time(regressor, chars)
+        can_cancel = self.provider.capabilities.supports_cancel
 
         max_attempts = retry_count + 1
         attempt = 0
@@ -2564,7 +2036,7 @@ class GenerationWorker(QObject):
             cancel_event = threading.Event()
 
             timeout_sec = None
-            if ENABLE_TIMEOUT_SAFEGUARD:
+            if ENABLE_TIMEOUT_SAFEGUARD and can_cancel:
                 timeout_sec = TIMEOUT_MAX_SECONDS
                 if len(regressor) >= TIMEOUT_MIN_ESTIMATES:
                     timeout_sec = min(timeout_sec, estimated_sec * TIMEOUT_MULTIPLIER)
@@ -2580,23 +2052,22 @@ class GenerationWorker(QObject):
             start_time = time.time()
             elapsed = 0
             audio_duration = 0
-            gen_id = None
-            final_event = None
+            job = None
             monitor_thread = None
 
             try:
-                gen_id = submit_generation(profile_id, text, ENGINE, MODEL_SIZE)
-                self._current_gen_id = gen_id
+                job = self.provider.generate(profile_ref, text)
+                self._current_job = job
 
                 if timeout_sec is not None:
                     monitor_thread = threading.Thread(
                         target=self._timeout_monitor,
-                        args=(cancel_event, gen_id, timeout_sec, start_time),
+                        args=(cancel_event, job, timeout_sec, start_time),
                         daemon=True,
                     )
                     monitor_thread.start()
 
-                final_event = wait_for_completion(gen_id)
+                job = self.provider.wait(job)
 
                 cancel_event.set()
                 if monitor_thread:
@@ -2614,10 +2085,10 @@ class GenerationWorker(QObject):
                 
                 stop_event.set()
                 ticker.join(timeout=1.0)
-                self._current_gen_id = None
+                self._current_job = None
 
-                if final_event and final_event.get("status") == "completed":
-                    audio_duration = final_event.get("duration", 0.0)
+                if job.succeeded:
+                    audio_duration = job.audio_duration
 
                     safe_npc = sanitize_filename(npc_name)
                     npc_output_dir = os.path.join(OUTPUT_DIR, safe_npc)
@@ -2626,8 +2097,10 @@ class GenerationWorker(QObject):
 
                     temp_path = output_path + ".tmp"
                     try:
-                        # Download
-                        download_audio(gen_id, temp_path)
+                        # Fetch (network download for Voicebox; a bytes
+                        # write for OmniVoice-server, which already has
+                        # the audio in hand after generate())
+                        self.provider.fetch_audio(job, temp_path)
                         
                         # --- POST-GENERATION PHASE: Converting ---
                         if CONVERT_TO_OGG:
@@ -2659,14 +2132,16 @@ class GenerationWorker(QObject):
                     save_generation_memory(generation_memory, GENERATION_MEMORY_PATH)
 
                     return True, elapsed, audio_duration, chars, retry_attempts
+                else:
+                    logger.error(f"❌ Generation failed for {filename}: {job.error}")
 
             except Exception as e:
-                if gen_id:
+                if job and can_cancel:
                     try:
-                        cancel_generation(gen_id)
+                        self.provider.cancel(job)
                     except Exception:
                         pass
-                self._current_gen_id = None
+                self._current_job = None
                 cancel_event.set()
                 if monitor_thread:
                     monitor_thread.join(timeout=0.5)
@@ -2746,8 +2221,8 @@ class GenerationWorker(QObject):
                 logger.warning("⏹ Stop requested - halting before the next job.")
                 break
 
-            profile_id = profile_map.get(voice_name)
-            if not profile_id:
+            profile_ref = profile_map.get(voice_name)
+            if not profile_ref:
                 logger.warning(f"Skipping {strref}/{filename}: Voice '{voice_name}' not found.")
                 continue
 
@@ -2760,7 +2235,7 @@ class GenerationWorker(QObject):
 
             success, elapsed, audio_duration, chars, retry_attempts = self.process_generation_job(
                 idx, total_jobs, strref, display_name, voice_name, filename, text,
-                profile_id, regressor, generation_memory, RETRY_COUNT, RETRY_DELAY
+                profile_ref, regressor, generation_memory, RETRY_COUNT, RETRY_DELAY
             )
 
             retry_stats["failed_attempts"] += retry_attempts
@@ -2826,7 +2301,7 @@ class GenerationWorker(QObject):
             In-flight generations are also cancelled for a responsive feel.
         """
         try:
-            log_header_start()
+            log_header_start(self.provider)
 
             self.stage.emit("Loading voice substitutions...")
             substitutions, substitutions_gender, substitutions_sysname = load_voice_substitutions_all()
@@ -2834,7 +2309,7 @@ class GenerationWorker(QObject):
             self.stage.emit("Syncing voice profiles...")
             try:
                 profile_map = sync_missing_profiles(
-                    CSV_PATH, FILENAME_PATTERN, TARGET_VOICES,
+                    self.provider, CSV_PATH, FILENAME_PATTERN, TARGET_VOICES,
                     USE_STRREF_FILTER, STRREF_FILTER_FILE,
                     substitutions, substitutions_gender, substitutions_sysname
                 )
@@ -2967,19 +2442,27 @@ class GenerateWindow(QMainWindow):
         global logger
         logger = log_initialize(self.log_signal)
 
+        # Single shared provider instance for the whole window's lifetime.
+        # Every worker below takes this instead of reading module-level
+        # Voicebox-only globals -- see tts_pipeline/providers/registry.py and the
+        # TTS_PROVIDER / *_CONFIG constants at the top of this file.
+        provider_config = {"voicebox": VOICEBOX_CONFIG, "omnivoice": OMNIVOICE_CONFIG}[TTS_PROVIDER]
+        self.tts_provider = create_provider(TTS_PROVIDER, provider_config)
+
         self.gen_thread: QThread | None = None
         self.worker: GenerationWorker | None = None
         self.sync_thread: QThread | None = None
         self.sync_worker: ProfileSyncWorker | None = None
 
         self.health_thread = QThread()
-        self.health_worker = HealthCheckWorker(interval_ms=10000)
+        self.health_worker = HealthCheckWorker(self.tts_provider, interval_ms=10000)
         self.health_worker.moveToThread(self.health_thread)
         self.health_thread.started.connect(self.health_worker.start)
         self.health_worker.health_checked.connect(self._on_health_checked)
         self.health_thread.start()
 
         self._build_ui()
+        logger.info(f"Using TTS provider: {TTS_PROVIDER}")
         self._refresh_fallback_voices()
 
     # ------------------------------------------------------------------
@@ -3010,34 +2493,43 @@ class GenerateWindow(QMainWindow):
         config_layout = QGridLayout(config_group)
         row = 0
 
-        # Voicebox URL + health dot
-        config_layout.addWidget(QLabel("<b>Voicebox URL:</b>"), row, 0)
-        self.base_url_edit = QLineEdit(BASE_URL)
+        # Provider server URL + health dot. Label says which backend is
+        # active since TTS_PROVIDER picks it (see top-of-file config) --
+        # there's no provider dropdown here yet, per current scope.
+        config_layout.addWidget(QLabel(f"<b>{TTS_PROVIDER.title()} URL:</b>"), row, 0)
+        provider_base_url = getattr(self.tts_provider, "base_url", "")
+        self.base_url_edit = QLineEdit(provider_base_url)
         config_layout.addWidget(self.base_url_edit, row, 1)
         self.health_dot = QLabel()
         self.health_dot.setFixedSize(14, 14)
         self.health_dot.setStyleSheet("background-color: gray; border-radius: 7px;")
-        self.health_dot.setToolTip("Checking Voicebox API health...")
+        self.health_dot.setToolTip(f"Checking {TTS_PROVIDER} API health...")
         config_layout.addWidget(self.health_dot, row, 2)
         row += 1
 
-        # Engine / model size (free text — Voicebox's /generate and /models/status
-        # use inconsistent naming, so there's no reliable list to build a combobox from)
-        config_layout.addWidget(QLabel("<b>Engine:</b>"), row, 0)
-        self.engine_edit = QLineEdit(ENGINE)
-        config_layout.addWidget(self.engine_edit, row, 1)
-        config_layout.addWidget(QLabel("<b>Model size:</b>"), row, 2)
-        self.model_size_edit = QLineEdit(MODEL_SIZE)
-        config_layout.addWidget(self.model_size_edit, row, 3)
-        row += 1
-        engine_warning = QLabel(
-            "⚠️ Free text — Voicebox's /generate and /models/status use different "
-            "naming for the same model. Check /models/status before changing this."
-        )
-        engine_warning.setWordWrap(True)
-        engine_warning.setStyleSheet("color: #b8860b; font-size: 10px;")
-        config_layout.addWidget(engine_warning, row, 0, 1, 4)
-        row += 1
+        # Engine / model size only apply to Voicebox (OmniVoice-server has
+        # no equivalent knobs) -- hidden entirely for other providers
+        # rather than shown-but-inert.
+        self.engine_edit = None
+        self.model_size_edit = None
+        engine_name = getattr(self.tts_provider, "engine", None)
+        model_size_name = getattr(self.tts_provider, "model_size", None)
+        if engine_name is not None or model_size_name is not None:
+            config_layout.addWidget(QLabel("<b>Engine:</b>"), row, 0)
+            self.engine_edit = QLineEdit(str(engine_name or ""))
+            config_layout.addWidget(self.engine_edit, row, 1)
+            config_layout.addWidget(QLabel("<b>Model size:</b>"), row, 2)
+            self.model_size_edit = QLineEdit(str(model_size_name or ""))
+            config_layout.addWidget(self.model_size_edit, row, 3)
+            row += 1
+            engine_warning = QLabel(
+                "⚠️ Free text — Voicebox's /generate and /models/status use different "
+                "naming for the same model. Check /models/status before changing this."
+            )
+            engine_warning.setWordWrap(True)
+            engine_warning.setStyleSheet("color: #b8860b; font-size: 10px;")
+            config_layout.addWidget(engine_warning, row, 0, 1, 4)
+            row += 1
 
         # Retry + timeout safeguard, grouped
         config_layout.addWidget(QLabel("<b>Retry:</b>"), row, 0)
@@ -3253,7 +2745,7 @@ class GenerateWindow(QMainWindow):
         self.sync_btn.setEnabled(False)
 
         self.gen_thread = QThread()
-        self.worker = GenerationWorker()
+        self.worker = GenerationWorker(self.tts_provider)
         self.worker.moveToThread(self.gen_thread)
 
         self.gen_thread.started.connect(self.worker.run)
@@ -3321,7 +2813,7 @@ class GenerateWindow(QMainWindow):
         self.sync_btn.setEnabled(False)
 
         self.sync_thread = QThread()
-        self.sync_worker = ProfileSyncWorker()
+        self.sync_worker = ProfileSyncWorker(self.tts_provider)
         self.sync_worker.moveToThread(self.sync_thread)
 
         self.sync_thread.started.connect(self.sync_worker.run)
@@ -3511,15 +3003,25 @@ class GenerateWindow(QMainWindow):
         self.job_label.setText(f"❌ {message}")
 
     def _save_config_edits(self):
-        """Apply edited configuration fields back to the module-level settings."""
-        global BASE_URL, ENGINE, MODEL_SIZE, RETRY_COUNT, RETRY_DELAY, CONVERT_TO_OGG
+        """Apply edited configuration fields back to the active provider
+        instance and module-level settings.
+
+        Provider fields (base_url, and engine/model_size where the active
+        provider has them) are written onto self.tts_provider directly --
+        there's no longer a BASE_URL/ENGINE/MODEL_SIZE global to assign,
+        since those live on whichever provider TTS_PROVIDER selected."""
+        global RETRY_COUNT, RETRY_DELAY, CONVERT_TO_OGG
         global ENABLE_TIMEOUT_SAFEGUARD, TIMEOUT_MAX_SECONDS, TIMEOUT_MULTIPLIER
         global SKIP_ALREADY_GENERATED, LIMIT, USE_VOICE_FALLBACK
         global FALLBACK_VOICE_MALE, FALLBACK_VOICE_FEMALE, FALLBACK_VOICE_NEUTRAL
 
-        BASE_URL = self.base_url_edit.text().strip()
-        ENGINE = self.engine_edit.text().strip()
-        MODEL_SIZE = self.model_size_edit.text().strip()
+        if hasattr(self.tts_provider, "base_url"):
+            setattr(self.tts_provider, "base_url", self.base_url_edit.text().strip())
+        if self.engine_edit is not None and hasattr(self.tts_provider, "engine"):
+            setattr(self.tts_provider, "engine", self.engine_edit.text().strip())
+        if self.model_size_edit is not None and hasattr(self.tts_provider, "model_size"):
+            setattr(self.tts_provider, "model_size", self.model_size_edit.text().strip())
+
         RETRY_COUNT = self.retry_count_spin.value()
         RETRY_DELAY = self.retry_delay_spin.value()
         CONVERT_TO_OGG = self.convert_ogg_check.isChecked()
@@ -3552,7 +3054,7 @@ class GenerateWindow(QMainWindow):
         """Fetch the current profile list in the background and repopulate the fallback combos."""
         self.refresh_voices_btn.setEnabled(False)
         self.profiles_thread = QThread()
-        self.profiles_worker = ProfilesFetchWorker()
+        self.profiles_worker = ProfilesFetchWorker(self.tts_provider)
         self.profiles_worker.moveToThread(self.profiles_thread)
         self.profiles_thread.started.connect(self.profiles_worker.fetch)
         self.profiles_worker.profiles_loaded.connect(self._on_profiles_loaded)
