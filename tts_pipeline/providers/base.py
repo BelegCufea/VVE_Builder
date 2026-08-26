@@ -25,7 +25,7 @@ from __future__ import annotations
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional
+from typing import Any, Optional
 
 
 @dataclass(frozen=True)
@@ -77,8 +77,12 @@ class GenerationJob:
     # finished audio directly rather than a separate downloadable resource
     _audio_bytes: Optional[bytes] = field(default=None, repr=False)
     # raw audio array (np.ndarray), for providers that run inference
-    # in-process rather than over HTTP (e.g. OmniVoiceProvider)
-    _audio_array: Optional[object] = field(default=None, repr=False)
+    # in-process rather than over HTTP (e.g. OmniVoiceProvider). Typed
+    # Any rather than a stricter ndarray type -- this module has no
+    # numpy dependency of its own, and Any is enough for soundfile.write
+    # (which wants a real ndarray) to type-check at the call site without
+    # importing numpy here just for an annotation.
+    _audio_array: Optional[Any] = field(default=None, repr=False)
 
 
 class TtsProvider(ABC):

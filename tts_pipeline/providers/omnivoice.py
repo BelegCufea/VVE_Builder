@@ -148,9 +148,16 @@ def _pick_reference_sample(files: list, voices_dir: str) -> dict:
 
 
 def _sanitize_profile_id(voice_name: str) -> str:
-    """Voice names from VOICES_DIR can have spaces/other characters --
-    normalize to something safe as a filename stem."""
-    return "".join(c if c.isalnum() or c in "-_" else "-" for c in voice_name.strip().lower())
+    """Strips only characters that are actually illegal in a Windows/
+    filesystem filename. Unlike the old Voicebox zip-naming convention
+    (which lowercased and dashed everything, harmless there since
+    Voicebox matched profiles by its own numeric ID, never by filename),
+    this filename stem IS the profile key list_profiles() returns --
+    it has to round-trip back to the exact voice name the CSV/VOICES_DIR
+    scan uses. CaseInsensitiveDict tolerates a case difference, but not
+    "Prelate Wessalen" vs "prelate-wessalen", so spacing/casing must be
+    preserved here, not normalized away."""
+    return "".join(c for c in voice_name.strip() if c not in '<>:"/\\|?*')
 
 
 class OmniVoiceProvider(TtsProvider):
@@ -192,6 +199,17 @@ class OmniVoiceProvider(TtsProvider):
             self.model_name, device_map=self.device_map, dtype=torch_dtype,
         )
         logger.info("✓ OmniVoice model loaded.")
+
+    def _get_model(self):
+        """Returns the loaded model, asserting non-None for the type
+        checker's benefit. _ensure_model_loaded() must have already been
+        called by every caller of this -- that ordering isn't visible to
+        Pylance across a method boundary, so self._model stays typed
+        Optional at the field level and every direct access after
+        loading gets flagged (reportOptionalMemberAccess) without this
+        narrowing point."""
+        assert self._model is not None, "_ensure_model_loaded() must be called first"
+        return self._model
 
     def _profile_path(self, profile_id: str) -> Path:
         return self.profiles_dir / f"{profile_id}{PROMPT_FILE_SUFFIX}"
@@ -243,7 +261,7 @@ class OmniVoiceProvider(TtsProvider):
 
         try:
             self.profiles_dir.mkdir(parents=True, exist_ok=True)
-            prompt = self._model.create_voice_clone_prompt(
+            prompt = self._get_model().create_voice_clone_prompt(
                 ref_audio=str(chosen["wav_path"]), ref_text=chosen["transcript"],
             )
             prompt.save(str(profile_path))
@@ -279,7 +297,7 @@ class OmniVoiceProvider(TtsProvider):
         try:
             self._ensure_model_loaded()
             prompt = self._load_prompt(profile_ref)
-            audio_list = self._model.generate(
+            audio_list = self._get_model().generate(
                 text=text, voice_clone_prompt=prompt, **self.extra_generate_params,
             )
         except Exception as e:
@@ -299,9 +317,15 @@ class OmniVoiceProvider(TtsProvider):
 
     def fetch_audio(self, job: GenerationJob, output_path: str) -> None:
         """Writes out the audio array already held on the job -- no
-        network involved at all for this provider."""
+        network involved at all for this provider.
+
+        format="WAV" is passed explicitly rather than left for soundfile
+        to infer from output_path's extension: process_generation_job
+        writes to a "<name>.wav.tmp" temp path first, and soundfile can't
+        infer a format from ".tmp" even though ".wav" appears earlier in
+        the name -- inference only looks at the final suffix."""
         audio_array = job._audio_array
         if audio_array is None:
             raise RuntimeError("No audio available on this job -- generate() may have failed.")
         import soundfile as sf
-        sf.write(output_path, audio_array, 24000)
+        sf.write(output_path, audio_array, 24000, format="WAV")
