@@ -2003,6 +2003,29 @@ def convert_to_ogg(input_path, output_path=None, quality=2):
 # CSV Processing
 # ============================================================================
 
+def is_valid_text(text: str) -> bool:
+    """
+    Check if text contains meaningful content for TTS generation.
+
+    Valid text must be non-empty and contain at least one alphanumeric
+    character (letter or digit). This filters out:
+        - Empty strings or strings with only whitespace
+        - Strings with only punctuation (e.g., "?", "...", "!!")
+        - Strings with only special characters
+
+    Note:
+        Numbers-only text like "5" or "123" is considered valid,
+        as TTS engines can read numerals as words (e.g., "five").
+
+    Args:
+        text (str): The text to validate.
+
+    Returns:
+        bool: True if text contains at least one alphanumeric character,
+              False otherwise.
+    """
+    return bool(text and any(char.isalnum() for char in text))
+
 def filter_and_sort_rows(selected_rows, profile_map):
     """
     Filter out rows with missing voice profiles and sort for optimal processing.
@@ -2104,7 +2127,7 @@ def iter_filtered_csv_rows(csv_path, target_voices, filename_pattern, use_strref
                 continue
             if filename_pattern and csv_filename and not re.match(filename_pattern, csv_filename):
                 continue
-            if not text:
+            if not is_valid_text(text):
                 continue
 
             yield strref, sysname, npc_name, gender, csv_filename, text
