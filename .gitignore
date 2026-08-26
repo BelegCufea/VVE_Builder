@@ -18,7 +18,8 @@ mod/
 # Profile & Configuration Data
 # ------------------------------------------------------------
 # User/profile data (compiled voice samples ready for import)
-profiles/            
+profiles/           
+omnivoice-profiles/ 
 # Profile audit logs
 profiles-manage*.json 
 
@@ -69,6 +70,8 @@ dist/
 build/         
 # PyTest cache (explicitly)
 .pytest_cache/   
+# Omnivoice cache
+.omnivoice*
 
 # ------------------------------------------------------------
 # IDE & OS Specific

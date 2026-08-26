@@ -49,7 +49,7 @@ from tts_pipeline.profile_reconciliation import reconcile_profiles
 # constructor) are defined further down, once VOICES_DIR and
 # PROFILE_PACKAGES_DIR exist, so they can reference those instead of
 # duplicating the paths.
-TTS_PROVIDER = "voicebox"
+TTS_PROVIDER = "omnivoice"
 
 # Generation Timeout Safeguards
 ENABLE_TIMEOUT_SAFEGUARD = True
@@ -77,7 +77,7 @@ TARGET_VOICES = [
     # "Edwin",
     # "Neera",
     # "Bodhi",
-    # "Gaelan Bayle"
+    "Prelate Wessalen"
 ]
 VOICE_SUBSTITUTIONS_FILE = r"voice-substitutions.json"
 FILENAME_PATTERN = r"^TS"
