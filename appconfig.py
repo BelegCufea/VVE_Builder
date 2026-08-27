@@ -104,6 +104,7 @@ DEFAULTS: dict = {
     # Audio Conversion Configuration
     "CONVERT_TO_OGG": True,
     "OGG_QUALITY": 4,
+    "MAX_DURATION": 30.0,
 
     # File Paths
     "CSV_PATH": r"dialog-report.csv",
@@ -149,9 +150,13 @@ DEFAULTS: dict = {
     # Voice Profile Auto-Provisioning
     "AUTO_PROVISION_PROFILES": True,
     "VOICES_DIR": r"voices",
+    "VOICES_PREP_DIR": r"voices_prep",
     "PROFILE_PACKAGES_DIR": r"profiles",
     "PROFILE_SYNC_MAX_ATTEMPTS": 10,
     "PROFILE_SYNC_RETRY_DELAY": 3.0,
+
+    # Voice Profile Manager
+    "REALNAME_NOT_FOUND": "RealNameMissing",
 }
 
 # ============================================================================

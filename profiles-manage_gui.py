@@ -26,6 +26,8 @@ import tempfile
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
+from appconfig import cfg
+
 import pandas as pd
 from PySide6.QtCore import Qt, QUrl, QTimer
 from PySide6.QtWidgets import (
@@ -41,34 +43,17 @@ from PySide6.QtGui import QColor, QCursor
 # ============================================================================
 # Configuration
 # ============================================================================
-
-# CSV filtering
-FILENAME_PATTERN = r"^TS"      # regex pattern for filename (column 6)
-
-# Display-only placeholder for rows that have a SystemName but no RealName.
-# Used to build a per-SystemName label (f"{REALNAME_NOT_FOUND} - {SystemName}")
-# so each such row still gets its own selectable entry in the NPC list.
-# NEVER used for voice-profile/sample-file naming on its own -- the detail
-# panel builds f"{REALNAME_NOT_FOUND}_{SystemName}" for that instead.
-REALNAME_NOT_FOUND = "RealNameMissing"
-
-# Audio settings
-OGG_QUALITY = 4                # Vorbis quality (0-10, 4 = good quality/size balance)
-MAX_DURATION = 30.0            # Maximum duration in seconds for a single sample
-
-# File paths (relative to script directory)
-CSV_PATH = "dialog-report.csv"
-VOICES_DIR = "voices"                    # Approved voice profiles (assignable)
-VOICES_PREP_DIR = "voices_prep"          # Raw/unreviewed samples awaiting audit
-VOICE_SUBSTITUTIONS_FILE = "voice-substitutions.json"
-LOG_DIR = r"logs"
+# All of these are shared with the other scripts in the toolset and now
+# live in appconfig.py's DEFAULTS dict, read live via `cfg.NAME` below -
+# no local copy of any of it here to go stale or drift out of sync with
+# generate_gui.py's copies of the same settings.
 
 # ============================================================================
 # Logging Setup
 # ============================================================================
 
 # Ensure log directory exists
-log_dir = Path(LOG_DIR)
+log_dir = Path(cfg.LOG_DIR)
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / f"{Path(__file__).stem}.log"
 
@@ -95,18 +80,21 @@ logger.propagate = False
 # Audio Processing Functions
 # ============================================================================
 
-def convert_to_ogg(input_path: Path, output_path: Path, quality: int = OGG_QUALITY) -> bool:
+def convert_to_ogg(input_path: Path, output_path: Path, quality: Optional[int] = None) -> bool:
     """
     Convert audio file to Ogg Vorbis format using ffmpeg.
     
     Args:
         input_path: Path to input audio file
         output_path: Path to output Ogg file (will be overwritten if exists)
-        quality: Vorbis quality (0-10, 4 is good quality/size balance)
+        quality: Vorbis quality (0-10, 4 is good quality/size balance).
+            Defaults to the current cfg.OGG_QUALITY if not given.
     
     Returns:
         bool: True if conversion succeeded, False otherwise
     """
+    if quality is None:
+        quality = cfg.OGG_QUALITY
     cmd = [
         'ffmpeg',
         '-y',                      # Overwrite output files
@@ -151,11 +139,11 @@ class VoiceProfileEditor(QDialog):
         - etc.
     """
     
-    def __init__(self, profile_name: str, parent=None, source_dir: str = VOICES_DIR, audit_mode: bool = False):
+    def __init__(self, profile_name: str, parent=None, source_dir: Optional[str] = None, audit_mode: bool = False):
         super().__init__(parent)
         self.profile_name = profile_name
         self.parent_window = parent
-        self.source_dir = source_dir
+        self.source_dir = source_dir if source_dir is not None else cfg.VOICES_DIR
         self.audit_mode = audit_mode
         title_prefix = "🎧 Audit Review" if audit_mode else "🎵 Voice Profile Editor"
         self.setWindowTitle(f"{title_prefix}: {profile_name}")
@@ -210,8 +198,8 @@ class VoiceProfileEditor(QDialog):
         # Audit-mode banner + controls (only shown when reviewing voices_prep/)
         if self.audit_mode:
             audit_banner = QLabel(
-                f"🎧 Reviewing unapproved samples in <code>/{VOICES_PREP_DIR}</code> — "
-                f"approve to move them into <code>/{VOICES_DIR}</code> where they become assignable."
+                f"🎧 Reviewing unapproved samples in <code>/{cfg.VOICES_PREP_DIR}</code> — "
+                f"approve to move them into <code>/{cfg.VOICES_DIR}</code> where they become assignable."
             )
             audit_banner.setWordWrap(True)
             layout.addWidget(audit_banner)
@@ -430,13 +418,13 @@ class VoiceProfileEditor(QDialog):
         
         # Check duration and warn
         duration = self._get_audio_duration(input_path)
-        if duration and duration > MAX_DURATION:
-            logger.warning(f"Audio too long: {duration:.1f}s (max: {MAX_DURATION}s)")
+        if duration and duration > cfg.MAX_DURATION:
+            logger.warning(f"Audio too long: {duration:.1f}s (max: {cfg.MAX_DURATION}s)")
             reply = QMessageBox.warning(
                 self,
                 "Audio Too Long",
                 f"The audio file is {duration:.1f}s long.\n\n"
-                f"VoiceBox has a maximum duration of {MAX_DURATION}s.\n"
+                f"VoiceBox has a maximum duration of {cfg.MAX_DURATION}s.\n"
                 "The audio will be uploaded but may be truncated or rejected by the server.\n\n"
                 "Consider trimming it manually in an audio editor.\n\n"
                 "Do you want to continue?",
@@ -467,7 +455,7 @@ class VoiceProfileEditor(QDialog):
         self.status_label.setText(f"🔄 Converting audio...")
         QApplication.processEvents()
         
-        if not convert_to_ogg(input_path, output_wav, OGG_QUALITY):
+        if not convert_to_ogg(input_path, output_wav, cfg.OGG_QUALITY):
             logger.error(f"Failed to convert audio: {input_path}")
             QMessageBox.warning(self, "Conversion Error", 
                 "Failed to convert audio file. Please ensure ffmpeg is installed.")
@@ -832,7 +820,7 @@ class VoiceProfileEditor(QDialog):
     def _approve_all_samples(self):
         """
         Approve this NPC's samples: move all WAV/TXT files for this profile
-        from VOICES_PREP_DIR into VOICES_DIR, where they become an
+        from cfg.VOICES_PREP_DIR into cfg.VOICES_DIR, where they become an
         assignable voice profile. One-way move (no "send back" path).
         """
         if not self._sample_data:
@@ -843,7 +831,7 @@ class VoiceProfileEditor(QDialog):
             self,
             "Approve Samples",
             f"Move {len(self._sample_data)} sample(s) for '{self.profile_name}' "
-            f"from /{VOICES_PREP_DIR} to /{VOICES_DIR}?",
+            f"from /{cfg.VOICES_PREP_DIR} to /{cfg.VOICES_DIR}?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
@@ -855,7 +843,7 @@ class VoiceProfileEditor(QDialog):
         self.media_player.setSource(QUrl())
         QApplication.processEvents()
 
-        voices_dir = Path(VOICES_DIR)
+        voices_dir = Path(cfg.VOICES_DIR)
         voices_dir.mkdir(parents=True, exist_ok=True)
 
         moved_count = 0
@@ -869,8 +857,8 @@ class VoiceProfileEditor(QDialog):
             except Exception as e:
                 logger.error(f"Error approving sample {sample['stem']}: {e}")
 
-        logger.info(f"Approved {moved_count} sample(s) for {self.profile_name}: {VOICES_PREP_DIR} -> {VOICES_DIR}")
-        self.status_label.setText(f"✅ Moved {moved_count} sample(s) to /{VOICES_DIR}")
+        logger.info(f"Approved {moved_count} sample(s) for {self.profile_name}: {cfg.VOICES_PREP_DIR} -> {cfg.VOICES_DIR}")
+        self.status_label.setText(f"✅ Moved {moved_count} sample(s) to /{cfg.VOICES_DIR}")
 
         # This profile is now approved, not prep - close the audit dialog
         # so the caller refreshes the NPC's status from scratch.
@@ -1097,7 +1085,7 @@ def load_csv(csv_path: str) -> pd.DataFrame:
 
 def is_missing_realname_npc(npc_name: str) -> bool:
     """True if this NPC list entry is a synthetic 'missing RealName' placeholder."""
-    return npc_name.startswith(f"{REALNAME_NOT_FOUND} - ")
+    return npc_name.startswith(f"{cfg.REALNAME_NOT_FOUND} - ")
 
 
 def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
@@ -1108,10 +1096,10 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
       for them, and the prepare script never emits a row with a RealName
       but no SystemName anyway.
     - Rows that have a SystemName but no RealName are given a synthetic
-      RealName of f"{REALNAME_NOT_FOUND} - {SystemName}" so they still show
+      RealName of f"{cfg.REALNAME_NOT_FOUND} - {SystemName}" so they still show
       up in the NPC list, grouped one entry per SystemName. This label is
       display-only; the real voice-profile/sample name for these entries
-      is built separately (see REALNAME_NOT_FOUND usage in the GUI).
+      is built separately (see cfg.REALNAME_NOT_FOUND usage in the GUI).
     """
     if df.empty:
         return df
@@ -1129,7 +1117,7 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     missing_real_name = real_names == ""
     if missing_real_name.any():
         df.loc[missing_real_name, "RealName"] = (
-            f"{REALNAME_NOT_FOUND} - " + system_names[missing_real_name]
+            f"{cfg.REALNAME_NOT_FOUND} - " + system_names[missing_real_name]
         )
         logger.info(
             f"Assigned placeholder RealName to {int(missing_real_name.sum())} orphan row(s)"
@@ -1145,7 +1133,7 @@ def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
     
     Rules:
     1. Lines with SoundResRef already set are skipped (already have voice)
-    2. Lines where SoundResRef matches FILENAME_PATTERN are always kept (exception)
+    2. Lines where SoundResRef matches cfg.FILENAME_PATTERN are always kept (exception)
     
     Args:
         df: Original DataFrame from CSV
@@ -1162,7 +1150,7 @@ def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
     is_empty_sound = (sound_refs == '') | (sound_refs == 'nan') | (sound_refs == 'None')
     
     # Check if SoundResRef starts with "TS" (exception - always keep these)
-    is_ts = sound_refs.str.match(FILENAME_PATTERN, na=False)
+    is_ts = sound_refs.str.match(cfg.FILENAME_PATTERN, na=False)
     
     # Keep if: empty SoundResRef OR SoundResRef matches TS pattern
     keep_mask = is_empty_sound | is_ts
@@ -1194,7 +1182,7 @@ def load_json_files():
     gender_substitutions = {}
     sys_substitutions = {}
     
-    path = Path(VOICE_SUBSTITUTIONS_FILE)
+    path = Path(cfg.VOICE_SUBSTITUTIONS_FILE)
     if path.exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -1205,14 +1193,14 @@ def load_json_files():
             gender_substitutions = data.get("gender", {})
             sys_substitutions = data.get("sysname", {})
             
-            logger.info(f"Loaded substitutions from {VOICE_SUBSTITUTIONS_FILE}:")
+            logger.info(f"Loaded substitutions from {cfg.VOICE_SUBSTITUTIONS_FILE}:")
             logger.info(f"  NPC-level: {len(substitutions)} entries")
             logger.info(f"  Gender-level: {len(gender_substitutions)} entries")
             logger.info(f"  SysName-level: {len(sys_substitutions)} entries")
         except Exception as e:
-            logger.error(f"Error loading {VOICE_SUBSTITUTIONS_FILE}: {e}")
+            logger.error(f"Error loading {cfg.VOICE_SUBSTITUTIONS_FILE}: {e}")
     else:
-        logger.info(f"No substitution file found, starting fresh: {VOICE_SUBSTITUTIONS_FILE}")
+        logger.info(f"No substitution file found, starting fresh: {cfg.VOICE_SUBSTITUTIONS_FILE}")
     
     return substitutions, gender_substitutions, sys_substitutions
 
@@ -1235,14 +1223,14 @@ def save_json_files(substitutions: Dict, gender_substitutions: Dict, sys_substit
     }
     
     try:
-        path = Path(VOICE_SUBSTITUTIONS_FILE)
+        path = Path(cfg.VOICE_SUBSTITUTIONS_FILE)
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=2, ensure_ascii=False)
-        logger.info(f"Saved substitutions to {VOICE_SUBSTITUTIONS_FILE}")
+        logger.info(f"Saved substitutions to {cfg.VOICE_SUBSTITUTIONS_FILE}")
         return True
     except Exception as e:
-        logger.error(f"Error saving {VOICE_SUBSTITUTIONS_FILE}: {e}")
+        logger.error(f"Error saving {cfg.VOICE_SUBSTITUTIONS_FILE}: {e}")
         return False
 
 
@@ -1316,7 +1304,7 @@ def get_available_voice_profiles() -> List[str]:
     Groups files like "Boy.wav", "Boy 2.wav", "Boy 3.wav" into a single
     profile "Boy" for the dropdown list.
     """
-    voices_dir = Path(VOICES_DIR)
+    voices_dir = Path(cfg.VOICES_DIR)
     if not voices_dir.exists():
         return []
     
@@ -1331,7 +1319,7 @@ def get_available_voice_profiles() -> List[str]:
 
 def get_existing_voice_files() -> Set[str]:
     """Get set of base voice filenames (without number suffixes)."""
-    voices_dir = Path(VOICES_DIR)
+    voices_dir = Path(cfg.VOICES_DIR)
     if not voices_dir.exists():
         return set()
     
@@ -1345,15 +1333,15 @@ def get_existing_voice_files() -> Set[str]:
 def get_prep_npc_names() -> Set[str]:
     """
     Get the set of NPC names that have unreviewed samples sitting in
-    VOICES_PREP_DIR. These names always match RealName in the CSV
+    cfg.VOICES_PREP_DIR. These names always match RealName in the CSV
     (profiles-prepare.py guarantees this), so no extra reconciliation
     with the CSV is needed here.
 
-    Note: if a name exists in both VOICES_PREP_DIR and VOICES_DIR, the
-    approved VOICES_DIR entry takes priority elsewhere (this function
+    Note: if a name exists in both cfg.VOICES_PREP_DIR and cfg.VOICES_DIR, the
+    approved cfg.VOICES_DIR entry takes priority elsewhere (this function
     just reports what prep contains).
     """
-    prep_dir = Path(VOICES_PREP_DIR)
+    prep_dir = Path(cfg.VOICES_PREP_DIR)
     if not prep_dir.exists():
         return set()
 
@@ -1403,7 +1391,7 @@ def _build_npc_entry(npc_name: str, npc_df: pd.DataFrame, substitutions: Dict,
     Build a single hierarchy entry from an NPC's rows. Shared by
     build_hierarchy() and build_hierarchy_for_npc() so both stay in sync.
 
-    For a synthetic "missing RealName" placeholder (see REALNAME_NOT_FOUND),
+    For a synthetic "missing RealName" placeholder (see cfg.REALNAME_NOT_FOUND),
     npc_df always has exactly one distinct SystemName and at most one
     Gender value. Gender is kept (even if blank) purely for display and for
     the coverage/filter math below, which already works off the SystemName
@@ -1592,7 +1580,7 @@ class VoiceProfileManager(QMainWindow):
         logger.info("Starting Voice Profile Manager...")
 
         # --- Load everything once at startup ---
-        self.df = load_csv(CSV_PATH)
+        self.df = load_csv(cfg.CSV_PATH)
 
         # Drop rows with no SystemName, and give orphan rows (SystemName but
         # no RealName) a synthetic placeholder RealName so they still show
@@ -1621,8 +1609,8 @@ class VoiceProfileManager(QMainWindow):
             save_json_files(self.substitutions, self.gender_substitutions, self.sys_substitutions)
 
         if self.df.empty:
-            logger.error(f"Could not load CSV file: {CSV_PATH}")
-            QMessageBox.critical(self, "Error", f"Could not load CSV file: {CSV_PATH}")
+            logger.error(f"Could not load CSV file: {cfg.CSV_PATH}")
+            QMessageBox.critical(self, "Error", f"Could not load CSV file: {cfg.CSV_PATH}")
 
         self.hierarchy = build_hierarchy(
             self.df, self.substitutions, self.gender_substitutions,
@@ -2048,7 +2036,7 @@ class VoiceProfileManager(QMainWindow):
         """
         Open the voice profile editor for the given profile name.
 
-        When audit_mode is True, the editor opens against VOICES_PREP_DIR
+        When audit_mode is True, the editor opens against cfg.VOICES_PREP_DIR
         showing unreviewed samples with Approve controls instead of
         the normal assignment-oriented sample tools.
 
@@ -2062,7 +2050,7 @@ class VoiceProfileManager(QMainWindow):
         if not profile_name:
             profile_name = "New Profile"
         
-        source_dir = VOICES_PREP_DIR if audit_mode else VOICES_DIR
+        source_dir = cfg.VOICES_PREP_DIR if audit_mode else cfg.VOICES_DIR
         editor = VoiceProfileEditor(profile_name, self, source_dir=source_dir, audit_mode=audit_mode)
         editor.exec()
         
@@ -2159,7 +2147,7 @@ class VoiceProfileManager(QMainWindow):
         sys_container = self._make_voice_combo_with_editor(
             sys_assigned_voice,
             lambda text, s=sysname: self._on_sys_voice_changed(s, text),
-            f"{REALNAME_NOT_FOUND}_{sysname}",
+            f"{cfg.REALNAME_NOT_FOUND}_{sysname}",
             show_lines_callback=show_sys_lines
         )
         sys_form.addRow(f"{sysname} ({total_lines} lines):", sys_container)
@@ -2203,7 +2191,7 @@ class VoiceProfileManager(QMainWindow):
 
         if has_existing:
             self.detail_layout.addWidget(
-                QLabel(f"🎵 Voice file exists: <code>{npc_name}.WAV</code> in /{VOICES_DIR} directory")
+                QLabel(f"🎵 Voice file exists: <code>{npc_name}.WAV</code> in /{cfg.VOICES_DIR} directory")
             )
 
         if npc_data.get("needs_audit", False):
@@ -2211,7 +2199,7 @@ class VoiceProfileManager(QMainWindow):
             audit_frame.setFrameShape(QFrame.Shape.StyledPanel)
             audit_layout = QHBoxLayout(audit_frame)
             audit_layout.addWidget(
-                QLabel(f"🎧 Unapproved sample(s) waiting in /{VOICES_PREP_DIR}"),
+                QLabel(f"🎧 Unapproved sample(s) waiting in /{cfg.VOICES_PREP_DIR}"),
                 stretch=1
             )
             review_btn = QPushButton("🎧 Review Sample(s)")
