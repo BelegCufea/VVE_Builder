@@ -1211,9 +1211,7 @@ def get_candidate_voice_name(npc_name, gender=None, sysname=None,
     return substituted or npc_name or None
 
 
-def scan_csv_needed_voice_names(csv_path, filename_prefix, target_voices,
-                                 use_strref_filter, strref_filter_file,
-                                 substitutions=None, substitutions_gender=None,
+def scan_csv_needed_voice_names(substitutions=None, substitutions_gender=None,
                                  substitutions_sysname=None):
     """
     Scan the dialog CSV and collect the set of voice profile names it needs.
@@ -1222,11 +1220,6 @@ def scan_csv_needed_voice_names(csv_path, filename_prefix, target_voices,
     so the "needed" set matches what would actually be generated.
 
     Args:
-        csv_path (str): Path to the CSV file.
-        filename_prefix (str): Plain-text prefix for filename filtering.
-        target_voices (list): List of NPC names to process (empty = all).
-        use_strref_filter (bool): Whether to use STRREF filter.
-        strref_filter_file (str): Path to STRREF filter JSON file.
         substitutions/substitutions_gender/substitutions_sysname (dict, optional):
             Substitution mappings.
 
@@ -1236,12 +1229,10 @@ def scan_csv_needed_voice_names(csv_path, filename_prefix, target_voices,
     needed = set()
     strref_filter = set()
 
-    if use_strref_filter:
-        strref_filter = load_strref_filter(strref_filter_file)
+    if cfg.USE_STRREF_FILTER:
+        strref_filter = load_strref_filter()
 
-    for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows(
-        csv_path, target_voices, filename_prefix, use_strref_filter, strref_filter
-    ):
+    for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows():
         candidate = get_candidate_voice_name(
             npc_name, gender, sysname, substitutions, substitutions_gender, substitutions_sysname
         )
@@ -1390,11 +1381,8 @@ def import_profile_zip(zip_path):
         return None
 
 
-def sync_profiles(csv_path=None, filename_prefix=None,
-                  target_voices=None, use_strref_filter=None,
-                  strref_filter_file=None,
-                  substitutions=None, substitutions_gender=None,
-                  substitutions_sysname=None, sync_all=False):
+def sync_profiles(substitutions=None, substitutions_gender=None,
+                   substitutions_sysname=None, sync_all=False):
     """
     Reconcile Voicebox's profile list against local voices/ directory.
 
@@ -1407,25 +1395,12 @@ def sync_profiles(csv_path=None, filename_prefix=None,
         cfg.VOICES_DIR can provide, composing and importing missing/zero-sample profiles.
 
     Args:
-        csv_path, filename_prefix, target_voices, use_strref_filter,
-        strref_filter_file: CSV filter parameters (used when sync_all=False).
         substitutions/substitutions_gender/substitutions_sysname: Substitution mappings.
         sync_all (bool): If True, process all available voices in cfg.VOICES_DIR.
 
     Returns:
         CaseInsensitiveDict: Freshest profile name -> id map available.
     """
-    if csv_path is None:
-        csv_path = cfg.CSV_PATH
-    if filename_prefix is None:
-        filename_prefix = cfg.FILENAME_PREFIX
-    if use_strref_filter is None:
-        use_strref_filter = cfg.USE_STRREF_FILTER
-    if strref_filter_file is None:
-        strref_filter_file = cfg.STRREF_FILTER_FILE
-    if target_voices is None:
-        target_voices = cfg.TARGET_VOICES
-
     profile_map, zero_sample_profiles = get_all_profiles()
 
     if not cfg.AUTO_PROVISION_PROFILES and not sync_all:
@@ -1441,7 +1416,6 @@ def sync_profiles(csv_path=None, filename_prefix=None,
         already_up_to_date = [name for name in target_names if name in profile_map and name not in zero_sample_profiles]
     else:
         needed = scan_csv_needed_voice_names(
-            csv_path, filename_prefix, target_voices, use_strref_filter, strref_filter_file,
             substitutions, substitutions_gender, substitutions_sysname
         )
         zero_sample_targets = [name for name in needed if name in zero_sample_profiles and name in available]
@@ -1542,9 +1516,7 @@ def sync_profiles(csv_path=None, filename_prefix=None,
     return profile_map
 
 
-def sync_missing_profiles(csv_path, filename_prefix, target_voices,
-                           use_strref_filter, strref_filter_file,
-                           substitutions=None, substitutions_gender=None,
+def sync_missing_profiles(substitutions=None, substitutions_gender=None,
                            substitutions_sysname=None):
     """
     Reconcile Voicebox's profile list against what the CSV needs and what
@@ -1554,24 +1526,13 @@ def sync_missing_profiles(csv_path, filename_prefix, target_voices,
     Convenience wrapper around sync_profiles(sync_all=False).
 
     Args:
-        csv_path (str): Path to the dialog CSV file.
-        filename_prefix (str): Plain-text prefix for filename filtering.
-        target_voices (list): List of NPC names to target (empty = all).
-        use_strref_filter (bool): Whether to filter lines by STRREF.
-        strref_filter_file (str): Path to the STRREF JSON filter file.
-        substitutions (dict, optional): NPC name -> voice profile mappings.
-        substitutions_gender (dict, optional): NPC name|gender -> voice profile mappings.
-        substitutions_sysname (dict, optional): sysname -> voice profile mappings.
+        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
+            Substitution mappings.
 
     Returns:
         CaseInsensitiveDict: Updated profile name -> ID map from Voicebox.
     """
     return sync_profiles(
-        csv_path=csv_path,
-        filename_prefix=filename_prefix,
-        target_voices=target_voices,
-        use_strref_filter=use_strref_filter,
-        strref_filter_file=strref_filter_file,
         substitutions=substitutions,
         substitutions_gender=substitutions_gender,
         substitutions_sysname=substitutions_sysname,
@@ -2006,12 +1967,9 @@ def filter_and_sort_rows(selected_rows, profile_map):
     return valid_rows
 
 
-def load_strref_filter(filter_file):
+def load_strref_filter():
     """
-    Load the STRREF filter list from a JSON file.
-
-    Args:
-        filter_file (str): Path to the JSON file containing strref list.
+    Load the STRREF filter list from cfg.STRREF_FILTER_FILE.
 
     Returns:
         set: Set of strref strings to process, or empty set if the filter
@@ -2020,6 +1978,7 @@ def load_strref_filter(filter_file):
     Note:
         The filter file is expected to contain a JSON array of STRREF values.
     """
+    filter_file = cfg.STRREF_FILTER_FILE
     if not os.path.exists(filter_file):
         logger.warning(f"⚠️ STRREF filter file not found: {filter_file}")
         logger.warning("   Processing all rows (no filter).")
@@ -2037,7 +1996,7 @@ def load_strref_filter(filter_file):
         return set()
 
 
-def iter_filtered_csv_rows(csv_path, target_voices, filename_prefix, use_strref_filter, strref_filter):
+def iter_filtered_csv_rows():
     """
     Parse the dialog CSV and yield rows that pass the shared row-level filters.
 
@@ -2046,24 +2005,22 @@ def iter_filtered_csv_rows(csv_path, target_voices, filename_prefix, use_strref_
 
     Filters applied, in order:
         - Row must have at least 8 columns.
-        - If use_strref_filter and strref_filter is non-empty: strref must be in it.
-        - If not use_strref_filter: sysname must be non-empty.
-        - If not use_strref_filter and target_voices given: npc_name must be in target_voices.
-        - If filename_prefix and csv_filename are both present: csv_filename must start with it.
+        - If cfg.USE_STRREF_FILTER and strref_filter is non-empty: strref must be in it.
+        - If not cfg.USE_STRREF_FILTER: sysname must be non-empty.
+        - If not cfg.USE_STRREF_FILTER and cfg.TARGET_VOICES given: npc_name must be in target_voices.
+        - If cfg.FILENAME_PREFIX and csv_filename are both present: csv_filename must start with it.
         - text must be non-empty.
-
-    Args:
-        csv_path (str): Path to the CSV file.
-        target_voices (list): List of NPC names to process (empty = all).
-        filename_prefix (str): Plain-text prefix for filename filtering.
-        use_strref_filter (bool): Whether to use STRREF filter.
-        strref_filter (set): Pre-loaded set of STRREFs to process.
 
     Yields:
         tuple: (strref, sysname, npc_name, gender, csv_filename, text)
     """
+    csv_path = cfg.CSV_PATH
     if not os.path.exists(csv_path):
         return
+
+    strref_filter = set()
+    if cfg.USE_STRREF_FILTER:
+        strref_filter = load_strref_filter()
 
     with open(csv_path, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
@@ -2078,14 +2035,14 @@ def iter_filtered_csv_rows(csv_path, target_voices, filename_prefix, use_strref_
             csv_filename = row[5].strip() if len(row) > 5 else ""
             text = row[7].strip() if len(row) > 7 else ""
 
-            if use_strref_filter and strref_filter:
+            if cfg.USE_STRREF_FILTER and strref_filter:
                 if strref not in strref_filter:
                     continue
-            if not use_strref_filter and not sysname:
+            if not cfg.USE_STRREF_FILTER and not sysname:
                 continue
-            if not use_strref_filter and target_voices and npc_name not in target_voices:
+            if not cfg.USE_STRREF_FILTER and cfg.TARGET_VOICES and npc_name not in cfg.TARGET_VOICES:
                 continue
-            if filename_prefix and csv_filename and not csv_filename.startswith(filename_prefix):
+            if cfg.FILENAME_PREFIX and csv_filename and not csv_filename.startswith(cfg.FILENAME_PREFIX):
                 continue
             if not is_valid_text(text):
                 continue
@@ -2093,10 +2050,7 @@ def iter_filtered_csv_rows(csv_path, target_voices, filename_prefix, use_strref_
             yield strref, sysname, npc_name, gender, csv_filename, text
 
 
-def load_and_filter_csv(csv_path, target_voices, filename_prefix, patcher_config,
-                         generation_memory, skip_generated, limit, profile_map=None,
-                         use_strref_filter=False, strref_filter_file="strrefs.json",
-                         force_generated_filenames=False,
+def load_and_filter_csv(patcher_config, generation_memory, profile_map=None,
                          substitutions=None, substitutions_gender=None,
                          substitutions_sysname=None):
     """
@@ -2106,17 +2060,9 @@ def load_and_filter_csv(csv_path, target_voices, filename_prefix, patcher_config
     so we can see how each NPC uses each voice profile.
 
     Args:
-        csv_path (str): Path to the CSV file.
-        target_voices (list): List of NPC names to process (empty = all).
-        filename_prefix (str): Plain-text prefix for filename filtering.
         patcher_config (dict): Patcher configuration for text preprocessing.
         generation_memory (dict): Generation memory for skip checking.
-        skip_generated (bool): Whether to skip already generated files.
-        limit (int): Maximum number of rows to process (0 = all).
         profile_map (dict, optional): Map of available voice profiles for validation.
-        use_strref_filter (bool): Whether to use STRREF filter.
-        strref_filter_file (str): Path to STRREF filter JSON file.
-        force_generated_filenames (bool): If True, always use generated filename.
         substitutions/substitutions_gender/substitutions_sysname (dict, optional):
             Substitution mappings.
 
@@ -2127,95 +2073,80 @@ def load_and_filter_csv(csv_path, target_voices, filename_prefix, patcher_config
     """
     selected_rows = []
     voice_stats = {}
-    strref_filter = set()
 
-    if use_strref_filter:
-        strref_filter = load_strref_filter(strref_filter_file)
-        if strref_filter:
-            logger.info(f"Loaded {len(strref_filter)} STRREFs from filter file.")
+    for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows():
+        if cfg.FORCE_GENERATED_FILENAMES:
+            filename = generate_resref(strref, cfg.FILENAME_PREFIX)
         else:
-            logger.warning("⚠️ No STRREFs loaded from filter file. Processing all rows.")
+            filename = csv_filename if csv_filename and csv_filename.strip() else generate_resref(strref, cfg.FILENAME_PREFIX)
 
-    try:
-        for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows(
-            csv_path, target_voices, filename_prefix, use_strref_filter, strref_filter
-        ):
-            if force_generated_filenames:
-                filename = generate_resref(strref, cfg.FILENAME_PREFIX)
-            else:
-                filename = csv_filename if csv_filename and csv_filename.strip() else generate_resref(strref, cfg.FILENAME_PREFIX)
+        voice_name = get_voice_profile_name(
+            npc_name, gender, profile_map, sysname,
+            substitutions, substitutions_gender, substitutions_sysname
+        )
 
-            voice_name = get_voice_profile_name(
-                npc_name, gender, profile_map, sysname,
-                substitutions, substitutions_gender, substitutions_sysname
-            )
+        if npc_name:
+            display_name = npc_name
+        elif sysname:
+            display_name = f"Unknown ({sysname})"
+        else:
+            display_name = "Description"
 
-            if npc_name:
-                display_name = npc_name
-            elif sysname:
-                display_name = f"Unknown ({sysname})"
-            else:
-                display_name = "Description"
+        # Preprocess text first (before any stats)
+        text = preprocess_text(text, patcher_config) if patcher_config else text
 
-            # Preprocess text first (before any stats)
-            text = preprocess_text(text, patcher_config) if patcher_config else text
+        # skip lines with invalid text
+        if not is_valid_text(text):
+            continue
 
-            # skip lines with invalid text
-            if not is_valid_text(text):
-                continue
+        # Create a unique key: voice_name + display_name
+        key = f"{voice_name}|{display_name}" if voice_name else f"None|{display_name}"
 
-            # Create a unique key: voice_name + display_name
-            key = f"{voice_name}|{display_name}" if voice_name else f"None|{display_name}"
-
-            # Initialize stats for this voice + NPC combination if not exists
-            if key not in voice_stats:
-                voice_stats[key] = {
-                    "voice_name": voice_name,
-                    "display_name": display_name,
+        # Initialize stats for this voice + NPC combination if not exists
+        if key not in voice_stats:
+            voice_stats[key] = {
+                "voice_name": voice_name,
+                "display_name": display_name,
+                "total": 0,
+                "done": 0,
+                "skipped": 0,
+                "to_generate": 0,
+                "chars": {
                     "total": 0,
                     "done": 0,
                     "skipped": 0,
                     "to_generate": 0,
-                    "chars": {
-                        "total": 0,
-                        "done": 0,
-                        "skipped": 0,
-                        "to_generate": 0,
-                    },
-                }
+                },
+            }
 
-            voice_stats[key]["total"] += 1
-            voice_stats[key]["chars"]["total"] += len(text)
+        voice_stats[key]["total"] += 1
+        voice_stats[key]["chars"]["total"] += len(text)
 
-            # If no voice_name, skip - can't generate
-            if voice_name is None:
-                voice_stats[key]["skipped"] += 1
-                voice_stats[key]["chars"]["skipped"] += len(text)
-                continue
+        # If no voice_name, skip - can't generate
+        if voice_name is None:
+            voice_stats[key]["skipped"] += 1
+            voice_stats[key]["chars"]["skipped"] += len(text)
+            continue
 
-            # If voice_name not in profile_map, skip
-            if profile_map is not None and voice_name not in profile_map:
-                voice_stats[key]["skipped"] += 1
-                voice_stats[key]["chars"]["skipped"] += len(text)
-                continue
+        # If voice_name not in profile_map, skip
+        if profile_map is not None and voice_name not in profile_map:
+            voice_stats[key]["skipped"] += 1
+            voice_stats[key]["chars"]["skipped"] += len(text)
+            continue
 
-            # If already generated, skip
-            if skip_generated and is_already_generated(generation_memory, display_name, strref):
-                voice_stats[key]["done"] += 1
-                voice_stats[key]["chars"]["done"] += len(text)
-                continue
+        # If already generated, skip
+        if cfg.SKIP_ALREADY_GENERATED and is_already_generated(generation_memory, display_name, strref):
+            voice_stats[key]["done"] += 1
+            voice_stats[key]["chars"]["done"] += len(text)
+            continue
 
-            voice_stats[key]["to_generate"] += 1
-            voice_stats[key]["chars"]["to_generate"] += len(text)
+        voice_stats[key]["to_generate"] += 1
+        voice_stats[key]["chars"]["to_generate"] += len(text)
 
-            selected_rows.append((strref, display_name, voice_name, filename, text))
+        selected_rows.append((strref, display_name, voice_name, filename, text))
 
-            if limit and len(selected_rows) >= limit:
-                break
-
-    except Exception as e:
-        logger.error(f"❌ Error reading CSV: {e}")
-        raise
+        if cfg.LIMIT and len(selected_rows) >= cfg.LIMIT:
+            break
 
     return selected_rows, voice_stats
 
@@ -2862,8 +2793,6 @@ class GenerationWorker(QObject):
             self.stage.emit("Syncing voice profiles...")
             try:
                 profile_map = sync_missing_profiles(
-                    cfg.CSV_PATH, cfg.FILENAME_PREFIX, cfg.TARGET_VOICES,
-                    cfg.USE_STRREF_FILTER, cfg.STRREF_FILTER_FILE,
                     substitutions, substitutions_gender, substitutions_sysname
                 )
                 logger.info(f"Loaded {len(profile_map)} voice profiles.")
@@ -2889,9 +2818,7 @@ class GenerationWorker(QObject):
             self.stage.emit("Reading and filtering dialog CSV...")
             try:
                 selected_rows, voice_stats = load_and_filter_csv(
-                    cfg.CSV_PATH, cfg.TARGET_VOICES, cfg.FILENAME_PREFIX, patcher_config,
-                    generation_memory, cfg.SKIP_ALREADY_GENERATED, cfg.LIMIT, profile_map,
-                    cfg.USE_STRREF_FILTER, cfg.STRREF_FILTER_FILE, cfg.FORCE_GENERATED_FILENAMES,
+                    patcher_config, generation_memory, profile_map,
                     substitutions, substitutions_gender, substitutions_sysname
                 )
             except Exception as e:
