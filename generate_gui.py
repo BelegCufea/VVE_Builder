@@ -25,6 +25,7 @@ import shutil
 import zipfile
 import requests
 import logging
+from appconfig import cfg, set_many as _appconfig_set_many
 from collections import defaultdict
 from runstats import Regression
 from datetime import datetime, timedelta
@@ -42,80 +43,10 @@ from PySide6.QtWidgets import (
 # ============================================================================
 # Configuration Constants
 # ============================================================================
-# Voicebox API Configuration
-BASE_URL = "http://10.0.50.5:17600"    # VoiceBox API - http://localhost:17493 for local server, or remote URL for remote server
-ENGINE = "qwen"
-MODEL_SIZE = "1.7B"
-
-# Voicebox API Endpoints (relative to BASE_URL)
-PROFILES_ENDPOINT = "/profiles"
-PROFILES_IMPORT_ENDPOINT = "/profiles/import"
-GENERATE_ENDPOINT = "/generate"
-GENERATE_STATUS_ENDPOINT = "/generate/{gen_id}/status"
-GENERATE_CANCEL_ENDPOINT = "/generate/{gen_id}/cancel"
-AUDIO_ENDPOINT = "/audio/{gen_id}"
-
-# Generation Timeout Safeguards
-ENABLE_TIMEOUT_SAFEGUARD = True
-TIMEOUT_MAX_SECONDS = 600
-TIMEOUT_MULTIPLIER = 3.0
-TIMEOUT_MIN_ESTIMATES = 10
-
-# Retry Configuration
-RETRY_COUNT = 3
-RETRY_DELAY = 5.0
-
-# Audio Conversion Configuration
-CONVERT_TO_OGG = True
-OGG_QUALITY = 4
-
-# File Paths
-CSV_PATH = r"dialog-report.csv"
-PATCHER_CONFIG_PATH = r"patcher-config.json"
-OUTPUT_DIR = r"output"
-
-# Generation Limits and filters
-LIMIT = 0
-TARGET_VOICES = [
-    # "Jaheira",
-    # "Edwin",
-    # "Neera",
-    # "Bodhi",
-    # "Gaelan Bayle"
-]
-VOICE_SUBSTITUTIONS_FILE = r"voice-substitutions.json"
-FILENAME_PATTERN = r"^TS"
-
-# STRREF Filtering
-USE_STRREF_FILTER = False
-STRREF_FILTER_FILE = r"strrefs.json"
-
-# Voice Fallback Configuration
-USE_VOICE_FALLBACK = False
-FALLBACK_VOICE_MALE = "BG1 Narrator"
-FALLBACK_VOICE_FEMALE = "BG3 Narrator"
-FALLBACK_VOICE_NEUTRAL = "Description Narrator"
-
-# Filename Generation
-FORCE_GENERATED_FILENAMES = False
-RESREF_PREFIX = "TS"
-
-# Generation memory
-SKIP_ALREADY_GENERATED = True
-GENERATION_MEMORY_PATH = r"generation-memory.json"
-
-# Logging
-LOG_DIR = r"logs"
-
-# Pre-generation Summary Options
-COMPACT_SUMMARY = True
-
-# Voice Profile Auto-Provisioning
-AUTO_PROVISION_PROFILES = True
-VOICES_DIR = r"voices"
-PROFILE_PACKAGES_DIR = r"profiles"
-PROFILE_SYNC_MAX_ATTEMPTS = 10
-PROFILE_SYNC_RETRY_DELAY = 3.0
+# Every shared / cross-script setting - including the Voicebox endpoint
+# paths, for consistency - now lives in appconfig.py's DEFAULTS dict and
+# is read live via `cfg.NAME` wherever it's used below. There is no
+# local copy of any of it here to go stale.
 
 
 # ============================================================================
@@ -375,7 +306,7 @@ def log_initialize(log_signal: LogSignal):
         The console handler, when attached, shows ERROR and above; the GUI
         handler shows INFO and above.
     """
-    log_dir = Path(LOG_DIR)
+    log_dir = Path(cfg.LOG_DIR)
     log_dir.mkdir(parents=True, exist_ok=True)
     log_file = log_dir / f"{Path(__file__).stem}.log"
     logger = logging.getLogger()
@@ -429,7 +360,7 @@ def log_header_start():
     """
     lines = ["", "=" * 70, "Voice over Generation",
               f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 70,
-              f"TTS Engine: {ENGINE}" + (f" ({MODEL_SIZE})" if MODEL_SIZE and MODEL_SIZE.strip() else "")]
+              f"TTS Engine: {cfg.ENGINE}" + (f" ({cfg.MODEL_SIZE})" if cfg.MODEL_SIZE and cfg.MODEL_SIZE.strip() else "")]
     logger.info("\n".join(lines))
 
 
@@ -461,7 +392,7 @@ def log_pregeneration_summary(voice_stats, profile_map):
         - Lines remaining to generate (To Gen)
         - Total character count
 
-    If COMPACT_SUMMARY is True:
+    If cfg.COMPACT_SUMMARY is True:
         - Only NPCs with valid voices AND pending work are shown in detail
         - NPCs with missing voices are summarized in a single line
         - NPCs with valid voices but nothing to generate are summarized
@@ -497,30 +428,30 @@ def log_pregeneration_summary(voice_stats, profile_map):
     header_lines.append("\n" + "=" * LINE_LENGTH)
     header_lines.append("📊 PRE-GENERATION VOICE SUMMARY")
 
-    if TARGET_VOICES:
-        header_lines.append(f"   🔍 Filter mode: TARGET_VOICES ({len(TARGET_VOICES)} NPCs)")
+    if cfg.TARGET_VOICES:
+        header_lines.append(f"   🔍 Filter mode: cfg.TARGET_VOICES ({len(cfg.TARGET_VOICES)} NPCs)")
     else:
-        header_lines.append("   📡 Scan mode: ALL lines (no TARGET_VOICES filter)")
+        header_lines.append("   📡 Scan mode: ALL lines (no cfg.TARGET_VOICES filter)")
 
-    if USE_VOICE_FALLBACK:
-        header_lines.append(f"   🔄 Voice fallback ENABLED: M->{FALLBACK_VOICE_MALE}, F->{FALLBACK_VOICE_FEMALE}, NEUTRAL->{FALLBACK_VOICE_NEUTRAL}")
+    if cfg.USE_VOICE_FALLBACK:
+        header_lines.append(f"   🔄 Voice fallback ENABLED: M->{cfg.FALLBACK_VOICE_MALE}, F->{cfg.FALLBACK_VOICE_FEMALE}, NEUTRAL->{cfg.FALLBACK_VOICE_NEUTRAL}")
     else:
         header_lines.append("   ⛔ Voice fallback DISABLED")
 
-    if USE_STRREF_FILTER:
+    if cfg.USE_STRREF_FILTER:
         try:
-            with open(STRREF_FILTER_FILE, "r") as f:
+            with open(cfg.STRREF_FILTER_FILE, "r") as f:
                 count = len(json.load(f))
-            header_lines.append(f"   📋 STRREF filter ENABLED: {count} STRREFs from {STRREF_FILTER_FILE}")
+            header_lines.append(f"   📋 STRREF filter ENABLED: {count} STRREFs from {cfg.STRREF_FILTER_FILE}")
         except Exception:
-            header_lines.append(f"   📋 STRREF filter ENABLED (file: {STRREF_FILTER_FILE})")
+            header_lines.append(f"   📋 STRREF filter ENABLED (file: {cfg.STRREF_FILTER_FILE})")
     else:
         header_lines.append("   📋 STRREF filter DISABLED")
 
-    if FORCE_GENERATED_FILENAMES:
-        header_lines.append(f"   🔧 Filenames: FORCED generated (base36) with prefix: {RESREF_PREFIX}")
+    if cfg.FORCE_GENERATED_FILENAMES:
+        header_lines.append(f"   🔧 Filenames: FORCED generated (base36) with prefix: {cfg.RESREF_PREFIX}")
     else:
-        header_lines.append(f"   🔧 Filenames: CSV with base36 fallback (prefix: {RESREF_PREFIX})")
+        header_lines.append(f"   🔧 Filenames: CSV with base36 fallback (prefix: {cfg.RESREF_PREFIX})")
 
     header_lines.append("=" * LINE_LENGTH)
 
@@ -577,14 +508,14 @@ def log_pregeneration_summary(voice_stats, profile_map):
             done_chars_total += chars_done
             done_done_total += done
             done_skipped_total += skipped
-            show_in_detail = (not COMPACT_SUMMARY) or (to_gen > 0)
+            show_in_detail = (not cfg.COMPACT_SUMMARY) or (to_gen > 0)
             profile_str = f"✅ {voice_name}"
         else:
             missing_npcs.append(display_name)
             missing_chars_total += chars_skipped
             missing_done_total += done
             missing_skipped_total += skipped
-            if not COMPACT_SUMMARY:
+            if not cfg.COMPACT_SUMMARY:
                 show_in_detail = True
                 profile_str = f"❌ Missing"
 
@@ -716,8 +647,8 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
         - Character statistics (total, processed)
         - Performance metrics (average time per character)
         - Status (completed or stopped)
-        - Already generated files (detailed if COMPACT_SUMMARY is False)
-        - Missing voices (detailed if COMPACT_SUMMARY is False)
+        - Already generated files (detailed if cfg.COMPACT_SUMMARY is False)
+        - Missing voices (detailed if cfg.COMPACT_SUMMARY is False)
         - Retry statistics (if provided)
         - Completion timestamp
 
@@ -861,8 +792,8 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
     
     lines.append("")
 
-    # ----- Detailed Breakdown (if COMPACT_SUMMARY is False) -----
-    if not COMPACT_SUMMARY:
+    # ----- Detailed Breakdown (if cfg.COMPACT_SUMMARY is False) -----
+    if not cfg.COMPACT_SUMMARY:
         lines.append("📋 DETAILED BREAKDOWN")
         lines.append("-" * 70)
         
@@ -1077,7 +1008,7 @@ def load_voice_substitutions_all():
     """
     substitutions, substitutions_gender, substitutions_sysname = {}, {}, {}
 
-    path = Path(VOICE_SUBSTITUTIONS_FILE)
+    path = Path(cfg.VOICE_SUBSTITUTIONS_FILE)
     if path.exists():
         try:
             with open(path, "r", encoding="utf-8") as f:
@@ -1085,14 +1016,14 @@ def load_voice_substitutions_all():
             substitutions = data.get("npc", {})
             substitutions_gender = data.get("gender", {})
             substitutions_sysname = data.get("sysname", {})
-            logger.info(f"Loaded substitutions from {VOICE_SUBSTITUTIONS_FILE}:")
+            logger.info(f"Loaded substitutions from {cfg.VOICE_SUBSTITUTIONS_FILE}:")
             logger.info(f"  NPC-level: {len(substitutions)} entries")
             logger.info(f"  Gender-level: {len(substitutions_gender)} entries")
             logger.info(f"  SysName-level: {len(substitutions_sysname)} entries")
         except Exception as e:
-            logger.warning(f"⚠️ Could not load voice substitutions from {VOICE_SUBSTITUTIONS_FILE}: {e}")
+            logger.warning(f"⚠️ Could not load voice substitutions from {cfg.VOICE_SUBSTITUTIONS_FILE}: {e}")
     else:
-        logger.info(f"No substitution file found, using defaults: {VOICE_SUBSTITUTIONS_FILE}")
+        logger.info(f"No substitution file found, using defaults: {cfg.VOICE_SUBSTITUTIONS_FILE}")
 
     return substitutions, substitutions_gender, substitutions_sysname
 
@@ -1141,7 +1072,7 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
     2. NPC name + Gender substitution (substitutions_gender)
     3. NPC name only substitution (substitutions)
     4. NPC name as profile name (if it exists in profile_map)
-    5. Gender-based fallback (if USE_VOICE_FALLBACK is True)
+    5. Gender-based fallback (if cfg.USE_VOICE_FALLBACK is True)
     6. Neutral/unknown fallback
 
     Args:
@@ -1159,7 +1090,7 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
         >>> get_voice_profile_name("Bandit", "M")
         "Bandit male"
         >>> get_voice_profile_name("", "M")
-        "BG1 Narrator"  # Uses FALLBACK_VOICE_MALE
+        "BG1 Narrator"  # Uses cfg.FALLBACK_VOICE_MALE
     """
     substituted = resolve_voice_substitution(
         npc_name, gender, sysname, substitutions, substitutions_gender, substitutions_sysname
@@ -1172,13 +1103,13 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
     if npc_name and profile_map is not None and npc_name in profile_map:
         return get_canonical_key(profile_map, npc_name)
 
-    if USE_VOICE_FALLBACK:
+    if cfg.USE_VOICE_FALLBACK:
         if gender == "M":
-            return FALLBACK_VOICE_MALE
+            return cfg.FALLBACK_VOICE_MALE
         elif gender == "F":
-            return FALLBACK_VOICE_FEMALE
+            return cfg.FALLBACK_VOICE_FEMALE
         else:
-            return FALLBACK_VOICE_NEUTRAL
+            return cfg.FALLBACK_VOICE_NEUTRAL
 
     return None
 
@@ -1198,7 +1129,7 @@ def delete_profile(profile_id):
             - message (str): Status message describing the result.
     """
     try:
-        delete_url = f"{BASE_URL}{PROFILES_ENDPOINT}/{profile_id}"
+        delete_url = f"{cfg.BASE_URL}{cfg.PROFILES_ENDPOINT}/{profile_id}"
         resp = requests.delete(delete_url)
         if resp.status_code == 200:
             return True, "Profile deleted successfully"
@@ -1225,7 +1156,7 @@ def get_all_profiles():
     Note:
         Profiles without a name or ID are silently skipped.
     """
-    resp = requests.get(f"{BASE_URL}{PROFILES_ENDPOINT}")
+    resp = requests.get(f"{cfg.BASE_URL}{cfg.PROFILES_ENDPOINT}")
     resp.raise_for_status()
 
     profile_map = CaseInsensitiveDict()
@@ -1460,7 +1391,7 @@ def import_profile_zip(zip_path):
     try:
         with open(zip_path, "rb") as f:
             files = {"file": (zip_path.name, f, "application/zip")}
-            resp = requests.post(f"{BASE_URL}{PROFILES_IMPORT_ENDPOINT}", files=files)
+            resp = requests.post(f"{cfg.BASE_URL}{cfg.PROFILES_IMPORT_ENDPOINT}", files=files)
             resp.raise_for_status()
             return resp.json()
     except requests.exceptions.RequestException as e:
@@ -1468,43 +1399,51 @@ def import_profile_zip(zip_path):
         return None
 
 
-def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
-                  target_voices=None, use_strref_filter=USE_STRREF_FILTER,
-                  strref_filter_file=STRREF_FILTER_FILE,
+def sync_profiles(csv_path=None, filename_pattern=None,
+                  target_voices=None, use_strref_filter=None,
+                  strref_filter_file=None,
                   substitutions=None, substitutions_gender=None,
                   substitutions_sysname=None, sync_all=False):
     """
     Reconcile Voicebox's profile list against local voices/ directory.
 
     If sync_all is True:
-        Syncs ALL voice sample groups found in VOICES_DIR with Voicebox:
+        Syncs ALL voice sample groups found in cfg.VOICES_DIR with Voicebox:
         - Deletes and rebuilds any zero-sample profiles on Voicebox that have local samples.
         - Composes and imports any missing profiles that have local samples.
     If sync_all is False:
         Reconciles Voicebox's profile list against what the filtered CSV needs and what
-        VOICES_DIR can provide, composing and importing missing/zero-sample profiles.
+        cfg.VOICES_DIR can provide, composing and importing missing/zero-sample profiles.
 
     Args:
         csv_path, filename_pattern, target_voices, use_strref_filter,
         strref_filter_file: CSV filter parameters (used when sync_all=False).
         substitutions/substitutions_gender/substitutions_sysname: Substitution mappings.
-        sync_all (bool): If True, process all available voices in VOICES_DIR.
+        sync_all (bool): If True, process all available voices in cfg.VOICES_DIR.
 
     Returns:
         CaseInsensitiveDict: Freshest profile name -> id map available.
     """
+    if csv_path is None:
+        csv_path = cfg.CSV_PATH
+    if filename_pattern is None:
+        filename_pattern = cfg.FILENAME_PATTERN
+    if use_strref_filter is None:
+        use_strref_filter = cfg.USE_STRREF_FILTER
+    if strref_filter_file is None:
+        strref_filter_file = cfg.STRREF_FILTER_FILE
     if target_voices is None:
-        target_voices = TARGET_VOICES
+        target_voices = cfg.TARGET_VOICES
 
     profile_map, zero_sample_profiles = get_all_profiles()
 
-    if not AUTO_PROVISION_PROFILES and not sync_all:
+    if not cfg.AUTO_PROVISION_PROFILES and not sync_all:
         return profile_map
 
-    available = scan_available_voice_dirs(VOICES_DIR)
+    available = scan_available_voice_dirs(cfg.VOICES_DIR)
 
     if sync_all:
-        logger.info(f"🔄 Starting full voice profile sync with Voicebox from {VOICES_DIR}/...")
+        logger.info(f"🔄 Starting full voice profile sync with Voicebox from {cfg.VOICES_DIR}/...")
         target_names = list(available.keys())
         zero_sample_targets = [name for name in zero_sample_profiles if name in available]
         missing_targets = [name for name in target_names if name not in profile_map and name not in zero_sample_profiles]
@@ -1522,7 +1461,7 @@ def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
         unfixable_zero = [name for name in needed if name in zero_sample_profiles and name not in available]
         if truly_missing or unfixable_zero:
             logger.warning(
-                f"⚠️ {len(truly_missing)} needed voice(s) missing from Voicebox and not found in {VOICES_DIR}/, "
+                f"⚠️ {len(truly_missing)} needed voice(s) missing from Voicebox and not found in {cfg.VOICES_DIR}/, "
                 f"and {len(unfixable_zero)} zero-sample profile(s) cannot be rebuilt."
             )
 
@@ -1536,7 +1475,7 @@ def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
     imported, reimported, failed = [], [], []
 
     if rebuildable:
-        logger.info(f"♻️ Rebuilding {len(rebuildable)} zero-sample profile(s) from {VOICES_DIR}/...")
+        logger.info(f"♻️ Rebuilding {len(rebuildable)} zero-sample profile(s) from {cfg.VOICES_DIR}/...")
         for voice_name in rebuildable:
             profile_id = zero_sample_profiles[voice_name]
             canonical_name = get_canonical_key(available, voice_name)
@@ -1547,10 +1486,10 @@ def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
                 failed.append(voice_name)
                 continue
             logger.info(f"  ✓ Deleted: {voice_name}")
-            time.sleep(PROFILE_SYNC_RETRY_DELAY)
+            time.sleep(cfg.PROFILE_SYNC_RETRY_DELAY)
 
             logger.info(f"  Rebuilding profile: {canonical_name}...")
-            zip_path = create_profile_package(canonical_name, available[voice_name], PROFILE_PACKAGES_DIR)
+            zip_path = create_profile_package(canonical_name, available[voice_name], cfg.PROFILE_PACKAGES_DIR)
             if not zip_path:
                 failed.append(voice_name)
                 continue
@@ -1563,10 +1502,10 @@ def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
                 failed.append(voice_name)
 
     if composable:
-        logger.info(f"🧩 Composing and importing {len(composable)} profile(s) from {VOICES_DIR}/...")
+        logger.info(f"🧩 Composing and importing {len(composable)} profile(s) from {cfg.VOICES_DIR}/...")
         for voice_name in composable:
             canonical_name = get_canonical_key(available, voice_name)
-            zip_path = create_profile_package(canonical_name, available[voice_name], PROFILE_PACKAGES_DIR)
+            zip_path = create_profile_package(canonical_name, available[voice_name], cfg.PROFILE_PACKAGES_DIR)
             if not zip_path:
                 failed.append(voice_name)
                 continue
@@ -1584,24 +1523,24 @@ def sync_profiles(csv_path=CSV_PATH, filename_pattern=FILENAME_PATTERN,
         return profile_map
 
     still_missing = set(all_imported)
-    for attempt in range(1, PROFILE_SYNC_MAX_ATTEMPTS + 1):
+    for attempt in range(1, cfg.PROFILE_SYNC_MAX_ATTEMPTS + 1):
         profile_map, _ = get_all_profiles()
         still_missing = {name for name in still_missing if name not in profile_map}
         if not still_missing:
             break
-        time.sleep(PROFILE_SYNC_RETRY_DELAY)
+        time.sleep(cfg.PROFILE_SYNC_RETRY_DELAY)
 
     if still_missing:
         logger.warning(
             f"⚠️ {len(still_missing)} imported/re-imported profile(s) not yet visible after "
-            f"{PROFILE_SYNC_MAX_ATTEMPTS} attempts: {', '.join(sorted(still_missing))}"
+            f"{cfg.PROFILE_SYNC_MAX_ATTEMPTS} attempts: {', '.join(sorted(still_missing))}"
         )
 
     logger.info("=" * 60)
     logger.info("VOICE PROFILE SYNC SUMMARY")
     logger.info("=" * 60)
     if sync_all:
-        logger.info(f"  Total local voices in {VOICES_DIR}/: {len(available)}")
+        logger.info(f"  Total local voices in {cfg.VOICES_DIR}/: {len(available)}")
     logger.info(f"  New profiles created:             {len(imported)}")
     logger.info(f"  Zero-sample profiles repaired:    {len(reimported)}")
     logger.info(f"  Already up to date:               {len(already_up_to_date)}")
@@ -1792,7 +1731,7 @@ def submit_generation(profile_id, text, engine, model_size):
         "text": text, "profile_id": profile_id, "language": "en",
         "engine": engine, "model_size": model_size,
     }
-    resp = requests.post(f"{BASE_URL}{GENERATE_ENDPOINT}", json=payload)
+    resp = requests.post(f"{cfg.BASE_URL}{cfg.GENERATE_ENDPOINT}", json=payload)
     resp.raise_for_status()
     data = resp.json()
     gen_id = data.get("id")
@@ -1823,7 +1762,7 @@ def wait_for_completion(gen_id):
         The function blocks until the generation completes or fails.
         For very slow generations, this may take a long time.
     """
-    url = f"{BASE_URL}{GENERATE_STATUS_ENDPOINT.format(gen_id=gen_id)}"
+    url = f"{cfg.BASE_URL}{cfg.GENERATE_STATUS_ENDPOINT.format(gen_id=gen_id)}"
     headers = {"Accept": "text/event-stream"}
     final_event = None
 
@@ -1860,7 +1799,7 @@ def cancel_generation(gen_id):
             - message (str): Status message describing the result.
     """
     try:
-        cancel_url = f"{BASE_URL}{GENERATE_CANCEL_ENDPOINT.format(gen_id=gen_id)}"
+        cancel_url = f"{cfg.BASE_URL}{cfg.GENERATE_CANCEL_ENDPOINT.format(gen_id=gen_id)}"
         resp = requests.post(cancel_url)
         if resp.status_code == 200:
             return True, "Cancellation successful"
@@ -1889,7 +1828,7 @@ def download_audio(gen_id, output_path):
         The function does not perform any audio conversion; it saves the
         raw audio data exactly as received from the server.
     """
-    url = f"{BASE_URL}{AUDIO_ENDPOINT.format(gen_id=gen_id)}"
+    url = f"{cfg.BASE_URL}{cfg.AUDIO_ENDPOINT.format(gen_id=gen_id)}"
     resp = requests.get(url)
     resp.raise_for_status()
     with open(output_path, "wb") as f:
@@ -2211,9 +2150,9 @@ def load_and_filter_csv(csv_path, target_voices, filename_pattern, patcher_confi
             csv_path, target_voices, filename_pattern, use_strref_filter, strref_filter
         ):
             if force_generated_filenames:
-                filename = generate_resref(strref, RESREF_PREFIX)
+                filename = generate_resref(strref, cfg.RESREF_PREFIX)
             else:
-                filename = csv_filename if csv_filename and csv_filename.strip() else generate_resref(strref, RESREF_PREFIX)
+                filename = csv_filename if csv_filename and csv_filename.strip() else generate_resref(strref, cfg.RESREF_PREFIX)
 
             voice_name = get_voice_profile_name(
                 npc_name, gender, profile_map, sysname,
@@ -2352,7 +2291,7 @@ class HealthCheckWorker(QObject):
     def check_now(self):
         """Perform a single health check immediately."""
         try:
-            resp = requests.get(f"{BASE_URL}/health", timeout=5)
+            resp = requests.get(f"{cfg.BASE_URL}/health", timeout=5)
             resp.raise_for_status()
             self.health_checked.emit(True, resp.json())
         except Exception as e:
@@ -2662,10 +2601,10 @@ class GenerationWorker(QObject):
             cancel_event = threading.Event()
 
             timeout_sec = None
-            if ENABLE_TIMEOUT_SAFEGUARD:
-                timeout_sec = TIMEOUT_MAX_SECONDS
-                if len(regressor) >= TIMEOUT_MIN_ESTIMATES:
-                    timeout_sec = min(timeout_sec, estimated_sec * TIMEOUT_MULTIPLIER)
+            if cfg.ENABLE_TIMEOUT_SAFEGUARD:
+                timeout_sec = cfg.TIMEOUT_MAX_SECONDS
+                if len(regressor) >= cfg.TIMEOUT_MIN_ESTIMATES:
+                    timeout_sec = min(timeout_sec, estimated_sec * cfg.TIMEOUT_MULTIPLIER)
 
             ticker = threading.Thread(
                 target=self._job_progress_ticker,
@@ -2683,7 +2622,7 @@ class GenerationWorker(QObject):
             monitor_thread = None
 
             try:
-                gen_id = submit_generation(profile_id, text, ENGINE, MODEL_SIZE)
+                gen_id = submit_generation(profile_id, text, cfg.ENGINE, cfg.MODEL_SIZE)
                 self._current_gen_id = gen_id
 
                 if timeout_sec is not None:
@@ -2718,7 +2657,7 @@ class GenerationWorker(QObject):
                     audio_duration = final_event.get("duration", 0.0)
 
                     safe_npc = sanitize_filename(npc_name)
-                    npc_output_dir = os.path.join(OUTPUT_DIR, safe_npc)
+                    npc_output_dir = os.path.join(cfg.OUTPUT_DIR, safe_npc)
                     os.makedirs(npc_output_dir, exist_ok=True)
                     output_path = os.path.join(npc_output_dir, f"{filename}.wav")
 
@@ -2728,14 +2667,14 @@ class GenerationWorker(QObject):
                         download_audio(gen_id, temp_path)
                         
                         # --- POST-GENERATION PHASE: Converting ---
-                        if CONVERT_TO_OGG:
+                        if cfg.CONVERT_TO_OGG:
                             self.job_progress.emit({
                                 "idx": idx, "total": total_jobs, "strref": strref, "filename": filename,
                                 "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
                                 "percent": 100, "elapsed": elapsed, "estimated": estimated_sec,
                                 "timeout": timeout_sec, "status": "Converting to OGG..."
                             })
-                            convert_to_ogg(temp_path, output_path, OGG_QUALITY)
+                            convert_to_ogg(temp_path, output_path, cfg.OGG_QUALITY)
                             os.remove(temp_path)
                         else:
                             os.rename(temp_path, output_path)
@@ -2754,7 +2693,7 @@ class GenerationWorker(QObject):
                         raise e
 
                     mark_as_generated(generation_memory, npc_name, strref)
-                    save_generation_memory(generation_memory, GENERATION_MEMORY_PATH)
+                    save_generation_memory(generation_memory, cfg.GENERATION_MEMORY_PATH)
 
                     return True, elapsed, audio_duration, chars, retry_attempts
 
@@ -2858,7 +2797,7 @@ class GenerationWorker(QObject):
 
             success, elapsed, audio_duration, chars, retry_attempts = self.process_generation_job(
                 idx, total_jobs, strref, display_name, voice_name, filename, text,
-                profile_id, regressor, generation_memory, RETRY_COUNT, RETRY_DELAY
+                profile_id, regressor, generation_memory, cfg.RETRY_COUNT, cfg.RETRY_DELAY
             )
 
             retry_stats["failed_attempts"] += retry_attempts
@@ -2932,8 +2871,8 @@ class GenerationWorker(QObject):
             self.stage.emit("Syncing voice profiles...")
             try:
                 profile_map = sync_missing_profiles(
-                    CSV_PATH, FILENAME_PATTERN, TARGET_VOICES,
-                    USE_STRREF_FILTER, STRREF_FILTER_FILE,
+                    cfg.CSV_PATH, cfg.FILENAME_PATTERN, cfg.TARGET_VOICES,
+                    cfg.USE_STRREF_FILTER, cfg.STRREF_FILTER_FILE,
                     substitutions, substitutions_gender, substitutions_sysname
                 )
                 logger.info(f"Loaded {len(profile_map)} voice profiles.")
@@ -2944,14 +2883,14 @@ class GenerationWorker(QObject):
 
             self.stage.emit("Loading patcher configuration...")
             try:
-                patcher_config = load_patcher_config(PATCHER_CONFIG_PATH)
+                patcher_config = load_patcher_config(cfg.PATCHER_CONFIG_PATH)
                 logger.info("Loaded patcher config.")
             except Exception as e:
                 patcher_config = None
                 logger.warning(f"⚠️ Could not load patcher config: {e}")
 
-            generation_memory = load_generation_memory(GENERATION_MEMORY_PATH)
-            if SKIP_ALREADY_GENERATED:
+            generation_memory = load_generation_memory(cfg.GENERATION_MEMORY_PATH)
+            if cfg.SKIP_ALREADY_GENERATED:
                 logger.info("Already generated files will be skipped.")
             else:
                 logger.info("Skipping already generated files is disabled.")
@@ -2959,9 +2898,9 @@ class GenerationWorker(QObject):
             self.stage.emit("Reading and filtering dialog CSV...")
             try:
                 selected_rows, voice_stats = load_and_filter_csv(
-                    CSV_PATH, TARGET_VOICES, FILENAME_PATTERN, patcher_config,
-                    generation_memory, SKIP_ALREADY_GENERATED, LIMIT, profile_map,
-                    USE_STRREF_FILTER, STRREF_FILTER_FILE, FORCE_GENERATED_FILENAMES,
+                    cfg.CSV_PATH, cfg.TARGET_VOICES, cfg.FILENAME_PATTERN, patcher_config,
+                    generation_memory, cfg.SKIP_ALREADY_GENERATED, cfg.LIMIT, profile_map,
+                    cfg.USE_STRREF_FILTER, cfg.STRREF_FILTER_FILE, cfg.FORCE_GENERATED_FILENAMES,
                     substitutions, substitutions_gender, substitutions_sysname
                 )
             except Exception as e:
@@ -2972,7 +2911,7 @@ class GenerationWorker(QObject):
             total_jobs = len(selected_rows)
             total_chars_all = sum(len(text) for *_, text in selected_rows)
 
-            filename_mode = "FORCED generated (base36)" if FORCE_GENERATED_FILENAMES else "CSV with base36 fallback"
+            filename_mode = "FORCED generated (base36)" if cfg.FORCE_GENERATED_FILENAMES else "CSV with base36 fallback"
             logger.info(f"Selected {total_jobs} rows. Total characters: {total_chars_all}")
             logger.info(f"Filename mode: {filename_mode}")
             log_header_summary(total_jobs, total_chars_all)
@@ -3080,17 +3019,17 @@ class ConfigDialog(QDialog):
         # configuration bar (it's created here but re-parented there in
         # GenerateWindow._build_ui, since it needs to stay visible even
         # when this dialog is closed).
-        self.base_url_edit = QLineEdit(BASE_URL)
+        self.base_url_edit = QLineEdit(cfg.BASE_URL)
         self.health_dot = QLabel()
         self.health_dot.setFixedSize(14, 14)
         self.health_dot.setStyleSheet("background-color: gray; border-radius: 7px;")
         self.health_dot.setToolTip("Checking Voicebox API health...")
         form.addRow("<b>Voicebox URL:</b>", self.base_url_edit)
 
-        self.engine_edit = QLineEdit(ENGINE)
+        self.engine_edit = QLineEdit(cfg.ENGINE)
         form.addRow("<b>Engine:</b>", self.engine_edit)
 
-        self.model_size_edit = QLineEdit(MODEL_SIZE)
+        self.model_size_edit = QLineEdit(cfg.MODEL_SIZE)
         form.addRow("<b>Model size:</b>", self.model_size_edit)
 
         engine_warning = QLabel(
@@ -3115,31 +3054,31 @@ class ConfigDialog(QDialog):
         self.retry_count_spin = QSpinBox()
         self.retry_count_spin.setRange(0, 20)
         self.retry_count_spin.setSuffix(" x times")
-        self.retry_count_spin.setValue(RETRY_COUNT)
+        self.retry_count_spin.setValue(cfg.RETRY_COUNT)
         self.retry_delay_spin = QDoubleSpinBox()
         self.retry_delay_spin.setRange(0.0, 120.0)
         self.retry_delay_spin.setSingleStep(0.5)
         self.retry_delay_spin.setSuffix(" s delay")
-        self.retry_delay_spin.setValue(RETRY_DELAY)
+        self.retry_delay_spin.setValue(cfg.RETRY_DELAY)
         retry_box.addWidget(self.retry_count_spin)
         retry_box.addWidget(self.retry_delay_spin)
         form.addRow("<b>Retry:</b>", retry_box)
 
         # Timeout safeguard
         self.timeout_enable_check = QCheckBox("Enabled")
-        self.timeout_enable_check.setChecked(ENABLE_TIMEOUT_SAFEGUARD)
+        self.timeout_enable_check.setChecked(cfg.ENABLE_TIMEOUT_SAFEGUARD)
         form.addRow("<b>Timeout safeguard:</b>", self.timeout_enable_check)
 
         timeout_box = QHBoxLayout()
         self.timeout_max_spin = QSpinBox()
         self.timeout_max_spin.setRange(10, 7200)
         self.timeout_max_spin.setSuffix(" s max")
-        self.timeout_max_spin.setValue(TIMEOUT_MAX_SECONDS)
+        self.timeout_max_spin.setValue(cfg.TIMEOUT_MAX_SECONDS)
         self.timeout_multiplier_spin = QDoubleSpinBox()
         self.timeout_multiplier_spin.setRange(1.0, 10.0)
         self.timeout_multiplier_spin.setSingleStep(0.5)
         self.timeout_multiplier_spin.setSuffix(" x estimate")
-        self.timeout_multiplier_spin.setValue(TIMEOUT_MULTIPLIER)
+        self.timeout_multiplier_spin.setValue(cfg.TIMEOUT_MULTIPLIER)
         timeout_box.addWidget(self.timeout_max_spin)
         timeout_box.addWidget(self.timeout_multiplier_spin)
         form.addRow("", timeout_box)
@@ -3150,13 +3089,13 @@ class ConfigDialog(QDialog):
 
         # Ogg / skip already generated
         self.convert_ogg_check = QCheckBox("Convert generated audio to Ogg")
-        self.convert_ogg_check.setChecked(CONVERT_TO_OGG)
+        self.convert_ogg_check.setChecked(cfg.CONVERT_TO_OGG)
         form.addRow("<b>Audio:</b>", self.convert_ogg_check)
 
         ogg_quality_box = QHBoxLayout()
         self.ogg_quality_spin = QSpinBox()
         self.ogg_quality_spin.setRange(-1, 10)
-        self.ogg_quality_spin.setValue(OGG_QUALITY)
+        self.ogg_quality_spin.setValue(cfg.OGG_QUALITY)
         self.ogg_quality_spin.setToolTip(
             "libvorbis -qscale:a. -1 = smallest/worst, 10 = largest/best. "
             "4 is a good default (~128 kbps)."
@@ -3171,7 +3110,7 @@ class ConfigDialog(QDialog):
         self.ogg_quality_spin.setEnabled(self.convert_ogg_check.isChecked())
 
         self.skip_generated_check = QCheckBox("Skip already generated")
-        self.skip_generated_check.setChecked(SKIP_ALREADY_GENERATED)
+        self.skip_generated_check.setChecked(cfg.SKIP_ALREADY_GENERATED)
         form.addRow("", self.skip_generated_check)
 
         sep2 = QFrame()
@@ -3181,7 +3120,7 @@ class ConfigDialog(QDialog):
         # Limit
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(0, 1_000_000)
-        self.limit_spin.setValue(LIMIT)
+        self.limit_spin.setValue(cfg.LIMIT)
         self.limit_spin.setSpecialValueText("No limit")
         form.addRow("<b>Limit:</b>", self.limit_spin)
         limit_hint = QLabel("Max jobs to process this run. Set to 0 to remove the limit.")
@@ -3200,7 +3139,7 @@ class ConfigDialog(QDialog):
 
         enable_row = QHBoxLayout()
         self.fallback_enable_check = QCheckBox("Enabled")
-        self.fallback_enable_check.setChecked(USE_VOICE_FALLBACK)
+        self.fallback_enable_check.setChecked(cfg.USE_VOICE_FALLBACK)
         self.refresh_voices_btn = QPushButton("🔄 Refresh voices")
         enable_row.addWidget(self.fallback_enable_check)
         enable_row.addStretch()
@@ -3212,9 +3151,9 @@ class ConfigDialog(QDialog):
         self.fallback_neutral_combo = QComboBox()
 
         for label, combo, current in [
-            ("Male:", self.fallback_male_combo, FALLBACK_VOICE_MALE),
-            ("Female:", self.fallback_female_combo, FALLBACK_VOICE_FEMALE),
-            ("Neutral:", self.fallback_neutral_combo, FALLBACK_VOICE_NEUTRAL),
+            ("Male:", self.fallback_male_combo, cfg.FALLBACK_VOICE_MALE),
+            ("Female:", self.fallback_female_combo, cfg.FALLBACK_VOICE_FEMALE),
+            ("Neutral:", self.fallback_neutral_combo, cfg.FALLBACK_VOICE_NEUTRAL),
         ]:
             combo.setEditable(True)
             combo.addItem(current)
@@ -3723,29 +3662,26 @@ class GenerateWindow(QMainWindow):
         self.config_summary_label.setText("  •  ".join(bits))
 
     def _save_config_edits(self):
-        """Apply edited configuration fields back to the module-level settings."""
-        global BASE_URL, ENGINE, MODEL_SIZE, RETRY_COUNT, RETRY_DELAY, CONVERT_TO_OGG, OGG_QUALITY
-        global ENABLE_TIMEOUT_SAFEGUARD, TIMEOUT_MAX_SECONDS, TIMEOUT_MULTIPLIER
-        global SKIP_ALREADY_GENERATED, LIMIT, USE_VOICE_FALLBACK
-        global FALLBACK_VOICE_MALE, FALLBACK_VOICE_FEMALE, FALLBACK_VOICE_NEUTRAL
-
+        """Apply edited configuration fields to appconfig in one batched write."""
         d = self.config_dialog
-        BASE_URL = d.base_url_edit.text().strip()
-        ENGINE = d.engine_edit.text().strip()
-        MODEL_SIZE = d.model_size_edit.text().strip()
-        RETRY_COUNT = d.retry_count_spin.value()
-        RETRY_DELAY = d.retry_delay_spin.value()
-        CONVERT_TO_OGG = d.convert_ogg_check.isChecked()
-        OGG_QUALITY = d.ogg_quality_spin.value()
-        ENABLE_TIMEOUT_SAFEGUARD = d.timeout_enable_check.isChecked()
-        TIMEOUT_MAX_SECONDS = d.timeout_max_spin.value()
-        TIMEOUT_MULTIPLIER = d.timeout_multiplier_spin.value()
-        SKIP_ALREADY_GENERATED = d.skip_generated_check.isChecked()
-        LIMIT = d.limit_spin.value()
-        USE_VOICE_FALLBACK = d.fallback_enable_check.isChecked()
-        FALLBACK_VOICE_MALE = d.fallback_male_combo.currentText().strip()
-        FALLBACK_VOICE_FEMALE = d.fallback_female_combo.currentText().strip()
-        FALLBACK_VOICE_NEUTRAL = d.fallback_neutral_combo.currentText().strip()
+        _appconfig_set_many({
+            "BASE_URL": d.base_url_edit.text().strip(),
+            "ENGINE": d.engine_edit.text().strip(),
+            "MODEL_SIZE": d.model_size_edit.text().strip(),
+            "RETRY_COUNT": d.retry_count_spin.value(),
+            "RETRY_DELAY": d.retry_delay_spin.value(),
+            "CONVERT_TO_OGG": d.convert_ogg_check.isChecked(),
+            "OGG_QUALITY": d.ogg_quality_spin.value(),
+            "ENABLE_TIMEOUT_SAFEGUARD": d.timeout_enable_check.isChecked(),
+            "TIMEOUT_MAX_SECONDS": d.timeout_max_spin.value(),
+            "TIMEOUT_MULTIPLIER": d.timeout_multiplier_spin.value(),
+            "SKIP_ALREADY_GENERATED": d.skip_generated_check.isChecked(),
+            "LIMIT": d.limit_spin.value(),
+            "USE_VOICE_FALLBACK": d.fallback_enable_check.isChecked(),
+            "FALLBACK_VOICE_MALE": d.fallback_male_combo.currentText().strip(),
+            "FALLBACK_VOICE_FEMALE": d.fallback_female_combo.currentText().strip(),
+            "FALLBACK_VOICE_NEUTRAL": d.fallback_neutral_combo.currentText().strip(),
+        })
 
         logger.info("Configuration updated from UI.")
         self.statusBar().showMessage("Configuration saved.", 3000)

@@ -31,8 +31,10 @@ weidu/*.tp2
 weidu/export/        
 
 # ------------------------------------------------------------
-# Logs & Temporary Files
+# Global congif, Logs & Temporary Files
 # ------------------------------------------------------------
+# App config
+appconfig.json
 # All log files
 *.log                
 # Backup files
