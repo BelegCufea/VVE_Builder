@@ -2027,10 +2027,26 @@ def scan_csv_for_npc_targets():
         
         # Initialize NPC entry if new
         if display_name not in npc_data:
-            # Determine status by reading current cfg values
+            # Determine status by reading current cfg values.
+            #
+            # "on_voicebox" is checked against voice_name (the resolved,
+            # possibly-substituted profile name) - that's genuinely what
+            # would be used at generation time.
+            #
+            # "importable" must ALSO check display_name/npc_name directly
+            # against available_voices: sample folders in VOICES_DIR are
+            # named after the raw NPC name (see profiles-manage_gui.py's
+            # get_available_voice_profiles()/get_existing_voice_files()),
+            # not after whatever substitution or fallback voice_name may
+            # resolve to. An NPC with no substitution rule and no existing
+            # profile has voice_name == None, so checking only voice_name
+            # here would always report "missing" even with a same-named
+            # sample folder sitting right there in VOICES_DIR. Checking
+            # voice_name too still catches the case where a *substituted*
+            # name has its own importable samples.
             if voice_name and voice_name in profile_map:
                 status = "on_voicebox"
-            elif voice_name and voice_name in available_voices:
+            elif (voice_name and voice_name in available_voices) or display_name in available_voices:
                 status = "importable"
             else:
                 status = "missing"
@@ -3042,6 +3058,409 @@ class GenerationWorker(QObject):
 # Configuration Dialog
 # ============================================================================
 
+class NPCTargetsDialog(QDialog):
+    """
+    Standalone dialog for picking which NPCs to generate for (TARGET_VOICES)
+    and for toggling "Skip already generated" (SKIP_ALREADY_GENERATED).
+
+    Split out of ConfigDialog because the two settings are entangled: the
+    NPC list's line counts and "already generated" status depend on
+    SKIP_ALREADY_GENERATED, so changing that setting has to be reflected
+    immediately in this list, not after a separate "Save Config" click
+    elsewhere. To make that work, SKIP_ALREADY_GENERATED is written to
+    appconfig the instant its checkbox is toggled (live, like every other
+    cfg.* read in this app - no parameter passing) and the list is
+    immediately rescanned against that new value.
+
+    TARGET_VOICES itself is NOT live - it's only written when the user
+    clicks "Save & Close", same as it was in the old NPC Targets tab.
+    Only SKIP_ALREADY_GENERATED needed to be live here; the NPC selection
+    is naturally a batch edit (check/uncheck many rows, then commit).
+
+    The NPC list loads automatically when this dialog opens and again
+    whenever SKIP_ALREADY_GENERATED changes - there's no manual "Refresh
+    from CSV" button anymore.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("NPC Targets")
+        self.resize(800, 600)
+        self._npc_data_loaded = False
+        self._raw_npc_data = {}
+        self._build_ui()
+        # Auto-load on open - no manual refresh button.
+        self._refresh_npc_targets()
+
+    # ------------------------------------------------------------------
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        # --- Skip-already-generated (live) ---
+        self.skip_generated_check = QCheckBox("Skip already generated")
+        self.skip_generated_check.setChecked(cfg.SKIP_ALREADY_GENERATED)
+        self.skip_generated_check.setToolTip(
+            "Saved immediately when toggled, and rescans the list below "
+            "right away to reflect it - no need to click Save & Close."
+        )
+        self.skip_generated_check.toggled.connect(self._on_skip_generated_toggled)
+        layout.addWidget(self.skip_generated_check)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        layout.addWidget(sep)
+
+        # --- Filter/Search Controls ---
+        filter_layout = QHBoxLayout()
+
+        search_label = QLabel("🔍 Search:")
+        self.npc_search_edit = QLineEdit()
+        self.npc_search_edit.setPlaceholderText("Filter by NPC name...")
+        self.npc_search_edit.textChanged.connect(self._filter_npc_table)
+
+        clear_search_btn = QPushButton("Clear")
+        clear_search_btn.clicked.connect(lambda: self.npc_search_edit.clear())
+
+        status_label = QLabel("Status:")
+        self.npc_status_filter = QComboBox()
+        self.npc_status_filter.addItems(["All", "✅ On Voicebox", "📁 Importable", "❌ Missing"])
+        self.npc_status_filter.currentTextChanged.connect(self._filter_npc_table)
+
+        sort_label = QLabel("Sort:")
+        self.npc_sort_combo = QComboBox()
+        self.npc_sort_combo.addItems(["Name (A-Z)", "Lines (High-Low)", "Lines (Low-High)"])
+        self.npc_sort_combo.currentTextChanged.connect(self._sort_npc_table)
+
+        filter_layout.addWidget(search_label)
+        filter_layout.addWidget(self.npc_search_edit, stretch=1)
+        filter_layout.addWidget(clear_search_btn)
+        filter_layout.addWidget(status_label)
+        filter_layout.addWidget(self.npc_status_filter)
+        filter_layout.addWidget(sort_label)
+        filter_layout.addWidget(self.npc_sort_combo)
+
+        layout.addLayout(filter_layout)
+
+        # --- NPC Table ---
+        self.npc_targets_table = QTableWidget()
+        self.npc_targets_table.setColumnCount(4)
+        self.npc_targets_table.setHorizontalHeaderLabels(["☑", "NPC Name", "Status", "Lines"])
+        self.npc_targets_table.horizontalHeader().setStretchLastSection(False)
+        self.npc_targets_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
+        self.npc_targets_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.npc_targets_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
+        self.npc_targets_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
+        self.npc_targets_table.setColumnWidth(0, 40)
+        self.npc_targets_table.setColumnWidth(2, 150)
+        self.npc_targets_table.setColumnWidth(3, 100)
+        self.npc_targets_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+
+        layout.addWidget(self.npc_targets_table, stretch=1)
+
+        # --- Action Buttons ---
+        buttons_layout = QHBoxLayout()
+
+        self.select_all_btn = QPushButton("Select All")
+        self.select_all_btn.clicked.connect(lambda: self._set_all_npc_checkboxes(True))
+
+        self.select_none_btn = QPushButton("Select None")
+        self.select_none_btn.clicked.connect(lambda: self._set_all_npc_checkboxes(False))
+
+        self.select_profiles_btn = QPushButton("✅ Only with Profiles")
+        self.select_profiles_btn.setToolTip("Select only NPCs with available voice profiles")
+        self.select_profiles_btn.clicked.connect(self._select_npcs_with_profiles)
+
+        self.clear_targets_btn = QPushButton("🗑️ Clear All Targets")
+        self.clear_targets_btn.setToolTip("Clear TARGET_VOICES to process all NPCs")
+        self.clear_targets_btn.clicked.connect(self._clear_all_targets)
+
+        buttons_layout.addWidget(self.select_all_btn)
+        buttons_layout.addWidget(self.select_none_btn)
+        buttons_layout.addWidget(self.select_profiles_btn)
+        buttons_layout.addStretch()
+        buttons_layout.addWidget(self.clear_targets_btn)
+
+        layout.addLayout(buttons_layout)
+
+        # --- Status Label ---
+        self.npc_status_label = QLabel("Loading NPC list...")
+        self.npc_status_label.setStyleSheet("color: gray; font-style: italic;")
+        layout.addWidget(self.npc_status_label)
+
+        # --- Dialog buttons ---
+        dialog_buttons = QHBoxLayout()
+        dialog_buttons.addStretch()
+        self.cancel_npc_btn = QPushButton("Cancel")
+        self.cancel_npc_btn.clicked.connect(self.reject)
+        dialog_buttons.addWidget(self.cancel_npc_btn)
+        self.save_npc_btn = QPushButton("💾 Save && Close")
+        self.save_npc_btn.setDefault(True)
+        self.save_npc_btn.clicked.connect(self._save_and_close)
+        dialog_buttons.addWidget(self.save_npc_btn)
+        layout.addLayout(dialog_buttons)
+
+        # Selection/save actions need a completed scan to operate on.
+        self._set_actions_enabled(False)
+
+    # ------------------------------------------------------------------
+    def _set_actions_enabled(self, enabled: bool):
+        """Enable/disable everything that depends on a completed scan."""
+        for widget in (
+            self.select_all_btn, self.select_none_btn, self.select_profiles_btn,
+            self.clear_targets_btn, self.save_npc_btn, self.npc_search_edit,
+            self.npc_status_filter, self.npc_sort_combo,
+        ):
+            widget.setEnabled(enabled)
+
+    # ------------------------------------------------------------------
+    def _on_skip_generated_toggled(self, checked: bool):
+        """
+        Write SKIP_ALREADY_GENERATED to appconfig immediately, then rescan.
+
+        This is what makes it "live": scan_csv_for_npc_targets() (called by
+        the background worker below) reads cfg.SKIP_ALREADY_GENERATED at
+        the moment it runs, so persisting the new value *before* triggering
+        the rescan is what makes the list actually reflect the new setting.
+        Previously the checkbox lived in a different dialog, was only
+        persisted on a separate "Save Config" click, and rescanning still
+        read the old (unsaved) value in the meantime - hence the bug.
+        """
+        cfg.SKIP_ALREADY_GENERATED = checked
+        self._refresh_npc_targets()
+
+    # ------------------------------------------------------------------
+    def _refresh_npc_targets(self):
+        """
+        (Re)scan the CSV for NPC targets on a background thread.
+
+        Reads all configuration directly from cfg.* inside the worker -
+        no parameters passed in, so it always reflects whatever was just
+        saved (including SKIP_ALREADY_GENERATED a moment ago).
+        """
+        self._set_actions_enabled(False)
+        self.skip_generated_check.setEnabled(False)
+        self.npc_status_label.setText("Scanning CSV...")
+        self.npc_status_label.setStyleSheet("color: orange;")
+
+        self.npc_targets_table.setRowCount(0)
+
+        self.npc_scan_thread = QThread()
+        self.npc_scan_worker = NPCTargetsScanWorker()
+        self.npc_scan_worker.moveToThread(self.npc_scan_thread)
+
+        self.npc_scan_thread.started.connect(self.npc_scan_worker.run)
+        self.npc_scan_worker.progress.connect(self._on_npc_scan_progress)
+        self.npc_scan_worker.finished.connect(self._on_npc_scan_finished)
+        self.npc_scan_worker.failed.connect(self._on_npc_scan_failed)
+        self.npc_scan_worker.finished.connect(self.npc_scan_thread.quit)
+        self.npc_scan_worker.failed.connect(self.npc_scan_thread.quit)
+        self.npc_scan_thread.finished.connect(self._on_npc_scan_thread_finished)
+
+        self.npc_scan_thread.start()
+
+    def _on_npc_scan_progress(self, message: str):
+        self.npc_status_label.setText(message)
+
+    def _on_npc_scan_finished(self, npc_data: dict):
+        self._raw_npc_data = npc_data
+        self._npc_data_loaded = True
+
+        self._populate_npc_table(npc_data)
+
+        selected_count = sum(1 for d in npc_data.values() if d["in_target_voices"])
+        selected_lines = sum(d["lines_count"] for d in npc_data.values() if d["in_target_voices"])
+
+        self.npc_status_label.setText(
+            f"{selected_count} selected, {selected_lines:,} lines total"
+        )
+        self.npc_status_label.setStyleSheet("color: green;")
+
+        # Repopulating clears sorting and unhides every row, so reapply
+        # whatever search/status filter and sort order were active before
+        # this (re)scan - otherwise switching SKIP_ALREADY_GENERATED would
+        # silently reset them every time.
+        self._filter_npc_table()
+        self._sort_npc_table()
+
+    def _on_npc_scan_failed(self, error: str):
+        self.npc_status_label.setText(f"❌ Scan failed: {error}")
+        self.npc_status_label.setStyleSheet("color: red;")
+
+    def _on_npc_scan_thread_finished(self):
+        self.skip_generated_check.setEnabled(True)
+        self._set_actions_enabled(self._npc_data_loaded)
+
+    # ------------------------------------------------------------------
+    def _populate_npc_table(self, npc_data: dict):
+        """Populate table with NPC data."""
+        self.npc_targets_table.setRowCount(0)
+
+        for npc_name, data in npc_data.items():
+            row = self.npc_targets_table.rowCount()
+            self.npc_targets_table.insertRow(row)
+
+            # Checkbox column
+            checkbox = QCheckBox()
+            checkbox.setChecked(data["in_target_voices"])
+            checkbox_widget = QWidget()
+            checkbox_layout = QHBoxLayout(checkbox_widget)
+            checkbox_layout.addWidget(checkbox)
+            checkbox_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            checkbox_layout.setContentsMargins(0, 0, 0, 0)
+            self.npc_targets_table.setCellWidget(row, 0, checkbox_widget)
+
+            # NPC Name
+            self.npc_targets_table.setItem(row, 1, QTableWidgetItem(data["display_name"]))
+
+            # Status
+            status_text = {
+                "on_voicebox": "✅ On Voicebox",
+                "importable": "📁 Importable",
+                "missing": "❌ Missing"
+            }[data["status"]]
+            self.npc_targets_table.setItem(row, 2, QTableWidgetItem(status_text))
+
+            # Lines count
+            lines_item = _NumericTableWidgetItem(f"{data['lines_count']:,}")
+            lines_item.setData(Qt.ItemDataRole.UserRole + 1, data['lines_count'])
+            lines_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.npc_targets_table.setItem(row, 3, lines_item)
+
+            # Store raw data for sorting
+            name_item = self.npc_targets_table.item(row, 1)
+            if name_item is not None:
+                name_item.setData(Qt.ItemDataRole.UserRole, data)
+
+    # ------------------------------------------------------------------
+    def _filter_npc_table(self):
+        """Apply search and status filters to NPC table."""
+        if not self._npc_data_loaded:
+            return
+
+        search_text = self.npc_search_edit.text().lower()
+        status_filter = self.npc_status_filter.currentText()
+
+        for row in range(self.npc_targets_table.rowCount()):
+            show = True
+
+            name_item = self.npc_targets_table.item(row, 1)
+            npc_name = name_item.text().lower() if name_item is not None else ""
+            if search_text and search_text not in npc_name:
+                show = False
+
+            if status_filter != "All":
+                status_item = self.npc_targets_table.item(row, 2)
+                status_text = status_item.text() if status_item is not None else ""
+                if status_filter not in status_text:
+                    show = False
+
+            self.npc_targets_table.setRowHidden(row, not show)
+
+        self._update_npc_status_label()
+
+    # ------------------------------------------------------------------
+    def _sort_npc_table(self):
+        """Sort NPC table based on selected criterion."""
+        if not self._npc_data_loaded:
+            return
+
+        sort_mode = self.npc_sort_combo.currentText()
+
+        if "Name" in sort_mode:
+            self.npc_targets_table.sortItems(1, Qt.SortOrder.AscendingOrder)
+        elif "High-Low" in sort_mode:
+            self.npc_targets_table.sortItems(3, Qt.SortOrder.DescendingOrder)
+        elif "Low-High" in sort_mode:
+            self.npc_targets_table.sortItems(3, Qt.SortOrder.AscendingOrder)
+
+    # ------------------------------------------------------------------
+    def _set_all_npc_checkboxes(self, checked: bool):
+        """Set all visible NPC checkboxes to checked state."""
+        if not self._npc_data_loaded:
+            return
+
+        for row in range(self.npc_targets_table.rowCount()):
+            if not self.npc_targets_table.isRowHidden(row):
+                checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
+                if checkbox_widget:
+                    checkbox = checkbox_widget.findChild(QCheckBox)
+                    if checkbox:
+                        checkbox.setChecked(checked)
+
+        self._update_npc_status_label()
+
+    # ------------------------------------------------------------------
+    def _select_npcs_with_profiles(self):
+        """Select only NPCs with available profiles (on Voicebox or importable)."""
+        if not self._npc_data_loaded:
+            return
+
+        for row in range(self.npc_targets_table.rowCount()):
+            if not self.npc_targets_table.isRowHidden(row):
+                status_item = self.npc_targets_table.item(row, 2)
+                status_text = status_item.text() if status_item is not None else ""
+                has_profile = "✅" in status_text or "📁" in status_text
+
+                checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
+                if checkbox_widget:
+                    checkbox = checkbox_widget.findChild(QCheckBox)
+                    if checkbox:
+                        checkbox.setChecked(has_profile)
+
+        self._update_npc_status_label()
+
+    # ------------------------------------------------------------------
+    def _clear_all_targets(self):
+        """Clear all TARGET_VOICES (uncheck all + set to empty list)."""
+        if not self._npc_data_loaded:
+            return
+        self._set_all_npc_checkboxes(False)
+
+    # ------------------------------------------------------------------
+    def _update_npc_status_label(self):
+        """Update status label with current selection stats."""
+        if not self._npc_data_loaded:
+            return
+
+        selected_count = 0
+        selected_lines = 0
+
+        for row in range(self.npc_targets_table.rowCount()):
+            checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
+            if checkbox_widget:
+                checkbox = checkbox_widget.findChild(QCheckBox)
+                if checkbox and checkbox.isChecked():
+                    selected_count += 1
+                    lines_item = self.npc_targets_table.item(row, 3)
+                    lines_text = lines_item.text().replace(',', '') if lines_item is not None else "0"
+                    selected_lines += int(lines_text)
+
+        self.npc_status_label.setText(
+            f"{selected_count} selected, {selected_lines:,} lines total"
+        )
+
+    # ------------------------------------------------------------------
+    def _save_and_close(self):
+        """Write TARGET_VOICES from the current checkbox selection and close."""
+        if not self._npc_data_loaded:
+            self.reject()
+            return
+
+        selected_npcs = []
+        for row in range(self.npc_targets_table.rowCount()):
+            checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
+            if checkbox_widget:
+                checkbox = checkbox_widget.findChild(QCheckBox)
+                npc_name_item = self.npc_targets_table.item(row, 1)
+                if checkbox and checkbox.isChecked() and npc_name_item:
+                    data = npc_name_item.data(Qt.ItemDataRole.UserRole)
+                    if data:
+                        selected_npcs.append(data["display_name"])
+
+        cfg.TARGET_VOICES = selected_npcs
+        self.accept()
+
+
 class ConfigDialog(QDialog):
     """
     Modal dialog holding every user-editable setting, grouped into tabs.
@@ -3074,7 +3493,6 @@ class ConfigDialog(QDialog):
 
         tabs.addTab(self._build_connection_tab(), "🔌 Connection")
         tabs.addTab(self._build_generation_tab(), "⚙️ Generation")
-        tabs.addTab(self._build_npc_targets_tab(), "🎯 NPC Targets")
         tabs.addTab(self._build_fallback_tab(), "🗣️ Voice Fallback")
 
         # ---------- Dialog buttons ----------
@@ -3191,10 +3609,14 @@ class ConfigDialog(QDialog):
         self.convert_ogg_check.toggled.connect(self.ogg_quality_spin.setEnabled)
         self.ogg_quality_spin.setEnabled(self.convert_ogg_check.isChecked())
 
-        self.skip_generated_check = QCheckBox("Skip already generated")
-        self.skip_generated_check.setChecked(cfg.SKIP_ALREADY_GENERATED)
-        self.skip_generated_check.toggled.connect(self._auto_refresh_npc_if_loaded)
-        form.addRow("", self.skip_generated_check)
+        self.npc_targets_btn = QPushButton("🎯 Manage NPC Targets…")
+        self.npc_targets_btn.setToolTip(
+            "Pick which NPCs to generate for, and toggle 'Skip already "
+            "generated' - both live: changes there take effect immediately, "
+            "no need to Save Config."
+        )
+        self.npc_targets_btn.clicked.connect(self._open_npc_targets_dialog)
+        form.addRow("<b>NPC Targets:</b>", self.npc_targets_btn)
 
         sep2 = QFrame()
         sep2.setFrameShape(QFrame.Shape.HLine)
@@ -3214,327 +3636,10 @@ class ConfigDialog(QDialog):
         return tab
 
     # ------------------------------------------------------------------
-    def _build_npc_targets_tab(self) -> QWidget:
-        """Build the NPC Targets selection tab."""
-        tab = QWidget()
-        layout = QVBoxLayout(tab)
-        
-        # --- Filter/Search Controls ---
-        filter_layout = QHBoxLayout()
-        
-        search_label = QLabel("🔍 Search:")
-        self.npc_search_edit = QLineEdit()
-        self.npc_search_edit.setPlaceholderText("Filter by NPC name...")
-        self.npc_search_edit.textChanged.connect(self._filter_npc_table)
-        
-        clear_search_btn = QPushButton("Clear")
-        clear_search_btn.clicked.connect(lambda: self.npc_search_edit.clear())
-        
-        status_label = QLabel("Status:")
-        self.npc_status_filter = QComboBox()
-        self.npc_status_filter.addItems(["All", "✅ On Voicebox", "📁 Importable", "❌ Missing"])
-        self.npc_status_filter.currentTextChanged.connect(self._filter_npc_table)
-        
-        sort_label = QLabel("Sort:")
-        self.npc_sort_combo = QComboBox()
-        self.npc_sort_combo.addItems(["Name (A-Z)", "Lines (High-Low)", "Lines (Low-High)"])
-        self.npc_sort_combo.currentTextChanged.connect(self._sort_npc_table)
-        
-        filter_layout.addWidget(search_label)
-        filter_layout.addWidget(self.npc_search_edit, stretch=1)
-        filter_layout.addWidget(clear_search_btn)
-        filter_layout.addWidget(status_label)
-        filter_layout.addWidget(self.npc_status_filter)
-        filter_layout.addWidget(sort_label)
-        filter_layout.addWidget(self.npc_sort_combo)
-        
-        layout.addLayout(filter_layout)
-        
-        # --- NPC Table ---
-        self.npc_targets_table = QTableWidget()
-        self.npc_targets_table.setColumnCount(4)
-        self.npc_targets_table.setHorizontalHeaderLabels(["☑", "NPC Name", "Status", "Lines"])
-        self.npc_targets_table.horizontalHeader().setStretchLastSection(False)
-        self.npc_targets_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeMode.Fixed)
-        self.npc_targets_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
-        self.npc_targets_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)
-        self.npc_targets_table.horizontalHeader().setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)
-        self.npc_targets_table.setColumnWidth(0, 40)
-        self.npc_targets_table.setColumnWidth(2, 150)
-        self.npc_targets_table.setColumnWidth(3, 100)
-        self.npc_targets_table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
-        
-        layout.addWidget(self.npc_targets_table, stretch=1)
-        
-        # --- Action Buttons ---
-        buttons_layout = QHBoxLayout()
-        
-        self.refresh_npc_btn = QPushButton("🔄 Refresh from CSV")
-        self.refresh_npc_btn.clicked.connect(self._refresh_npc_targets)
-        
-        select_all_btn = QPushButton("Select All")
-        select_all_btn.clicked.connect(lambda: self._set_all_npc_checkboxes(True))
-        
-        select_none_btn = QPushButton("Select None")
-        select_none_btn.clicked.connect(lambda: self._set_all_npc_checkboxes(False))
-        
-        select_profiles_btn = QPushButton("✅ Only with Profiles")
-        select_profiles_btn.setToolTip("Select only NPCs with available voice profiles")
-        select_profiles_btn.clicked.connect(self._select_npcs_with_profiles)
-        
-        clear_targets_btn = QPushButton("🗑️ Clear All Targets")
-        clear_targets_btn.setToolTip("Clear TARGET_VOICES to process all NPCs")
-        clear_targets_btn.clicked.connect(self._clear_all_targets)
-        
-        buttons_layout.addWidget(self.refresh_npc_btn)
-        buttons_layout.addWidget(select_all_btn)
-        buttons_layout.addWidget(select_none_btn)
-        buttons_layout.addWidget(select_profiles_btn)
-        buttons_layout.addStretch()
-        buttons_layout.addWidget(clear_targets_btn)
-        
-        layout.addLayout(buttons_layout)
-        
-        # --- Status Label ---
-        self.npc_status_label = QLabel("Click 'Refresh from CSV' to load NPC list")
-        self.npc_status_label.setStyleSheet("color: gray; font-style: italic;")
-        layout.addWidget(self.npc_status_label)
-        
-        # Track whether data has been loaded
-        self._npc_data_loaded = False
-        self._raw_npc_data = {}  # Store raw data for filtering/sorting
-        
-        return tab
-
-    # ------------------------------------------------------------------
-    def _refresh_npc_targets(self):
-        """
-        Refresh NPC targets list from CSV.
-        
-        Launches background worker that reads all cfg values directly at runtime.
-        """
-        # Disable refresh button during scan
-        self.refresh_npc_btn.setEnabled(False)
-        self.npc_status_label.setText("Scanning CSV...")
-        self.npc_status_label.setStyleSheet("color: orange;")
-        
-        # Clear existing table
-        self.npc_targets_table.setRowCount(0)
-        
-        # Create thread and worker (no parameters - reads cfg directly)
-        self.npc_scan_thread = QThread()
-        self.npc_scan_worker = NPCTargetsScanWorker()  # No parameters
-        self.npc_scan_worker.moveToThread(self.npc_scan_thread)
-        
-        # Connect signals
-        self.npc_scan_thread.started.connect(self.npc_scan_worker.run)
-        self.npc_scan_worker.progress.connect(self._on_npc_scan_progress)
-        self.npc_scan_worker.finished.connect(self._on_npc_scan_finished)
-        self.npc_scan_worker.failed.connect(self._on_npc_scan_failed)
-        self.npc_scan_worker.finished.connect(self.npc_scan_thread.quit)
-        self.npc_scan_worker.failed.connect(self.npc_scan_thread.quit)
-        self.npc_scan_thread.finished.connect(self._on_npc_scan_thread_finished)
-        
-        # Start scan
-        self.npc_scan_thread.start()
-
-    def _on_npc_scan_progress(self, message: str):
-        """Update status label with scan progress."""
-        self.npc_status_label.setText(message)
-
-    def _on_npc_scan_finished(self, npc_data: dict):
-        """
-        Populate NPC table with scan results.
-        
-        Args:
-            npc_data: Dict from scan_csv_for_npc_targets()
-        """
-        self._raw_npc_data = npc_data
-        self._npc_data_loaded = True
-        
-        # Populate table
-        self._populate_npc_table(npc_data)
-        
-        # Update status
-        selected_count = sum(1 for d in npc_data.values() if d["in_target_voices"])
-        selected_lines = sum(d["lines_count"] for d in npc_data.values() if d["in_target_voices"])
-        
-        self.npc_status_label.setText(
-            f"{selected_count} selected, {selected_lines:,} lines total"
-        )
-        self.npc_status_label.setStyleSheet("color: green;")
-
-    def _on_npc_scan_failed(self, error: str):
-        """Handle scan failure."""
-        self.npc_status_label.setText(f"❌ Scan failed: {error}")
-        self.npc_status_label.setStyleSheet("color: red;")
-
-    def _on_npc_scan_thread_finished(self):
-        """Re-enable refresh button when scan completes."""
-        self.refresh_npc_btn.setEnabled(True)
-
-    # ------------------------------------------------------------------
-    def _populate_npc_table(self, npc_data: dict):
-        """Populate table with NPC data."""
-        self.npc_targets_table.setRowCount(0)
-        
-        for npc_name, data in npc_data.items():
-            row = self.npc_targets_table.rowCount()
-            self.npc_targets_table.insertRow(row)
-            
-            # Checkbox column
-            checkbox = QCheckBox()
-            checkbox.setChecked(data["in_target_voices"])
-            checkbox_widget = QWidget()
-            checkbox_layout = QHBoxLayout(checkbox_widget)
-            checkbox_layout.addWidget(checkbox)
-            checkbox_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            checkbox_layout.setContentsMargins(0, 0, 0, 0)
-            self.npc_targets_table.setCellWidget(row, 0, checkbox_widget)
-            
-            # NPC Name
-            self.npc_targets_table.setItem(row, 1, QTableWidgetItem(data["display_name"]))
-            
-            # Status
-            status_text = {
-                "on_voicebox": "✅ On Voicebox",
-                "importable": "📁 Importable",
-                "missing": "❌ Missing"
-            }[data["status"]]
-            self.npc_targets_table.setItem(row, 2, QTableWidgetItem(status_text))
-            
-            # Lines count
-            lines_item = _NumericTableWidgetItem(f"{data['lines_count']:,}")
-            lines_item.setData(Qt.ItemDataRole.UserRole + 1, data['lines_count'])
-            lines_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.npc_targets_table.setItem(row, 3, lines_item)
-            
-            # Store raw data for sorting
-            name_item = self.npc_targets_table.item(row, 1)
-            if name_item is not None:
-                name_item.setData(Qt.ItemDataRole.UserRole, data)
-
-    # ------------------------------------------------------------------
-    def _filter_npc_table(self):
-        """Apply search and status filters to NPC table."""
-        if not self._npc_data_loaded:
-            return
-            
-        search_text = self.npc_search_edit.text().lower()
-        status_filter = self.npc_status_filter.currentText()
-        
-        for row in range(self.npc_targets_table.rowCount()):
-            show = True
-            
-            # Search filter
-            name_item = self.npc_targets_table.item(row, 1)
-            npc_name = name_item.text().lower() if name_item is not None else ""
-            if search_text and search_text not in npc_name:
-                show = False
-            
-            # Status filter
-            if status_filter != "All":
-                status_item = self.npc_targets_table.item(row, 2)
-                status_text = status_item.text() if status_item is not None else ""
-                if status_filter not in status_text:
-                    show = False
-            
-            self.npc_targets_table.setRowHidden(row, not show)
-        
-        self._update_npc_status_label()
-
-    # ------------------------------------------------------------------
-    def _sort_npc_table(self):
-        """Sort NPC table based on selected criterion."""
-        if not self._npc_data_loaded:
-            return
-            
-        sort_mode = self.npc_sort_combo.currentText()
-        
-        if "Name" in sort_mode:
-            self.npc_targets_table.sortItems(1, Qt.SortOrder.AscendingOrder)
-        elif "High-Low" in sort_mode:
-            self.npc_targets_table.sortItems(3, Qt.SortOrder.DescendingOrder)
-        elif "Low-High" in sort_mode:
-            self.npc_targets_table.sortItems(3, Qt.SortOrder.AscendingOrder)
-
-    # ------------------------------------------------------------------
-    def _set_all_npc_checkboxes(self, checked: bool):
-        """Set all visible NPC checkboxes to checked state."""
-        if not self._npc_data_loaded:
-            return
-            
-        for row in range(self.npc_targets_table.rowCount()):
-            if not self.npc_targets_table.isRowHidden(row):
-                checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
-                if checkbox_widget:
-                    checkbox = checkbox_widget.findChild(QCheckBox)
-                    if checkbox:
-                        checkbox.setChecked(checked)
-        
-        self._update_npc_status_label()
-
-    # ------------------------------------------------------------------
-    def _select_npcs_with_profiles(self):
-        """Select only NPCs with available profiles (on Voicebox or importable)."""
-        if not self._npc_data_loaded:
-            return
-            
-        for row in range(self.npc_targets_table.rowCount()):
-            if not self.npc_targets_table.isRowHidden(row):
-                status_item = self.npc_targets_table.item(row, 2)
-                status_text = status_item.text() if status_item is not None else ""
-                has_profile = "✅" in status_text or "📁" in status_text
-                
-                checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
-                if checkbox_widget:
-                    checkbox = checkbox_widget.findChild(QCheckBox)
-                    if checkbox:
-                        checkbox.setChecked(has_profile)
-        
-        self._update_npc_status_label()
-
-    # ------------------------------------------------------------------
-    def _clear_all_targets(self):
-        """Clear all TARGET_VOICES (uncheck all + set to empty list)."""
-        if not self._npc_data_loaded:
-            return
-        self._set_all_npc_checkboxes(False)
-
-    # ------------------------------------------------------------------
-    def _update_npc_status_label(self):
-        """Update status label with current selection stats."""
-        if not self._npc_data_loaded:
-            return
-        
-        selected_count = 0
-        selected_lines = 0
-        
-        for row in range(self.npc_targets_table.rowCount()):
-            checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
-            if checkbox_widget:
-                checkbox = checkbox_widget.findChild(QCheckBox)
-                if checkbox and checkbox.isChecked():
-                    selected_count += 1
-                    lines_item = self.npc_targets_table.item(row, 3)
-                    lines_text = lines_item.text().replace(',', '') if lines_item is not None else "0"
-                    selected_lines += int(lines_text)
-        
-        self.npc_status_label.setText(
-            f"{selected_count} selected, {selected_lines:,} lines total"
-        )
-
-    # ------------------------------------------------------------------
-    def _auto_refresh_npc_if_loaded(self):
-        """
-        Auto-refresh NPC targets if data was previously loaded.
-        
-        This ensures line counts reflect current SKIP_ALREADY_GENERATED setting.
-        Only triggers if user has already clicked Refresh at least once.
-        """
-        if self._npc_data_loaded:
-            # Small delay to let the checkbox state settle
-            QTimer.singleShot(100, self._refresh_npc_targets)
+    def _open_npc_targets_dialog(self):
+        """Open the standalone NPC Targets dialog (modal)."""
+        dlg = NPCTargetsDialog(self)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     def _build_fallback_tab(self) -> QWidget:
@@ -4081,32 +4186,17 @@ class GenerateWindow(QMainWindow):
             "ENABLE_TIMEOUT_SAFEGUARD": d.timeout_enable_check.isChecked(),
             "TIMEOUT_MAX_SECONDS": d.timeout_max_spin.value(),
             "TIMEOUT_MULTIPLIER": d.timeout_multiplier_spin.value(),
-            "SKIP_ALREADY_GENERATED": d.skip_generated_check.isChecked(),
             "LIMIT": d.limit_spin.value(),
             "USE_VOICE_FALLBACK": d.fallback_enable_check.isChecked(),
             "FALLBACK_VOICE_MALE": d.fallback_male_combo.currentText().strip(),
             "FALLBACK_VOICE_FEMALE": d.fallback_female_combo.currentText().strip(),
             "FALLBACK_VOICE_NEUTRAL": d.fallback_neutral_combo.currentText().strip(),
         })
-
-        # Save NPC Targets selections - but only if the user actually loaded
-        # the NPC tab (clicked "Refresh from CSV") this session. If they
-        # never opened/refreshed that tab, cfg.TARGET_VOICES is left alone;
-        # otherwise every Save (e.g. from the Retry tab) would silently wipe
-        # an existing NPC filter the user never touched. Use the "Clear
-        # Targets" button on the NPC tab to intentionally clear it.
-        if hasattr(d, '_npc_data_loaded') and d._npc_data_loaded:
-            selected_npcs = []
-            for row in range(d.npc_targets_table.rowCount()):
-                checkbox_widget = d.npc_targets_table.cellWidget(row, 0)
-                if checkbox_widget:
-                    checkbox = checkbox_widget.findChild(QCheckBox)
-                    npc_name_item = d.npc_targets_table.item(row, 1)
-                    if checkbox and checkbox.isChecked() and npc_name_item:
-                        data = npc_name_item.data(Qt.ItemDataRole.UserRole)
-                        if data:
-                            selected_npcs.append(data["display_name"])
-            _appconfig_set_many({"TARGET_VOICES": selected_npcs})
+        # SKIP_ALREADY_GENERATED and TARGET_VOICES are NOT saved here - both
+        # are managed live by NPCTargetsDialog (opened via the "Manage NPC
+        # Targets…" button above): SKIP_ALREADY_GENERATED writes to appconfig
+        # the instant its checkbox is toggled, and TARGET_VOICES writes when
+        # that dialog's own Save & Close is clicked. Nothing to batch here.
 
         logger.info("Configuration updated from UI.")
         self.statusBar().showMessage("Configuration saved.", 3000)
