@@ -5,7 +5,6 @@ Processes dialog-report.csv and extracts audio samples for voice generation
 """
 
 import csv
-import re
 import subprocess
 import sys
 import io
@@ -64,13 +63,8 @@ class DialogEntry:
         if not self.sound_res_ref or self.sound_res_ref.strip() == '':
             return True
         
-        # Check if SoundResRef matches TS pattern
-        try:
-            return bool(re.match(cfg.FILENAME_PATTERN, self.sound_res_ref, re.IGNORECASE))
-        except re.error:
-            # If regex is invalid, fall back to simple string matching
-            logger.warning(f"Invalid cfg.FILENAME_PATTERN regex: {cfg.FILENAME_PATTERN}, falling back to 'TS' prefix")
-            return self.sound_res_ref.upper().startswith('TS')
+        # Check if SoundResRef starts with the configured prefix (case-insensitive)
+        return bool(self.sound_res_ref) and self.sound_res_ref.upper().startswith(cfg.FILENAME_PREFIX.upper())
     
     @property
     def is_digit_only(self) -> bool:

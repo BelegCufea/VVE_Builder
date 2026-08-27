@@ -16,7 +16,7 @@ The tp2 source (MOD_TP2) is copied alongside the WAV folder and mapping
 table, renamed to f"setup-{MOD_NAME}.tp2" as WeiDU convention expects.
 
 No CLI arguments - GAME_DIRECTORY, MOD_NAME, MOD_TP2, OUTPUT_DIR, and
-FILENAME_PATTERN are all shared with the rest of the VO-generation
+FILENAME_PREFIX are all shared with the rest of the VO-generation
 suite and read live from appconfig - there's no local config section
 in this file at all.
 """
@@ -37,9 +37,9 @@ _BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
 def _filename_re() -> re.Pattern:
-    """Built fresh from cfg.FILENAME_PATTERN each call, so a change in
+    """Built fresh from cfg.FILENAME_PREFIX each call, so a change in
     appconfig.json takes effect without needing a module reload."""
-    return re.compile(cfg.FILENAME_PATTERN + r"([0-9A-Za-z]{6})\.WAV$", re.IGNORECASE)
+    return re.compile(re.escape(cfg.FILENAME_PREFIX) + r"([0-9A-Za-z]{6})\.WAV$", re.IGNORECASE)
 
 
 def from_base36(s: str) -> int:
@@ -119,7 +119,7 @@ def main() -> int:
     entries, skipped = scan(output_dir)
 
     if skipped:
-        print(f"WARNING: {len(skipped)} file(s) matched the {cfg.FILENAME_PATTERN} prefix "
+        print(f"WARNING: {len(skipped)} file(s) matched the {cfg.FILENAME_PREFIX} prefix "
               f"but had an invalid base36 body and were skipped:")
         for p in skipped:
             print(f"  - {p}")

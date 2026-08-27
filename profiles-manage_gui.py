@@ -1125,7 +1125,7 @@ def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
     
     Rules:
     1. Lines with SoundResRef already set are skipped (already have voice)
-    2. Lines where SoundResRef matches cfg.FILENAME_PATTERN are always kept (exception)
+    2. Lines where SoundResRef starts with cfg.FILENAME_PREFIX are always kept (exception)
     
     Args:
         df: Original DataFrame from CSV
@@ -1141,8 +1141,8 @@ def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
     # Check if SoundResRef is empty (needs assignment)
     is_empty_sound = (sound_refs == '') | (sound_refs == 'nan') | (sound_refs == 'None')
     
-    # Check if SoundResRef starts with "TS" (exception - always keep these)
-    is_ts = sound_refs.str.match(cfg.FILENAME_PATTERN, na=False)
+    # Check if SoundResRef starts with the configured prefix (exception - always keep these)
+    is_ts = sound_refs.str.startswith(cfg.FILENAME_PREFIX, na=False)
     
     # Keep if: empty SoundResRef OR SoundResRef matches TS pattern
     keep_mask = is_empty_sound | is_ts

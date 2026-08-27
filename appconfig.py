@@ -12,14 +12,14 @@ Design:
     - DEFAULTS below is the one and only place default values for
       shared keys are declared. Scripts do NOT bring their own
       defaults - they just ask appconfig for a value. Changing a
-      default (e.g. FILENAME_PATTERN) here changes it for every
+      defaults (e.g. FILENAME_PREFIX) here changes it for every
       script at once.
     - There is no "load into a module-level variable at import time"
-      step anywhere. Reading `cfg.FILENAME_PATTERN` (or calling
-      `get("FILENAME_PATTERN")`) always returns the *current* value -
+      step anywhere. Reading `cfg.FILENAME_PREFIX` (or calling
+      `get("FILENAME_PREFIX")`) always returns the *current* value -
       the saved override if one exists, else the default above. If
       something else in the same running process calls
-      `cfg.FILENAME_PATTERN = "..."` a moment later, the very next
+      `cfg.FILENAME_PREFIX = "..."` a moment later, the very next
       read sees the new value. There is nothing to refresh or go
       stale, because nothing is cached in the caller.
     - set()/`cfg.KEY = value` records an override and persists it to
@@ -77,6 +77,38 @@ _MISSING = object()
 # Shared defaults - the single source of truth for every script.
 # ============================================================================
 DEFAULTS: dict = {
+    # =======================================================================
+    # Game location, language and encoding
+    # =======================================================================
+
+    "GAME_DIRECTORY": r"C:/Relax/BGEET",
+    "LANGUAGE": "en_US",
+    "TEXT_ENCODING": "utf-8",
+
+    # =======================================================================
+    # Voice generation
+    # =======================================================================
+
+    # OGG conversion settings
+    "CONVERT_TO_OGG": True,
+    "OGG_QUALITY": 4,
+
+    # Generation filtering
+    "LIMIT": 0,
+    "TARGET_VOICES": [],
+
+    # STRREF Filtering
+    "USE_STRREF_FILTER": False,
+    "STRREF_FILTER_FILE": r"strrefs.json",
+
+    # Audio file prefix (plain text, not a regex - used for both matching
+    # existing generated files and building new generated filenames).
+    "FILENAME_PREFIX": "TS",
+
+    # =======================================================================
+    # VoiceBox configuration
+    # =======================================================================    
+
     # Voicebox API Configuration
     "BASE_URL": "http://10.0.50.5:17600",  # http://localhost:17493 for local server, or remote URL for remote server
     "ENGINE": "qwen",
@@ -91,6 +123,10 @@ DEFAULTS: dict = {
     "GENERATE_CANCEL_ENDPOINT": "/generate/{gen_id}/cancel",
     "AUDIO_ENDPOINT": "/audio/{gen_id}",
 
+    # =======================================================================
+    # Other variables needed by or shared between scripts
+    # =======================================================================     
+
     # Generation Timeout Safeguards
     "ENABLE_TIMEOUT_SAFEGUARD": True,
     "TIMEOUT_MAX_SECONDS": 600,
@@ -101,12 +137,9 @@ DEFAULTS: dict = {
     "RETRY_COUNT": 3,
     "RETRY_DELAY": 5.0,
 
-    # Audio Conversion Configuration
-    "CONVERT_TO_OGG": True,
-    "OGG_QUALITY": 4,
+    # Audio Prepare and Conversion Configuration
     "MAX_DURATION": 30.0,
-    "MIN_DURATION": 10.0,  # Minimum total sample duration (sum of samples) accepted as enough
-
+    "MIN_DURATION": 10.0,
 
     # File Paths
     "CSV_PATH": r"dialog-report.csv",
@@ -114,20 +147,7 @@ DEFAULTS: dict = {
     "OUTPUT_DIR": r"output",
 
     # Generation Limits and filters
-    "LIMIT": 0,
-    "TARGET_VOICES": [
-        # "Jaheira",
-        # "Edwin",
-        # "Neera",
-        # "Bodhi",
-        # "Gaelan Bayle"
-    ],
     "VOICE_SUBSTITUTIONS_FILE": r"voice-substitutions.json",
-    "FILENAME_PATTERN": r"^TS",
-
-    # STRREF Filtering
-    "USE_STRREF_FILTER": False,
-    "STRREF_FILTER_FILE": r"strrefs.json",
 
     # Voice Fallback Configuration
     "USE_VOICE_FALLBACK": False,
@@ -137,7 +157,6 @@ DEFAULTS: dict = {
 
     # Filename Generation
     "FORCE_GENERATED_FILENAMES": False,
-    "RESREF_PREFIX": "TS",
 
     # Generation memory
     "SKIP_ALREADY_GENERATED": True,
@@ -161,7 +180,6 @@ DEFAULTS: dict = {
     "REALNAME_NOT_FOUND": "RealNameMissing",
 
     # Mod Build
-    "GAME_DIRECTORY": r"C:/Relax/BGEET",
     "MOD_NAME": "ievo",
     "MOD_TP2": r"setup.tp2",
 
@@ -175,8 +193,6 @@ DEFAULTS: dict = {
 
     # Dialog Report Preparation
     "EXTRACT_DIR": r"extracted",
-    "LANGUAGE": "en_US",
-    "TEXT_ENCODING": "utf-8",
     "GENDER_MAP": {1: "M", 2: "F", 3: "O", 4: "N"},
 }
 
