@@ -181,17 +181,6 @@ def find_dialogf_tlk(dialog_tlk_path: Path) -> Path | None:
     return candidate if candidate.exists() else None
 
 
-def resolve_tlk_entry(
-    strref: int,
-    tlk: dict[int, TlkEntry],
-    tlk_f: dict[int, TlkEntry] | None,
-) -> tuple[int, TlkEntry] | None:
-    entry = tlk.get(strref)
-    if entry is None:
-        return None
-    return strref, entry
-
-
 # ==================== STEP 4: CRE parsing ====================
 
 @dataclass

@@ -10,7 +10,7 @@ import sys
 import io
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Set
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from collections import defaultdict
 import shutil
 import logging

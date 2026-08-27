@@ -37,7 +37,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
-    QDialog, QTabWidget, QFormLayout, QDialogButtonBox, QFrame,
+    QDialog, QTabWidget, QFormLayout, QFrame,
 )
 
 # ============================================================================
