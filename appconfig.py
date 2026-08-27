@@ -157,15 +157,13 @@ DEFAULTS: dict = {
 
     # Voice Profile Manager
     "REALNAME_NOT_FOUND": "RealNameMissing",
+
+    # Mod Build
+    "GAME_DIRECTORY": r"C:/Relax/BGEET",
+    "MOD_NAME": "ievo",
+    "MOD_TP2": r"setup.tp2",
 }
 
-# ============================================================================
-# Codecs for defaults whose type isn't natively JSON-representable.
-# Keyed by the declared type (type of the value in DEFAULTS). Add an
-# entry here whenever a new default is given a type JSON can't carry
-# as-is; get()/set() apply it automatically based on that key's
-# DEFAULTS type - no per-key wiring needed anywhere else.
-# ============================================================================
 # ============================================================================
 # Codecs for defaults whose type isn't natively JSON-representable.
 # Keyed by a base type checked via isinstance() (so pathlib.Path's

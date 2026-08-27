@@ -15,9 +15,10 @@ it just looks up "which resref goes with this strref" from the table.
 The tp2 source (MOD_TP2) is copied alongside the WAV folder and mapping
 table, renamed to f"setup-{MOD_NAME}.tp2" as WeiDU convention expects.
 
-No CLI arguments - everything is set in the CONFIG section below. These
-constants are expected to move into a shared config.py once the rest of
-the VO-generation suite is wired together; kept inline here for now.
+No CLI arguments - GAME_DIRECTORY, MOD_NAME, MOD_TP2, OUTPUT_DIR, and
+FILENAME_PATTERN are all shared with the rest of the VO-generation
+suite and read live from appconfig - there's no local config section
+in this file at all.
 """
 
 from __future__ import annotations
@@ -28,18 +29,17 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-# ============================== CONFIG ===================================
-
-GAME_DIRECTORY = r"C:/Relax/BGEET"
-OUTPUT_DIR = r"output"
-FILENAME_PATTERN = r"^TS"
-MOD_NAME = "ievo"
-MOD_TP2 = r"setup.tp2"
+from appconfig import cfg
 
 # =========================================================================
 
-BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-FILENAME_RE = re.compile(FILENAME_PATTERN + r"([0-9A-Za-z]{6})\.WAV$", re.IGNORECASE)
+_BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
+def _filename_re() -> re.Pattern:
+    """Built fresh from cfg.FILENAME_PATTERN each call, so a change in
+    appconfig.json takes effect without needing a module reload."""
+    return re.compile(cfg.FILENAME_PATTERN + r"([0-9A-Za-z]{6})\.WAV$", re.IGNORECASE)
 
 
 def from_base36(s: str) -> int:
@@ -47,7 +47,7 @@ def from_base36(s: str) -> int:
     s = s.upper()
     value = 0
     for ch in s:
-        idx = BASE36_ALPHABET.index(ch)  # raises ValueError on bad char
+        idx = _BASE36_ALPHABET.index(ch)  # raises ValueError on bad char
         value = value * 36 + idx
     return value
 
@@ -63,13 +63,14 @@ class Entry:
 def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
     entries: list[Entry] = []
     skipped: list[Path] = []
+    filename_re = _filename_re()
 
     for wav_path in output_dir.rglob("*"):
         if not wav_path.is_file():
             continue
         if wav_path.suffix.lower() != ".wav":
             continue
-        m = FILENAME_RE.match(wav_path.name)
+        m = filename_re.match(wav_path.name)
         if not m:
             continue
         try:
@@ -100,12 +101,12 @@ def write_2da(entries: list[Entry], mapping_path: Path) -> None:
 
 
 def main() -> int:
-    mod_root = Path("mod") / MOD_NAME
-    output_dir = Path(OUTPUT_DIR)
+    mod_root = Path("mod") / cfg.MOD_NAME
+    output_dir = Path(cfg.OUTPUT_DIR)
     mod_dir = Path(mod_root / "WAV")
     mapping_path = Path(mod_root / "mapping.2da")
-    tp2_src = Path(MOD_TP2)
-    tp2_dest = Path(mod_root / f"setup-{MOD_NAME}.tp2")
+    tp2_src = Path(cfg.MOD_TP2)
+    tp2_dest = Path(mod_root / f"setup-{cfg.MOD_NAME}.tp2")
 
     if not output_dir.is_dir():
         print(f"ERROR: output dir not found: {output_dir}", file=sys.stderr)
@@ -118,7 +119,7 @@ def main() -> int:
     entries, skipped = scan(output_dir)
 
     if skipped:
-        print(f"WARNING: {len(skipped)} file(s) matched the {FILENAME_PATTERN} prefix "
+        print(f"WARNING: {len(skipped)} file(s) matched the {cfg.FILENAME_PATTERN} prefix "
               f"but had an invalid base36 body and were skipped:")
         for p in skipped:
             print(f"  - {p}")
