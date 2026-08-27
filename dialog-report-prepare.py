@@ -17,15 +17,9 @@ from datetime import datetime
 from dataclasses import dataclass
 from pathlib import Path
 
+from appconfig import cfg
+
 # ==================== CONFIGURATION ====================
-GAME_DIRECTORY = r"C:/Relax/BGEET" 
-LANGUAGE = "en_US"
-WEIDU_PATH = r"./weidu/weidu.exe"
-EXTRACT_DIR = r"./extracted"
-CSV_PATH = r"dialog-report.csv"
-PATCHER_CONFIG_PATH = r"patcher-config.json"
-TEXT_ENCODING = "utf-8"
-GENDER_MAP = {1: "M", 2: "F", 3: "O", 4: "N"}  # GENDER.IDS: MALE, FEMALE, OTHER, NEITHER
 
 # CRE binary layout constants
 _CRE_DIALOG_RESREF_OFFSET = 0x02CC       # byte offset of the 8-byte dialog resref field
@@ -48,7 +42,7 @@ COPY_EXISTING_REGEXP ~.*\\.cre~ ~{extract_dir}~
 """
 
     tp2_path = weidu_dir / "export.tp2"
-    tp2_path.write_text(tp2_content, encoding=TEXT_ENCODING)
+    tp2_path.write_text(tp2_content, encoding=cfg.TEXT_ENCODING)
 
     result = subprocess.run(
         [
@@ -56,7 +50,7 @@ COPY_EXISTING_REGEXP ~.*\\.cre~ ~{extract_dir}~
             tp2_path.name,
             "--game", str(game_dir),
             "--force-install", "0",
-            "--use-lang", str(LANGUAGE)
+            "--use-lang", str(cfg.LANGUAGE)
         ],
         cwd=weidu_dir,
         capture_output=True,
@@ -163,9 +157,9 @@ def parse_dialog_tlk(path: Path) -> dict[int, TlkEntry]:
         flags, sound_resref_raw, vol_var, pitch_var, text_off, text_len = (
             struct.unpack_from("<H8sIII I", data, pos)
         )
-        sound_resref = sound_resref_raw.split(b"\x00", 1)[0].decode(TEXT_ENCODING, errors="replace")
+        sound_resref = sound_resref_raw.split(b"\x00", 1)[0].decode(cfg.TEXT_ENCODING, errors="replace")
         text_start = strings_offset + text_off
-        text = data[text_start:text_start + text_len].decode(TEXT_ENCODING, errors="replace")
+        text = data[text_start:text_start + text_len].decode(cfg.TEXT_ENCODING, errors="replace")
         entries[strref] = TlkEntry(strref, flags, sound_resref, text)
         pos += 26  # entry size
 
@@ -292,7 +286,7 @@ def build_dlg_to_cre_info(
             continue
             
         # Apply gender override if exists
-        gender = GENDER_MAP.get(cre_info.gender_byte, "")
+        gender = cfg.GENDER_MAP.get(cre_info.gender_byte, "")
         if cre_info.filename in gender_overrides:
             gender = gender_overrides[cre_info.filename]
         
@@ -399,7 +393,7 @@ def find_cre_file(
 # ==================== STEP 6: report generation ====================
 
 def sound_wav_placeholder(sound_resref: str) -> str:
-    override_path = Path(GAME_DIRECTORY) / "override" / f"{sound_resref}.wav"
+    override_path = Path(cfg.GAME_DIRECTORY) / "override" / f"{sound_resref}.wav"
     return str(override_path.exists())
 
 def write_dialog_report(
@@ -417,7 +411,7 @@ def write_dialog_report(
         print(f"Backed up existing report to: {backup_path}")
     
     # Write new report
-    with out_path.open("w", encoding=TEXT_ENCODING, newline="") as f:
+    with out_path.open("w", encoding=cfg.TEXT_ENCODING, newline="") as f:
         writer = csv.writer(f)
         writer.writerow([
             "StrRef", "SystemName", "RealName", "Gender",
@@ -465,10 +459,10 @@ def write_dialog_report(
 # ==================== MAIN ====================
 
 def main() -> None:
-    weidu_path = Path(WEIDU_PATH).resolve()
-    weidu_dir = Path(WEIDU_PATH).resolve().parent
-    game_dir = Path(GAME_DIRECTORY).resolve()
-    extract_dir = Path(EXTRACT_DIR).resolve()
+    weidu_path = Path(cfg.WEIDU_PATH).resolve()
+    weidu_dir = Path(cfg.WEIDU_PATH).resolve().parent
+    game_dir = Path(cfg.GAME_DIRECTORY).resolve()
+    extract_dir = Path(cfg.EXTRACT_DIR).resolve()
 
     if not weidu_path.exists():
         raise FileNotFoundError(f"weidu.exe not found at {weidu_path}")
@@ -495,7 +489,7 @@ def main() -> None:
     else:
         print("No dialogf.tlk found — gender fallback via TLK divergence unavailable")
 
-    config_path = Path(PATCHER_CONFIG_PATH)
+    config_path = Path(cfg.PATCHER_CONFIG_PATH)
     if config_path.exists():
         config = load_patcher_config(config_path)
         print(f"Loaded patcher config from {config_path}")
@@ -511,7 +505,7 @@ def main() -> None:
     dlg_to_cre_info = build_dlg_to_cre_info(extract_dir, tlk, config)
     print(f"Resolved {len(dlg_to_cre_info)} DLG resrefs to a speaking CRE")
 
-    out_path = Path(CSV_PATH)
+    out_path = Path(cfg.CSV_PATH)
     write_dialog_report(out_path, tlk, tlk_f, strref_info, dlg_to_cre_info)
 
 

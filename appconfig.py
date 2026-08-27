@@ -166,12 +166,18 @@ DEFAULTS: dict = {
     "MOD_TP2": r"setup.tp2",
 
     # Voice Sample Preparation / Extraction
-    "WEIDU_PATH": r"./weidu/weidu.exe",
-    "BLACKLIST_FILE": r"./blacklist.txt",
+    "WEIDU_PATH": r"weidu/weidu.exe",
+    "BLACKLIST_FILE": r"blacklist.txt",
 
     # RealNames to skip during voice sample preparation (also loaded from
     # BLACKLIST_FILE, one name per line).
     "BLACKLIST": [],
+
+    # Dialog Report Preparation
+    "EXTRACT_DIR": r"extracted",
+    "LANGUAGE": "en_US",
+    "TEXT_ENCODING": "utf-8",
+    "GENDER_MAP": {1: "M", 2: "F", 3: "O", 4: "N"},
 }
 
 # ============================================================================
