@@ -20,12 +20,13 @@ import os
 import glob
 import shutil
 
+from appconfig import cfg
+
 # ============================================================
 # Configuration
 # ============================================================
 
-OUTPUT_FILE = "generation-memory.json"
-BACKUP_SUFFIX = ".backup"  # Will create generation-memory.json.backup
+_BACKUP_SUFFIX = ".backup"
 
 # ============================================================
 # Functions
@@ -114,7 +115,7 @@ def backup_file(file_path):
     if not os.path.exists(file_path):
         return False
     
-    backup_path = file_path + BACKUP_SUFFIX
+    backup_path = file_path + _BACKUP_SUFFIX
     try:
         shutil.copy2(file_path, backup_path)  # copy2 preserves metadata
         return True
@@ -149,9 +150,9 @@ def main():
     print()
 
     # Backup existing output file if it exists (COPY, don't rename)
-    if os.path.exists(OUTPUT_FILE):
-        print(f"📦 Creating backup: {OUTPUT_FILE}{BACKUP_SUFFIX}")
-        if backup_file(OUTPUT_FILE):
+    if os.path.exists(cfg.GENERATION_MEMORY_PATH):
+        print(f"📦 Creating backup: {cfg.GENERATION_MEMORY_PATH}{_BACKUP_SUFFIX}")
+        if backup_file(cfg.GENERATION_MEMORY_PATH):
             print(f"   ✅ Backup created (original preserved)")
         else:
             print(f"   ⚠️ Could not create backup")
@@ -162,8 +163,8 @@ def main():
     merged, loaded_count, total_strrefs = merge_memory_files(files)
 
     # Save the merged file (overwrites the original)
-    print(f"💾 Saving merged data to: {OUTPUT_FILE}")
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    print(f"💾 Saving merged data to: {cfg.GENERATION_MEMORY_PATH}")
+    with open(cfg.GENERATION_MEMORY_PATH, "w", encoding="utf-8") as f:
         json.dump(merged, f, ensure_ascii=False, indent=4)
 
     # Report
@@ -176,7 +177,7 @@ def main():
     print(f"Files merged:      {loaded_count}")
     print(f"NPCs in merged:    {total_npcs}")
     print(f"Total STRREFs:     {total_strrefs}")
-    print(f"Output file:       {OUTPUT_FILE}")
+    print(f"Output file:       {cfg.GENERATION_MEMORY_PATH}")
     
     # Show which NPCs were found
     if total_npcs > 0:

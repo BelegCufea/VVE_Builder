@@ -162,6 +162,7 @@ DEFAULTS: dict = {
     "GAME_DIRECTORY": r"C:/Relax/BGEET",
     "MOD_NAME": "ievo",
     "MOD_TP2": r"setup.tp2",
+
 }
 
 # ============================================================================

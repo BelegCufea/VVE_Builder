@@ -41,14 +41,6 @@ from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtGui import QColor, QCursor
 
 # ============================================================================
-# Configuration
-# ============================================================================
-# All of these are shared with the other scripts in the toolset and now
-# live in appconfig.py's DEFAULTS dict, read live via `cfg.NAME` below -
-# no local copy of any of it here to go stale or drift out of sync with
-# generate_gui.py's copies of the same settings.
-
-# ============================================================================
 # Logging Setup
 # ============================================================================
 

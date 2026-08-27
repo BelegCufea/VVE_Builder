@@ -41,15 +41,6 @@ from PySide6.QtWidgets import (
 )
 
 # ============================================================================
-# Configuration Constants
-# ============================================================================
-# Every shared / cross-script setting - including the Voicebox endpoint
-# paths, for consistency - now lives in appconfig.py's DEFAULTS dict and
-# is read live via `cfg.NAME` wherever it's used below. There is no
-# local copy of any of it here to go stale.
-
-
-# ============================================================================
 # Logging
 # ============================================================================
 

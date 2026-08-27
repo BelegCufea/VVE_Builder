@@ -2,13 +2,7 @@ import csv
 import json
 import os
 
-# ============================================================
-# Configuration
-# ============================================================
-
-OUTPUT_DIR = r"output"
-CSV_PATH = r"dialog-report.csv"
-MEMORY_PATH = r"generation-memory.json"
+from appconfig import cfg
 
 # ============================================================
 # Main
@@ -24,7 +18,7 @@ def main():
 
     filename_map = {}
 
-    with open(CSV_PATH, "r", encoding="utf-8") as f:
+    with open(cfg.CSV_PATH, "r", encoding="utf-8") as f:
         reader = csv.reader(f)
 
         for row in reader:
@@ -53,14 +47,14 @@ def main():
     # 2. Scan output directory recursively
     # --------------------------------------------------------
 
-    print(f"Scanning '{OUTPUT_DIR}'...")
+    print(f"Scanning '{cfg.OUTPUT_DIR}'...")
 
     generated = {}
     found_files = 0
     matched_files = 0
     unmatched_files = []
 
-    for root, dirs, files in os.walk(OUTPUT_DIR):
+    for root, dirs, files in os.walk(cfg.OUTPUT_DIR):
 
         for filename in files:
 
@@ -104,7 +98,7 @@ def main():
     # 4. Save memory file
     # --------------------------------------------------------
 
-    with open(MEMORY_PATH, "w", encoding="utf-8") as f:
+    with open(cfg.GENERATION_MEMORY_PATH, "w", encoding="utf-8") as f:
         json.dump(
             sorted_generated,
             f,
@@ -127,7 +121,7 @@ def main():
     print(f"Files unmatched:   {len(unmatched_files)}")
     print(f"Voices:            {len(sorted_generated)}")
     print(f"Generated StrRefs: {total_strrefs}")
-    print(f"Memory file:       {MEMORY_PATH}")
+    print(f"Memory file:       {cfg.GENERATION_MEMORY_PATH}")
 
     if unmatched_files:
         print()
