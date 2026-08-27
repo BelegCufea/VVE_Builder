@@ -16,23 +16,8 @@ from collections import defaultdict
 import shutil
 import logging
 
-# Configuration
-MIN_DURATION = 10.0  # Minimum duration in seconds (sum of samples)
-MAX_DURATION = 30.0  # Maximum duration in seconds (single sample file)
-TS_PATTERN = r'^TS'  # TS (Text-to-Speech) pattern - entries matching this pattern need regeneration
-WEIDU_PATH = r"./weidu/weidu.exe"
-GAME_DIRECTORY = r"C:/Relax/BGEET"
-CSV_PATH = r"dialog-report.csv"
-VOICES_PREP_DIR = "voices_prep"
-VOICES_DIR = "voices"
-LOG_DIR = r"logs"
-BLACKLIST_FILE = r"./blacklist.txt"
-BLACKLIST = [
-    # Add RealNames to skip processing
-    # "Example1",
-    # "Example2",
-    # "TestCharacter",
-]
+from appconfig import cfg
+
 
 # Ensure UTF-8 output on Windows
 if sys.platform == 'win32':
@@ -40,7 +25,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Setup logging - log to both console and file
-log_dir = Path(LOG_DIR)
+log_dir = Path(cfg.LOG_DIR)
 log_dir.mkdir(parents=True, exist_ok=True)
 log_file = log_dir / f"{Path(__file__).stem}.log"
 logging.basicConfig(
@@ -81,10 +66,10 @@ class DialogEntry:
         
         # Check if SoundResRef matches TS pattern
         try:
-            return bool(re.match(TS_PATTERN, self.sound_res_ref, re.IGNORECASE))
+            return bool(re.match(cfg.FILENAME_PATTERN, self.sound_res_ref, re.IGNORECASE))
         except re.error:
             # If regex is invalid, fall back to simple string matching
-            logger.warning(f"Invalid TS_PATTERN regex: {TS_PATTERN}, falling back to 'TS' prefix")
+            logger.warning(f"Invalid cfg.FILENAME_PATTERN regex: {cfg.FILENAME_PATTERN}, falling back to 'TS' prefix")
             return self.sound_res_ref.upper().startswith('TS')
     
     @property
@@ -185,8 +170,8 @@ class VoiceSampleProcessor:
 
     def scan_existing_voices(self) -> None:
         """Scan voices and voices_prep directories for existing files"""
-        voices_dir = Path(VOICES_DIR)
-        voices_prep_dir = Path(VOICES_PREP_DIR)
+        voices_dir = Path(cfg.VOICES_DIR)
+        voices_prep_dir = Path(cfg.VOICES_PREP_DIR)
         for dir_path in [voices_dir, voices_prep_dir]:
             if dir_path.exists():
                 for file in dir_path.glob("*.wav"):
@@ -223,7 +208,7 @@ class VoiceSampleProcessor:
         Mass extract audio files for multiple entries.
         Returns dict mapping sound_res_ref to Path or None if extraction failed.
         """
-        extract_dir = Path(VOICES_PREP_DIR) / "extracted"
+        extract_dir = Path(cfg.VOICES_PREP_DIR) / "extracted"
         extract_dir.mkdir(parents=True, exist_ok=True)
         
         results = {}
@@ -235,7 +220,7 @@ class VoiceSampleProcessor:
             output_path = extract_dir / f"{sound_res_ref}.WAV"
             
             # Check override folder first
-            override_path = Path(GAME_DIRECTORY) / "override" / f"{sound_res_ref}.WAV"
+            override_path = Path(cfg.GAME_DIRECTORY) / "override" / f"{sound_res_ref}.WAV"
             if override_path.exists():
                 # Copy from override to extracted directory
                 shutil.copy2(override_path, output_path)
@@ -250,12 +235,12 @@ class VoiceSampleProcessor:
         # Mass extract using weidu
         if to_extract:
             logger.info(f"Extracting {len(to_extract)} files with WeiDU...")
-            game_path = str(Path(GAME_DIRECTORY))
+            game_path = str(Path(cfg.GAME_DIRECTORY))
             
             try:
-                weidu_exe = Path(WEIDU_PATH)
+                weidu_exe = Path(cfg.WEIDU_PATH)
                 if not weidu_exe.exists():
-                    logger.error(f"Weidu not found at: {WEIDU_PATH}")
+                    logger.error(f"Weidu not found at: {cfg.WEIDU_PATH}")
                     # Mark all as failed
                     for sound_res_ref in to_extract:
                         results[sound_res_ref] = None
@@ -342,8 +327,8 @@ class VoiceSampleProcessor:
                 if duration is None:
                     continue
                 
-                if duration > MAX_DURATION:
-                    logger.debug(f"Rejected {entry.sound_res_ref} - too long ({duration:.2f}s > {MAX_DURATION}s)")
+                if duration > cfg.MAX_DURATION:
+                    logger.debug(f"Rejected {entry.sound_res_ref} - too long ({duration:.2f}s > {cfg.MAX_DURATION}s)")
                     continue
                 
                 valid_samples.append((entry, audio_path, duration))
@@ -351,9 +336,9 @@ class VoiceSampleProcessor:
             # Sort by priority ascending, then duration descending
             valid_samples.sort(key=lambda x: (x[0].priority, -x[2]))
             
-            # Add samples until we reach MIN_DURATION
+            # Add samples until we reach cfg.MIN_DURATION
             for entry, audio_path, duration in valid_samples:
-                if total_duration >= MIN_DURATION:
+                if total_duration >= cfg.MIN_DURATION:
                     break
                 
                 collected_samples.append((entry, audio_path, duration))
@@ -361,7 +346,7 @@ class VoiceSampleProcessor:
                 priority_used = priority
                 logger.debug(f"Added sample {entry.sound_res_ref} ({duration:.2f}s) - total: {total_duration:.2f}s")
             
-            if total_duration >= MIN_DURATION:
+            if total_duration >= cfg.MIN_DURATION:
                 break
         
         if not collected_samples:
@@ -373,20 +358,20 @@ class VoiceSampleProcessor:
     
     def create_sample_files(self, real_name: str, samples: List[Tuple], priority_used: int, total_duration: float, has_ts: bool) -> bool:
         """Create WAV and TXT files for the collected samples"""
-        voice_prep_dir = Path(VOICES_PREP_DIR)
+        voice_prep_dir = Path(cfg.VOICES_PREP_DIR)
         
         priority_labels = ["HIGH", "MEDIUM", "LOW"]
         priority_text = f"{'⚠️ ' if priority_used > 0 else ''}{priority_labels[priority_used] if priority_used is not None else 'HIGH'}"
         
         # Build status message
-        status = "✅ " if total_duration >= MIN_DURATION else "⚠️ "
-        duration_status = f"{total_duration:.1f}s" + (f" (need {MIN_DURATION:.1f}s)" if total_duration < MIN_DURATION else "")
+        status = "✅ " if total_duration >= cfg.MIN_DURATION else "⚠️ "
+        duration_status = f"{total_duration:.1f}s" + (f" (need {cfg.MIN_DURATION:.1f}s)" if total_duration < cfg.MIN_DURATION else "")
         
         # Build StrRef:SoundResRef pairs for logging
         sample_pairs = [f"{entry.str_ref}:{entry.sound_res_ref}({duration:.1f}s)" for entry, _, duration in samples]
         pairs_str = ", ".join(sample_pairs) if len(sample_pairs) <= 3 else f"{', '.join(sample_pairs[:3])}... ({len(sample_pairs)} total)"
         
-        logger.log(logging.WARNING if priority_used > 0 or total_duration < MIN_DURATION else logging.INFO,  f"{status} {real_name}: {len(samples)} samples, {duration_status} [{priority_text} priority] [{pairs_str}]")
+        logger.log(logging.WARNING if priority_used > 0 or total_duration < cfg.MIN_DURATION else logging.INFO,  f"{status} {real_name}: {len(samples)} samples, {duration_status} [{priority_text} priority] [{pairs_str}]")
         
         # Detailed debug log for all samples
         if logger.isEnabledFor(logging.DEBUG):
@@ -432,7 +417,7 @@ class VoiceSampleProcessor:
         self.load_csv()
         self.scan_existing_voices()
 
-        voice_prep_dir = Path(VOICES_PREP_DIR)
+        voice_prep_dir = Path(cfg.VOICES_PREP_DIR)
         
         # Filter and prepare the list of characters to process
         characters_to_process = []
@@ -513,12 +498,12 @@ class VoiceSampleProcessor:
         logger.info(f"  ⏭️  Already exist:      {skipped_count:>3} characters")
         logger.info(f"  ⚠️  No source samples:  {no_samples_count:>3} characters")
         logger.info(f"  🚫 Blacklisted:        {blacklisted_count:>3} characters")
-        logger.info(f"  📁 Output directory:   {VOICES_PREP_DIR}")
+        logger.info(f"  📁 Output directory:   {cfg.VOICES_PREP_DIR}")
         logger.info(f"{'='*60}")
 
 def load_blacklist(blacklist_file: Optional[Path] = None) -> Set[str]:
     """Load blacklist from a file, one name per line"""
-    blacklist = set(BLACKLIST)  # Start with hardcoded list
+    blacklist = set(cfg.BLACKLIST)  # Start with hardcoded list
     
     if blacklist_file and blacklist_file.exists():
         with open(blacklist_file, 'r', encoding='utf-8') as f:
@@ -532,30 +517,30 @@ def load_blacklist(blacklist_file: Optional[Path] = None) -> Set[str]:
 
 def main():
     """Main entry point"""
-    csv_path = Path(CSV_PATH)
+    csv_path = Path(cfg.CSV_PATH)
     if not csv_path.exists():
         print(f"Error: CSV file not found: {csv_path}")
         sys.exit(1)
     
     # Validate game directory
-    if not Path(GAME_DIRECTORY).exists():
-        logger.warning(f"Game directory not found: {GAME_DIRECTORY}")
-        logger.warning("Please update GAME_DIRECTORY to your actual game directory path")
+    if not Path(cfg.GAME_DIRECTORY).exists():
+        logger.warning(f"Game directory not found: {cfg.GAME_DIRECTORY}")
+        logger.warning("Please update cfg.GAME_DIRECTORY to your actual game directory path")
     
     # Validate weidu
-    weidu_path = Path(WEIDU_PATH)
+    weidu_path = Path(cfg.WEIDU_PATH)
     if not weidu_path.exists():
-        logger.warning(f"Weidu not found at: {WEIDU_PATH}")
-        logger.warning("Please update WEIDU_PATH to point to your weidu executable")
+        logger.warning(f"Weidu not found at: {cfg.WEIDU_PATH}")
+        logger.warning("Please update cfg.WEIDU_PATH to point to your weidu executable")
     
     # Create output directories
-    voices_dir = Path(VOICES_DIR)
-    voices_prep_dir = Path(VOICES_PREP_DIR)
+    voices_dir = Path(cfg.VOICES_DIR)
+    voices_prep_dir = Path(cfg.VOICES_PREP_DIR)
     voices_dir.mkdir(parents=True, exist_ok=True)
     voices_prep_dir.mkdir(parents=True, exist_ok=True)
 
     # Load blacklist
-    blacklist_file = Path(blacklist_file) if (blacklist_file := Path(BLACKLIST_FILE)).exists() else None
+    blacklist_file = Path(blacklist_file) if (blacklist_file := Path(cfg.BLACKLIST_FILE)).exists() else None
     blacklist = load_blacklist(blacklist_file)
     
     # Process

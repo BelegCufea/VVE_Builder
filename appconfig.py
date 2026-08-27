@@ -105,6 +105,8 @@ DEFAULTS: dict = {
     "CONVERT_TO_OGG": True,
     "OGG_QUALITY": 4,
     "MAX_DURATION": 30.0,
+    "MIN_DURATION": 10.0,  # Minimum total sample duration (sum of samples) accepted as enough
+
 
     # File Paths
     "CSV_PATH": r"dialog-report.csv",
@@ -163,6 +165,13 @@ DEFAULTS: dict = {
     "MOD_NAME": "ievo",
     "MOD_TP2": r"setup.tp2",
 
+    # Voice Sample Preparation / Extraction
+    "WEIDU_PATH": r"./weidu/weidu.exe",
+    "BLACKLIST_FILE": r"./blacklist.txt",
+
+    # RealNames to skip during voice sample preparation (also loaded from
+    # BLACKLIST_FILE, one name per line).
+    "BLACKLIST": [],
 }
 
 # ============================================================================
