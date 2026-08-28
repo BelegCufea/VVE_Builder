@@ -5,7 +5,10 @@
     "Torch": "BG1 Narrator",
     "Deck of Many Things": "BG1 Narrator",
     "Kwana": "BG3 Narrator",
-    "Karenina": "Iltheia"
+    "Karenina": "Iltheia",
+    "Scroll of Retribution": "BG1 Narrator",
+    "William \"Bill\" Williamson": "William Bill Williamson",
+    "Globe Machine": "BG1 Narrator"
   },
   "gender": {
     "Imp|F": "Imp_F",
@@ -47,7 +50,16 @@
     "Flaming Fist Healer|M": "Flaming Fist Healer_M",
     "Storekeep|F": "Storekeep_F",
     "Knight of the Order|M": "Knight of the Order_M",
-    "Knight of the Order|F": "Knight of the Order_F"
+    "Knight of the Order|F": "Knight of the Order_F",
+    "Elf|M": "Elf_M",
+    "Elf|F": "Elf_F",
+    "Refugee|M": "Refugee_M",
+    "Refugee|F": "Refugee_F",
+    "Black Market Thief|M": "Black Market Thief_M",
+    "Black Market Thief|F": "Black Market Thief_F",
+    "Customer|M": "Customer_M",
+    "Customer|F": "Customer_F",
+    "Zyntris|F": "Zyntris_F"
   },
   "sysname": {
     "GORALT1": "BG1 Narrator",
@@ -109,6 +121,17 @@
     "OHNFMER1": "Thayan Mercenary_OHNFMER1",
     "OHNMERC3": "Thayan Mercenary_OHNMERC3",
     "OHNMERC1": "Thayan Mercenary_OHNMERC1",
-    "OHNMERC2": "Thayan Mercenary_OHNMERC2"
+    "OHNMERC2": "Thayan Mercenary_OHNMERC2",
+    "BAMNG02": "Amnian Guard_BAMNG02",
+    "RBALDU": "RealNameMissing_RBALDU",
+    "CHHELP": "BG1 Narrator",
+    "GREYHAND": "RealNameMissing_GREYHAND",
+    "XC6ELXXX": "RealNameMissing_XC6ELXXX",
+    "ARNTRA01": "Trainee_ARNTRA01",
+    "ARNTRA02": "Trainee_ARNTRA02",
+    "ARNMAN11": "Trainee_ARNMAN11",
+    "ARNMAN10": "Trainee_ARNMAN10",
+    "ARNTRA04": "Trainee_ARNTRA04",
+    "OHHSTONE": "RealNameMissing_OHHSTONE"
   }
 }
