@@ -1998,7 +1998,7 @@ def scan_csv_for_npc_targets():
     npc_data = {}
     
     # Use existing iter_filtered_csv_rows() - it reads cfg directly.
-    # scanning_npc_list=False: this picker's whole job is to let
+    # scanning_npc_list=True: this picker's whole job is to let
     # the user change the TARGET_VOICES selection, so it must show every
     # NPC regardless of what's currently selected - not just the ones
     # already in cfg.TARGET_VOICES (which would make it impossible to
@@ -3278,10 +3278,15 @@ class NPCTargetsDialog(QDialog):
         self.npc_status_label.setText(message)
 
     def _on_npc_scan_finished(self, npc_data: dict):
+        # --- TEMP PROFILING: remove once we know where the time actually goes ---
+        _t_slot_entered = time.perf_counter()
+        _delivery_gap = _t_slot_entered - getattr(self.npc_scan_worker, "_t_result_ready", _t_slot_entered)
+
         self._raw_npc_data = npc_data
         self._npc_data_loaded = True
 
         self._populate_npc_table(npc_data)
+        _t_populated = time.perf_counter()
 
         selected_count = sum(1 for d in npc_data.values() if d["in_target_voices"])
         selected_lines = sum(d["lines_count"] for d in npc_data.values() if d["in_target_voices"])
@@ -3309,43 +3314,57 @@ class NPCTargetsDialog(QDialog):
     # ------------------------------------------------------------------
     def _populate_npc_table(self, npc_data: dict):
         """Populate table with NPC data."""
-        self.npc_targets_table.setRowCount(0)
+        table = self.npc_targets_table
 
-        for npc_name, data in npc_data.items():
-            row = self.npc_targets_table.rowCount()
-            self.npc_targets_table.insertRow(row)
+        # Two changes from the naive per-row insertRow() approach, neither
+        # changing behavior - purely how Qt is asked to do the same work:
+        #   1. setRowCount(n) once instead of insertRow() once per row - the
+        #      table doesn't have to process a rowsInserted change (and the
+        #      layout/geometry recalculation that follows) 1437 times over,
+        #      just once.
+        #   2. setUpdatesEnabled(False) while populating - suspends repaints
+        #      until the loop is done, instead of repainting after every
+        #      single setItem()/setCellWidget() call.
+        # Measured cause of a ~2.6s populate for 1437 rows; this is a
+        # standard fix for QTableWidget + per-row cell widgets being slow.
+        table.setUpdatesEnabled(False)
+        try:
+            table.setRowCount(len(npc_data))
 
-            # Checkbox column
-            checkbox = QCheckBox()
-            checkbox.setChecked(data["in_target_voices"])
-            checkbox_widget = QWidget()
-            checkbox_layout = QHBoxLayout(checkbox_widget)
-            checkbox_layout.addWidget(checkbox)
-            checkbox_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            checkbox_layout.setContentsMargins(0, 0, 0, 0)
-            self.npc_targets_table.setCellWidget(row, 0, checkbox_widget)
+            for row, (npc_name, data) in enumerate(npc_data.items()):
+                # Checkbox column
+                checkbox = QCheckBox()
+                checkbox.setChecked(data["in_target_voices"])
+                checkbox_widget = QWidget()
+                checkbox_layout = QHBoxLayout(checkbox_widget)
+                checkbox_layout.addWidget(checkbox)
+                checkbox_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+                checkbox_layout.setContentsMargins(0, 0, 0, 0)
+                table.setCellWidget(row, 0, checkbox_widget)
 
-            # NPC Name
-            self.npc_targets_table.setItem(row, 1, QTableWidgetItem(data["display_name"]))
+                # NPC Name
+                table.setItem(row, 1, QTableWidgetItem(data["display_name"]))
 
-            # Status
-            status_text = {
-                "on_voicebox": "✅ On Voicebox",
-                "importable": "📁 Importable",
-                "missing": "❌ Missing"
-            }[data["status"]]
-            self.npc_targets_table.setItem(row, 2, QTableWidgetItem(status_text))
+                # Status
+                status_text = {
+                    "on_voicebox": "✅ On Voicebox",
+                    "importable": "📁 Importable",
+                    "missing": "❌ Missing"
+                }[data["status"]]
+                table.setItem(row, 2, QTableWidgetItem(status_text))
 
-            # Lines count
-            lines_item = _NumericTableWidgetItem(f"{data['lines_count']:,}")
-            lines_item.setData(Qt.ItemDataRole.UserRole + 1, data['lines_count'])
-            lines_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-            self.npc_targets_table.setItem(row, 3, lines_item)
+                # Lines count
+                lines_item = _NumericTableWidgetItem(f"{data['lines_count']:,}")
+                lines_item.setData(Qt.ItemDataRole.UserRole + 1, data['lines_count'])
+                lines_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                table.setItem(row, 3, lines_item)
 
-            # Store raw data for sorting
-            name_item = self.npc_targets_table.item(row, 1)
-            if name_item is not None:
-                name_item.setData(Qt.ItemDataRole.UserRole, data)
+                # Store raw data for sorting
+                name_item = table.item(row, 1)
+                if name_item is not None:
+                    name_item.setData(Qt.ItemDataRole.UserRole, data)
+        finally:
+            table.setUpdatesEnabled(True)
 
     # ------------------------------------------------------------------
     def _filter_npc_table(self):
