@@ -4,7 +4,8 @@
     "Officer Tutorial": "BG1 Narrator",
     "Torch": "BG1 Narrator",
     "Deck of Many Things": "BG1 Narrator",
-    "Kwana": "BG3 Narrator"
+    "Kwana": "BG3 Narrator",
+    "Karenina": "Iltheia"
   },
   "gender": {
     "Imp|F": "Imp_F",
@@ -39,7 +40,14 @@
     "Moneylender|M": "Moneylender_M",
     "Mourner|M": "Mourner_M",
     "de'Arnise Guard|M": "de'Arnise Guard_M",
-    "de'Arnise Guard|F": "de'Arnise Guard_F"
+    "de'Arnise Guard|F": "de'Arnise Guard_F",
+    "Assassin|M": "Assassin_M",
+    "Assassin|F": "Assassin_F",
+    "Flaming Fist Healer|F": "Flaming Fist Healer_F",
+    "Flaming Fist Healer|M": "Flaming Fist Healer_M",
+    "Storekeep|F": "Storekeep_F",
+    "Knight of the Order|M": "Knight of the Order_M",
+    "Knight of the Order|F": "Knight of the Order_F"
   },
   "sysname": {
     "GORALT1": "BG1 Narrator",
@@ -74,6 +82,33 @@
     "MOURNER6": "Mourner_MOURNER6",
     "MOURNER2": "Mourner_MOURNER2",
     "MOURNER8": "Mourner_MOURNER8",
-    "RUMORA": "BG1 Narrator"
+    "RUMORA": "BG1 Narrator",
+    "CIVIL01": "Civil Servant_CIVIL01",
+    "CIVIL02": "Civil Servant_CIVIL02",
+    "CIVIL03": "Civil Servant_CIVIL03",
+    "OHNREDW3": "Red Wizard_OHNREDW3",
+    "OHNREDW7": "Red Wizard_OHNREDW7",
+    "OHNREDW2": "Red Wizard_OHNREDW2",
+    "OHNREDW": "Red Wizard_OHNREDW",
+    "OHNREDW1": "Red Wizard_OHNREDW1",
+    "OHNREDW8": "Red Wizard_OHNREDW8",
+    "OHNREDW4": "Red Wizard_OHNREDW4",
+    "SLAVER4": "Slaver Guard_SLAVER4",
+    "SLAVER1": "Slaver Guard_SLAVER1",
+    "SLAVER2": "Slaver Guard_SLAVER2",
+    "SLAVER3": "Slaver Guard_SLAVER3",
+    "RBEREG": "RealNameMissing_RBEREG",
+    "RIFT01": "Diseased Child_RIFT01",
+    "RIFTC01": "Diseased Child_RIFTC01",
+    "RIFTC02": "Diseased Child_RIFTC02",
+    "PLSHKN01": "Knight of the Order_PLSHKN01",
+    "PLSHKN02": "Knight of the Order_PLSHKN02",
+    "SPECH3": "Spectral Harpist_SPECH3",
+    "SPECH2": "Spectral Harpist_SPECH2",
+    "SPECH1": "Spectral Harpist_SPECH1",
+    "OHNFMER1": "Thayan Mercenary_OHNFMER1",
+    "OHNMERC3": "Thayan Mercenary_OHNMERC3",
+    "OHNMERC1": "Thayan Mercenary_OHNMERC1",
+    "OHNMERC2": "Thayan Mercenary_OHNMERC2"
   }
 }
