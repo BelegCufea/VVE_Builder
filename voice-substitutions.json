@@ -33,7 +33,13 @@
     "Patron|F": "Patron_F",
     "Slave|F": "Slave_F",
     "Slave|M": "Slave_M",
-    "Spider|F": "Spider_F"
+    "Spider|F": "Spider_F",
+    "Cultist|F": "Cultist_F",
+    "Moneylender|F": "Moneylender_F",
+    "Moneylender|M": "Moneylender_M",
+    "Mourner|M": "Mourner_M",
+    "de'Arnise Guard|M": "de'Arnise Guard_M",
+    "de'Arnise Guard|F": "de'Arnise Guard_F"
   },
   "sysname": {
     "GORALT1": "BG1 Narrator",
@@ -62,6 +68,12 @@
     "KPFARM02": "Citizen_KPFARM02",
     "KPFARM01": "Citizen_KPFARM01",
     "KPFARM03": "Citizen_KPFARM03",
-    "KPFARM04": "Citizen_KPFARM04"
+    "KPFARM04": "Citizen_KPFARM04",
+    "BDDEBUG": "BG1 Narrator",
+    "CLTCUT02": "Cultist_CLTCUT02",
+    "MOURNER6": "Mourner_MOURNER6",
+    "MOURNER2": "Mourner_MOURNER2",
+    "MOURNER8": "Mourner_MOURNER8",
+    "RUMORA": "BG1 Narrator"
   }
 }

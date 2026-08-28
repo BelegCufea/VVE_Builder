@@ -1,0 +1,1 @@
+So like, I was working on this new agent thing, kind of like an AI that can do trading stuff, you know? It's pretty cool because it uses some open source tech we developed, and yeah, it's kind of frustrating because nobody really gets it yet, but I think it's gonna be huge.
