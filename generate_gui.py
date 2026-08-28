@@ -1997,8 +1997,13 @@ def scan_csv_for_npc_targets():
     # Collect NPC data
     npc_data = {}
     
-    # Use existing iter_filtered_csv_rows() - it reads cfg directly
-    for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows():
+    # Use existing iter_filtered_csv_rows() - it reads cfg directly.
+    # scanning_npc_list=False: this picker's whole job is to let
+    # the user change the TARGET_VOICES selection, so it must show every
+    # NPC regardless of what's currently selected - not just the ones
+    # already in cfg.TARGET_VOICES (which would make it impossible to
+    # ever select anyone new once TARGET_VOICES is non-empty).
+    for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows(scanning_npc_list=True):
         # Preprocess text (reads cfg inside preprocess_text if needed)
         if patcher_config:
             text = preprocess_text(text, patcher_config)
@@ -2116,7 +2121,7 @@ def load_strref_filter():
         return set()
 
 
-def iter_filtered_csv_rows():
+def iter_filtered_csv_rows(scanning_npc_list: bool = False):
     """
     Parse the dialog CSV and yield rows that pass the shared row-level filters.
 
@@ -2127,9 +2132,19 @@ def iter_filtered_csv_rows():
         - Row must have at least 8 columns.
         - If cfg.USE_STRREF_FILTER and strref_filter is non-empty: strref must be in it.
         - If not cfg.USE_STRREF_FILTER: sysname must be non-empty.
-        - If not cfg.USE_STRREF_FILTER and cfg.TARGET_VOICES given: npc_name must be in target_voices.
+        - If not cfg.USE_STRREF_FILTER and cfg.TARGET_VOICES given and
+          scanning_npc_list is False: npc_name must be in target_voices.
         - If cfg.FILENAME_PREFIX and csv_filename are both present: csv_filename must start with it.
         - text must be non-empty.
+
+    Args:
+        scanning_npc_list (bool): Whether to restrict rows to
+            cfg.TARGET_VOICES. Defaults to False (the normal generation
+            scope). Pass True for callers that need to see every NPC
+            regardless of the current TARGET_VOICES selection - e.g. the
+            NPC Targets picker itself, which would otherwise only ever
+            show whichever NPCs are already selected, with no way to
+            select any others once TARGET_VOICES is non-empty.
 
     Yields:
         tuple: (strref, sysname, npc_name, gender, csv_filename, text)
@@ -2160,8 +2175,9 @@ def iter_filtered_csv_rows():
                     continue
             if not cfg.USE_STRREF_FILTER and not sysname:
                 continue
-            if not cfg.USE_STRREF_FILTER and cfg.TARGET_VOICES and npc_name not in cfg.TARGET_VOICES:
-                continue
+            if not scanning_npc_list:
+                if not cfg.USE_STRREF_FILTER and cfg.TARGET_VOICES and npc_name not in cfg.TARGET_VOICES:
+                    continue
             if cfg.FILENAME_PREFIX and csv_filename and not csv_filename.startswith(cfg.FILENAME_PREFIX):
                 continue
             if not is_valid_text(text):
