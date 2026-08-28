@@ -23,6 +23,7 @@ import time
 import uuid
 import shutil
 import zipfile
+from typing import Dict, Iterator, List, Optional, Set, Tuple, Union, cast
 import requests
 import logging
 from appconfig import cfg, set_many as _appconfig_set_many
@@ -52,6 +53,9 @@ class CaseInsensitiveDict(dict):
     Stores key-value pairs where string keys can be accessed, retrieved, checked,
     or deleted with any letter casing. Tracks the canonical (original) casing
     of keys for iteration and representation.
+
+    Type parameters:
+        V: The value type stored in the dictionary.
     """
 
     def __init__(self, *args, **kwargs):
@@ -62,7 +66,7 @@ class CaseInsensitiveDict(dict):
             *args: Optional positional arguments (mapping or iterable of key-value pairs).
             **kwargs: Optional keyword arguments to populate the dictionary.
         """
-        self._keys = {}
+        self._keys: Dict[str, str] = {}
         super().__init__()
         if args or kwargs:
             self.update(*args, **kwargs)
@@ -156,7 +160,7 @@ class CaseInsensitiveDict(dict):
                 return super().pop(canonical, *args)
         return super().pop(key, *args)
 
-    def get_canonical_key(self, key):
+    def get_canonical_key(self, key: str) -> str:
         """
         Get the original (canonical) casing used when key was stored.
 
@@ -192,7 +196,7 @@ class CaseInsensitiveDict(dict):
             self[k] = v
 
 
-def get_canonical_key(mapping, key):
+def get_canonical_key(mapping: dict, key: str) -> str:
     """
     Retrieve the canonical key from a mapping or return the key as-is.
 
@@ -203,8 +207,10 @@ def get_canonical_key(mapping, key):
     Returns:
         The canonical key if available, else key.
     """
-    if hasattr(mapping, "get_canonical_key"):
-        return mapping.get_canonical_key(key)
+    get_key = getattr(mapping, "get_canonical_key", None)
+    if callable(get_key):
+        canonical_key = get_key(key)
+        return canonical_key if isinstance(canonical_key, str) else key
     return key
 
 
@@ -212,12 +218,9 @@ class LogSignal(QObject):
     """
     Bridges Python logging records into Qt signals.
 
-    This class provides a Qt signal that can be safely emitted from any thread
-    and received by the main GUI thread to update the log panel.
-
     Attributes:
-        message (Signal): Emitted with (message_string, log_level) when a
-            log record is received from the logging system.
+        message: Emitted with (message_string, log_level) when a log record
+            is received from the logging system.
 
     Note:
         This object must be created in the main GUI thread so its signals
@@ -235,30 +238,19 @@ class QtLogHandler(logging.Handler):
     messages from background threads to safely update the GUI log panel.
 
     Args:
-        log_signal (LogSignal): The signal to emit log messages on.
-
-    Note:
-        The handler uses the standard logging format configured in
-        log_initialize(). It silently ignores any errors during emission
-        to prevent logging failures from crashing the application.
+        log_signal: The signal to emit log messages on.
     """
 
     def __init__(self, log_signal: LogSignal):
-        """
-        Initialize the handler with a target LogSignal.
-
-        Args:
-            log_signal (LogSignal): The signal instance to receive emitted log records.
-        """
         super().__init__()
         self.log_signal = log_signal
 
-    def emit(self, record):
+    def emit(self, record: logging.LogRecord) -> None:
         """
         Process a log record and emit it as a Qt signal.
 
         Args:
-            record (logging.LogRecord): The log record to process.
+            record: The log record to process.
 
         Note:
             The record is formatted using the handler's formatter before
@@ -272,7 +264,7 @@ class QtLogHandler(logging.Handler):
             pass
 
 
-def log_initialize(log_signal: LogSignal):
+def log_initialize(log_signal: LogSignal) -> logging.Logger:
     """
     Initialize the logging system with three sinks.
 
@@ -281,15 +273,11 @@ def log_initialize(log_signal: LogSignal):
         - Console: Clean info-level messages (if a console is attached)
         - GUI log panel: Clean info-level messages via QtLogHandler
 
-    This triple-sink approach ensures logs are available for troubleshooting
-    in the file, visible in the GUI, and optionally mirrored to the console
-    when running from a terminal.
-
     Args:
-        log_signal (LogSignal): The signal to connect the GUI handler to.
+        log_signal: The signal to connect the GUI handler to.
 
     Returns:
-        logging.Logger: The configured logger instance.
+        The configured logger instance.
 
     Note:
         The logger is configured once at application startup. Although the
@@ -306,7 +294,6 @@ def log_initialize(log_signal: LogSignal):
         logger.handlers.clear()
     logger.setLevel(logging.DEBUG)
 
-    # File handler - full format with timestamp
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(logging.DEBUG)
     file_handler.setFormatter(logging.Formatter(
@@ -314,25 +301,17 @@ def log_initialize(log_signal: LogSignal):
     ))
     logger.addHandler(file_handler)
 
-    # Console handler - only if a real console is attached
-    # Only ERROR and above shown in console to avoid duplication with GUI
     if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
         console_handler = logging.StreamHandler()
         console_handler.setLevel(logging.ERROR)
         console_handler.setFormatter(logging.Formatter('%(message)s'))
         logger.addHandler(console_handler)
 
-    # GUI handler - forwards to the log panel via Qt signal
     gui_handler = QtLogHandler(log_signal)
     gui_handler.setLevel(logging.INFO)
     gui_handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(gui_handler)
 
-    # Third-party libraries (requests/urllib3) log their own DEBUG chatter
-    # ("Starting new HTTP connection", "GET /health HTTP/1.1 200 ...") which
-    # would otherwise flood the log file since the root logger is DEBUG.
-    # Silence them specifically rather than raising the root level, so our
-    # own DEBUG records (if any are added later) still get through.
     for noisy_logger in ("urllib3", "urllib3.connectionpool", "requests"):
         logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
@@ -340,38 +319,26 @@ def log_initialize(log_signal: LogSignal):
     return logger
 
 
-def log_header_start():
-    """
-    Log the run-start banner immediately.
-
-    This is the first log message, displayed before any setup work begins.
-    It includes the start timestamp and configured TTS engine/model.
-
-    Note:
-        The message is logged at INFO level to the configured logging sinks.
-    """
+def log_header_start() -> None:
+    """Log the run-start banner immediately."""
     lines = ["", "=" * 70, "Voice over Generation",
-              f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 70,
-              f"TTS Engine: {cfg.ENGINE}" + (f" ({cfg.MODEL_SIZE})" if cfg.MODEL_SIZE and cfg.MODEL_SIZE.strip() else "")]
+             f"# Started at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}", "=" * 70,
+             f"TTS Engine: {cfg.ENGINE}" + (f" ({cfg.MODEL_SIZE})" if cfg.MODEL_SIZE and cfg.MODEL_SIZE.strip() else "")]
     logger.info("\n".join(lines))
 
 
-def log_header_summary(total_jobs, total_chars_all):
+def log_header_summary(total_jobs: int, total_chars_all: int) -> None:
     """
     Log the closing lines of the header block once totals are known.
 
     Args:
-        total_jobs (int): Total number of generation jobs to process.
-        total_chars_all (int): Total character count across all jobs.
-
-    Note:
-        This pairs with log_header_start(). Everything in between is logged
-        directly by the pipeline steps as they complete.
+        total_jobs: Total number of generation jobs to process.
+        total_chars_all: Total character count across all jobs.
     """
     logger.info("\n".join([f"Total jobs: {total_jobs}, Total chars: {total_chars_all}", "=" * 70]))
 
 
-def log_pregeneration_summary(voice_stats, profile_map):
+def log_pregeneration_summary(voice_stats: dict, profile_map: dict) -> None:
     """
     Build and log the pre-generation summary table.
 
@@ -390,20 +357,14 @@ def log_pregeneration_summary(voice_stats, profile_map):
         - NPCs with valid voices but nothing to generate are summarized
 
     Args:
-        voice_stats (dict): Statistics dictionary per voice profile + NPC combination.
-        profile_map (dict): Voice profile name -> ID mapping.
-
-    Note:
-        The output includes grouped summary rows and a GRAND TOTAL row.
-        Missing profiles are marked with "❌ Missing". In compact mode,
-        detail rows are limited to NPCs with pending generation work.
+        voice_stats: Statistics dictionary per voice profile + NPC combination.
+        profile_map: Voice profile name -> ID mapping.
     """
     trunc = lambda text, width: (text[:width - 3] + "...") if len(text) > width else text
     fmt = lambda v, w: f"{v:{w},}" if v != 0 else ' ' * w
 
     class COL_WIDTH:
         """Column widths used to format the pre-generation summary table."""
-
         NPC = 28
         PROFILE = 30
         TOTAL = 7
@@ -466,18 +427,16 @@ def log_pregeneration_summary(voice_stats, profile_map):
     missing_npcs, missing_chars_total, missing_done_total, missing_skipped_total = [], 0, 0, 0
     done_npcs, done_chars_total, done_done_total, done_skipped_total = [], 0, 0, 0
 
-    # Sort by NPC name then vice name
     for key, stats in sorted(voice_stats.items(), key=lambda item: ((item[1].get("display_name") or "").lower(), (item[1].get("voice_name") or "").lower())):
         voice_name = stats.get("voice_name") or "None"
         display_name = stats.get("display_name") or "Unknown"
         has_profile = voice_name in profile_map if voice_name else False
-        
+
         total = stats["total"]
         done = stats.get("done", 0)
         skipped = stats.get("skipped", 0)
         to_gen = stats["to_generate"]
 
-        # Get character counts from the chars dict
         chars_total = stats["chars"]["total"]
         chars_done = stats["chars"].get("done", 0)
         chars_skipped = stats["chars"].get("skipped", 0)
@@ -584,27 +543,24 @@ def log_pregeneration_summary(voice_stats, profile_map):
     logger.info("\n".join(header_lines + detail_lines + totals_lines))
 
 
-def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_duration,
-                     npc_name, voice_name, success=True, error_msg=None):
+def log_job_summary(idx: int, total_jobs: int, strref: str, filename: str, chars: int,
+                    elapsed: float, audio_duration: float, npc_name: str, voice_name: str,
+                    success: bool = True, error_msg: Optional[str] = None) -> None:
     """
     Log a single job's completion result.
 
     Args:
-        idx (int): Job index (1-based).
-        total_jobs (int): Total number of jobs.
-        strref (str): STRREF identifier.
-        filename (str): Output filename.
-        chars (int): Number of characters in the text.
-        elapsed (float): Generation time in seconds.
-        audio_duration (float): Duration of generated audio.
-        npc_name (str): NPC name.
-        voice_name (str): Voice profile name used.
-        success (bool): True if generation succeeded.
-        error_msg (str, optional): Error message if failed.
-
-    Note:
-        The summary includes realtime speed percentage and shows the voice
-        name in parentheses only when it differs from the NPC name.
+        idx: Job index (1-based).
+        total_jobs: Total number of jobs.
+        strref: STRREF identifier.
+        filename: Output filename.
+        chars: Number of characters in the text.
+        elapsed: Generation time in seconds.
+        audio_duration: Duration of generated audio.
+        npc_name: NPC name.
+        voice_name: Voice profile name used.
+        success: True if generation succeeded.
+        error_msg: Error message if failed.
     """
     realtime_speed = (audio_duration / elapsed * 100 if elapsed > 0 else 0)
     voice_part = f" (voice: {voice_name})" if voice_name != npc_name else ""
@@ -629,8 +585,9 @@ def log_job_summary(idx, total_jobs, strref, filename, chars, elapsed, audio_dur
     logging.log(logging.INFO if success else logging.WARNING, line)
 
 
-def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voice_stats, 
-                       retry_stats=None, was_stopped=False, successful_jobs=0):
+def log_final_summary(total_jobs: int, total_chars_processed: int, avg_time_per_char: Optional[float],
+                      voice_stats: dict, retry_stats: Optional[dict] = None,
+                      was_stopped: bool = False, successful_jobs: int = 0) -> None:
     """
     Log the final summary after all generation jobs complete.
 
@@ -644,38 +601,26 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
         - Retry statistics (if provided)
         - Completion timestamp
 
-    The summary clearly distinguishes between:
-        - Queue total (total jobs selected)
-        - Actually processed (successful + failed)
-        - Skipped (already generated, missing voices, filtered out)
-
     Args:
-        total_jobs (int): Total number of jobs in the queue.
-        total_chars_processed (int): Total characters successfully generated.
-        avg_time_per_char (float): Average generation time per character.
-        voice_stats (dict): Statistics dictionary per voice profile + NPC combination.
-        retry_stats (dict, optional): Retry statistics from the generation run.
-        was_stopped (bool): True if the user manually stopped the process.
-        successful_jobs (int): Number of successfully generated files.
-
-    Note:
-        Uses fixed-width labels (30 characters) and right-aligned numbers
-        with dynamic width calculation for consistent alignment.
+        total_jobs: Total number of jobs in the queue.
+        total_chars_processed: Total characters successfully generated.
+        avg_time_per_char: Average generation time per character.
+        voice_stats: Statistics dictionary per voice profile + NPC combination.
+        retry_stats: Retry statistics from the generation run.
+        was_stopped: True if the user manually stopped the process.
+        successful_jobs: Number of successfully generated files.
     """
-    # Extract statistics from voice_stats
     total_done = 0
     total_skipped = 0
     done_summary, skipped_summary = {}, {}
 
     for key, stats in voice_stats.items():
         display_name = stats.get("display_name", "Unknown")
-        voice_name = stats.get("voice_name", "Unknown")
         done = stats.get("done", 0)
         skipped = stats.get("skipped", 0)
-        
+
         if done > 0:
             total_done += done
-            # Use display_name as the key for the summary
             done_summary[display_name] = done_summary.get(display_name, 0) + done
         if skipped > 0:
             total_skipped += skipped
@@ -684,24 +629,20 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
     total_failed = retry_stats.get('failed_tasks', 0) if retry_stats else 0
     processed_jobs = successful_jobs + total_failed
 
-    # Calculate chars from voice_stats using the chars dict
     total_done_chars = 0
     total_skipped_chars = 0
     total_chars_all = 0
-    
+
     for key, stats in voice_stats.items():
         chars = stats.get("chars", {})
         total_chars_all += chars.get("total", 0)
         total_done_chars += chars.get("done", 0)
         total_skipped_chars += chars.get("skipped", 0)
 
-    # Calculate completion rate
     completion_rate = (successful_jobs / total_jobs * 100) if total_jobs > 0 else 0
 
-    # Fixed label width for consistent alignment
     LABEL_WIDTH = 30
 
-    # Find the maximum width needed for numbers in each section
     job_numbers = [
         total_jobs,
         successful_jobs,
@@ -712,7 +653,7 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
         total_jobs,
     ]
     job_width = max((len(str(n)) for n in job_numbers if n > 0), default=9) + 1
-    
+
     char_numbers = [
         total_chars_all,
         total_chars_processed,
@@ -728,106 +669,103 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
     ]
     retry_width = max((len(str(n)) for n in retry_numbers if n > 0), default=9) + 1 if retry_stats else 10
 
-    # Ensure minimum widths
     job_width = max(job_width, 10)
     char_width = max(char_width, 10)
 
     lines = []
     lines.append("")
     lines.append("=" * 70)
-    
-    # Status header
+
     if was_stopped:
         lines.append("⏹ GENERATION STOPPED (User Request)")
     else:
         lines.append("✅ GENERATION COMPLETE")
-    
+
     lines.append("=" * 70)
-    
-    # ----- Job Statistics -----
+
     lines.append("📊 JOB STATISTICS")
     lines.append("-" * 70)
-    
-    # Using fixed label width for alignment
+
     lines.append(f"{'  Total jobs in queue:':<{LABEL_WIDTH}} {total_jobs:>{job_width},}")
     lines.append(f"{'  ✅ Successfully generated:':<{LABEL_WIDTH - 1}} {successful_jobs:>{job_width},}")
-    
+
     if total_failed > 0:
         lines.append(f"{'  ❌ Failed:':<{LABEL_WIDTH - 1}} {total_failed:>{job_width},}")
-    
+
     if total_done > 0:
         lines.append(f"{'  ⏭️ Already generated:':<{LABEL_WIDTH}} {total_done:>{job_width},} (skipped)")
-    
+
     if total_skipped > 0:
         lines.append(f"{'  ⏭️ Missing voices:':<{LABEL_WIDTH}} {total_skipped:>{job_width},} (skipped)")
-    
+
     if processed_jobs > 0 and total_jobs > 0:
         lines.append(f"{'  📈 Completion rate:':<{LABEL_WIDTH - 1}} {completion_rate:>{job_width-1}.1f}% ({successful_jobs:,} of {total_jobs:,})")
-    
+
     lines.append("")
 
-    # ----- Character Statistics -----
     lines.append("📝 CHARACTER STATISTICS")
     lines.append("-" * 70)
-    
+
     lines.append(f"{'  Total chars in queue:':<{LABEL_WIDTH}} {total_chars_all:>{char_width},}")
     lines.append(f"{'  ✅ Generated:':<{LABEL_WIDTH - 1}} {total_chars_processed:>{char_width},}")
-    
+
     if total_done_chars > 0:
         lines.append(f"{'  ⏭️ Already generated:':<{LABEL_WIDTH}} {total_done_chars:>{char_width},} (skipped)")
-    
+
     if total_skipped_chars > 0:
         lines.append(f"{'  ⏭️ Missing voices:':<{LABEL_WIDTH}} {total_skipped_chars:>{char_width},} (skipped)")
-    
+
     if total_chars_processed > 0 and avg_time_per_char:
         lines.append(f"{'  ⚡ Avg time/char (s):':<{LABEL_WIDTH - 1}} {avg_time_per_char:>{char_width}.4f}")
-    
+
     lines.append("")
 
-    # ----- Detailed Breakdown (if cfg.COMPACT_SUMMARY is False) -----
     if not cfg.COMPACT_SUMMARY:
         lines.append("📋 DETAILED BREAKDOWN")
         lines.append("-" * 70)
-        
+
         if done_summary:
             done_details = ", ".join(f"{npc}: {count:,}" for npc, count in done_summary.items())
             lines.append(f"  Already generated: {done_details}")
-        
+
         if skipped_summary:
             skipped_details = ", ".join(f"{npc}: {count:,}" for npc, count in skipped_summary.items())
             lines.append(f"  Missing voices:     {skipped_details}")
 
-    # ----- Retry Statistics -----
     if retry_stats:
-        lines.append("")
-        lines.append("🔄 RETRY STATISTICS")
-        lines.append("-" * 70)
-        lines.append(f"{'  Total retry attempts:':<{LABEL_WIDTH}} {retry_stats.get('failed_attempts', 0):>{retry_width},}")
-        lines.append(f"{'  Successful retries:':<{LABEL_WIDTH}} {retry_stats.get('successful_retries', 0):>{retry_width},}")
-        lines.append(f"{'  Failed tasks:':<{LABEL_WIDTH}} {retry_stats.get('failed_tasks', 0):>{retry_width},}")
-
-        failed_tasks = retry_stats.get('failed_task_details', [])
-        if failed_tasks:
+        has_retries = (retry_stats.get('failed_attempts', 0) > 0 or 
+                    retry_stats.get('successful_retries', 0) > 0 or 
+                    retry_stats.get('failed_tasks', 0) > 0 or
+                    retry_stats.get('failed_task_details', []))
+        
+        if has_retries:
             lines.append("")
-            lines.append("  ❌ Failed tasks:")
-            for task in failed_tasks:
-                lines.append(f"    [{task['idx']}] {task['strref']}/{task['filename']} - {task['npc_name']}")
+            lines.append("🔄 RETRY STATISTICS")
+            lines.append("-" * 70)
+            lines.append(f"{'  Total retry attempts:':<{LABEL_WIDTH}} {retry_stats.get('failed_attempts', 0):>{retry_width},}")
+            lines.append(f"{'  Successful retries:':<{LABEL_WIDTH}} {retry_stats.get('successful_retries', 0):>{retry_width},}")
+            lines.append(f"{'  Failed tasks:':<{LABEL_WIDTH}} {retry_stats.get('failed_tasks', 0):>{retry_width},}")
+
+            failed_tasks = retry_stats.get('failed_task_details', [])
+            if failed_tasks:
+                lines.append("")
+                lines.append("  ❌ Failed tasks:")
+                for task in failed_tasks:
+                    lines.append(f"    [{task['idx']}] {task['strref']}/{task['filename']} - {task['npc_name']}")
 
     lines.append("")
     lines.append("=" * 70)
-    
-    # Timestamp
+
     if was_stopped:
         lines.append(f"⏹ Stopped at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     else:
         lines.append(f"✅ Completed at {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
+
     lines.append("=" * 70)
     lines.append("")
 
     logging.info("\n".join(lines))
 
-# Logger is created once the QApplication/LogSignal exist; see main().
 logger: logging.Logger = logging.getLogger()
 
 
@@ -835,7 +773,7 @@ logger: logging.Logger = logging.getLogger()
 # Utility Functions
 # ============================================================================
 
-def format_time(seconds):
+def format_time(seconds: float) -> str:
     """
     Convert a time duration in seconds to a human-readable string.
 
@@ -848,10 +786,10 @@ def format_time(seconds):
         172800 seconds -> "2d0h"
 
     Args:
-        seconds (float): Time duration in seconds.
+        seconds: Time duration in seconds.
 
     Returns:
-        str: Human-readable time string with appropriate units (s, m, h, or d).
+        Human-readable time string with appropriate units (s, m, h, or d).
     """
     if seconds < 60:
         return f"{seconds:.1f}s"
@@ -868,15 +806,15 @@ def format_time(seconds):
     return f"{days}d{hrs}h"
 
 
-def format_finish_time(eta_seconds):
+def format_finish_time(eta_seconds: float) -> str:
     """
     Format an ETA as an absolute expected finish time.
 
     Args:
-        eta_seconds (float): Estimated time remaining in seconds.
+        eta_seconds: Estimated time remaining in seconds.
 
     Returns:
-        str: Formatted finish time string.
+        Formatted finish time string.
             - Same day: Shows time only (e.g., "14:30:45")
             - Future day: Shows date and time using locale settings
             - If eta_seconds <= 0: Returns "..."
@@ -889,7 +827,7 @@ def format_finish_time(eta_seconds):
     return "..."
 
 
-def sanitize_filename(name):
+def sanitize_filename(name: str) -> str:
     r"""
     Clean a string to be safe for use as a Windows file or directory name.
 
@@ -897,14 +835,10 @@ def sanitize_filename(name):
     and handles Windows reserved device names.
 
     Args:
-        name (str): The original string to sanitize.
+        name: The original string to sanitize.
 
     Returns:
-        str: A safe filename/directory name string.
-
-    Note:
-        The function is Windows-focused but produces safe names for most
-        modern filesystems.
+        A safe filename/directory name string.
     """
     name = re.sub(r'[<>:"/\\|?*]', '_', name)
     name = name.rstrip(' .')
@@ -920,15 +854,15 @@ def sanitize_filename(name):
     return name
 
 
-def to_base36(value):
+def to_base36(value: int) -> str:
     """
     Convert a non-negative integer to its base36 representation.
 
     Args:
-        value (int): Non-negative integer to convert.
+        value: Non-negative integer to convert.
 
     Returns:
-        str: Base36 representation of the value.
+        Base36 representation of the value.
 
     Raises:
         ValueError: If value is negative.
@@ -945,7 +879,7 @@ def to_base36(value):
     return result
 
 
-def generate_resref(strref, prefix="TS"):
+def generate_resref(strref: Union[int, str], prefix: str = "TS") -> str:
     """
     Generate an 8-character resref from a StrRef number.
 
@@ -953,11 +887,11 @@ def generate_resref(strref, prefix="TS"):
     Example: prefix "TS" + StrRef 12345 -> "TS0009IX"
 
     Args:
-        strref (int or str): The StrRef number.
-        prefix (str): 2-character prefix. Defaults to "TS".
+        strref: The StrRef number.
+        prefix: 2-character prefix. Defaults to "TS".
 
     Returns:
-        str: 8-character resref in uppercase.
+        8-character resref in uppercase.
 
     Raises:
         ValueError: If prefix is not exactly 2 characters or strref is invalid.
@@ -981,7 +915,7 @@ def generate_resref(strref, prefix="TS"):
 # Voice Profile Management
 # ============================================================================
 
-def load_voice_substitutions_all():
+def load_voice_substitutions_all() -> Tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
     """
     Load all voice substitution rules from a single JSON file.
 
@@ -993,10 +927,10 @@ def load_voice_substitutions_all():
     }
 
     Returns:
-        tuple: (substitutions, substitutions_gender, substitutions_sysname)
-            - substitutions (dict): NPC name -> voice profile
-            - substitutions_gender (dict): NPC name|gender -> voice profile
-            - substitutions_sysname (dict): sysname -> voice profile
+        A tuple containing:
+            - substitutions: NPC name -> voice profile
+            - substitutions_gender: NPC name|gender -> voice profile
+            - substitutions_sysname: sysname -> voice profile
     """
     substitutions, substitutions_gender, substitutions_sysname = {}, {}, {}
 
@@ -1020,23 +954,24 @@ def load_voice_substitutions_all():
     return substitutions, substitutions_gender, substitutions_sysname
 
 
-def resolve_voice_substitution(npc_name, gender=None, sysname=None,
-                                substitutions=None, substitutions_gender=None,
-                                substitutions_sysname=None):
+def resolve_voice_substitution(npc_name: Optional[str], gender: Optional[str] = None,
+                               sysname: Optional[str] = None,
+                               substitutions: Optional[Dict[str, str]] = None,
+                               substitutions_gender: Optional[Dict[str, str]] = None,
+                               substitutions_sysname: Optional[Dict[str, str]] = None) -> Optional[str]:
     """
-    Apply the substitution-lookup priority shared by get_voice_profile_name()
-    and get_candidate_voice_name(): system name, then NPC+gender, then NPC name.
+    Apply the substitution-lookup priority: system name, then NPC+gender, then NPC name.
 
     Args:
-        npc_name (str): NPC name from the CSV.
-        gender (str, optional): Gender from CSV ("M", "F", or empty).
-        sysname (str, optional): System name from CSV (column 1).
-        substitutions (dict, optional): NPC name -> voice profile mappings.
-        substitutions_gender (dict, optional): NPC name|gender -> voice profile mappings.
-        substitutions_sysname (dict, optional): sysname -> voice profile mappings.
+        npc_name: NPC name from the CSV.
+        gender: Gender from CSV ("M", "F", or empty).
+        sysname: System name from CSV (column 1).
+        substitutions: NPC name -> voice profile mappings.
+        substitutions_gender: NPC name|gender -> voice profile mappings.
+        substitutions_sysname: sysname -> voice profile mappings.
 
     Returns:
-        str or None: The substituted profile name if any rule matches, else None.
+        The substituted profile name if any rule matches, else None.
     """
     substitutions = substitutions or {}
     substitutions_gender = substitutions_gender or {}
@@ -1053,9 +988,11 @@ def resolve_voice_substitution(npc_name, gender=None, sysname=None,
     return None
 
 
-def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None,
-                            substitutions=None, substitutions_gender=None,
-                            substitutions_sysname=None):
+def get_voice_profile_name(npc_name: Optional[str], gender: Optional[str] = None,
+                           profile_map: Optional[dict] = None, sysname: Optional[str] = None,
+                           substitutions: Optional[Dict[str, str]] = None,
+                           substitutions_gender: Optional[Dict[str, str]] = None,
+                           substitutions_sysname: Optional[Dict[str, str]] = None) -> Optional[str]:
     """
     Resolve an NPC name to a Voicebox profile name.
 
@@ -1068,21 +1005,16 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
     6. Neutral/unknown fallback
 
     Args:
-        npc_name (str): NPC name from CSV. Can be empty for descriptions.
-        gender (str, optional): Gender from CSV ("M", "F", or empty).
-        profile_map (dict, optional): Map of available voice profiles.
-        sysname (str, optional): System name from CSV (column 1).
-        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
-            Substitution mappings.
+        npc_name: NPC name from CSV. Can be empty for descriptions.
+        gender: Gender from CSV ("M", "F", or empty).
+        profile_map: Map of available voice profiles.
+        sysname: System name from CSV (column 1).
+        substitutions: NPC name -> voice profile mappings.
+        substitutions_gender: NPC name|gender -> voice profile mappings.
+        substitutions_sysname: sysname -> voice profile mappings.
 
     Returns:
-        str: Voice profile name, or None if no valid voice found.
-
-    Example:
-        >>> get_voice_profile_name("Bandit", "M")
-        "Bandit male"
-        >>> get_voice_profile_name("", "M")
-        "BG1 Narrator"  # Uses cfg.FALLBACK_VOICE_MALE
+        Voice profile name, or None if no valid voice found.
     """
     substituted = resolve_voice_substitution(
         npc_name, gender, sysname, substitutions, substitutions_gender, substitutions_sysname
@@ -1106,19 +1038,17 @@ def get_voice_profile_name(npc_name, gender=None, profile_map=None, sysname=None
     return None
 
 
-def delete_profile(profile_id):
+def delete_profile(profile_id: Union[str, int]) -> Tuple[bool, str]:
     """
     Delete a voice profile from the Voicebox server.
 
-    Sends a DELETE request to the /profiles/{profile_id} endpoint.
-
     Args:
-        profile_id (str or int): The ID of the profile to delete.
+        profile_id: The ID of the profile to delete.
 
     Returns:
-        tuple: (success, message)
-            - success (bool): True if deletion was successful.
-            - message (str): Status message describing the result.
+        A tuple containing:
+            - success: True if deletion was successful.
+            - message: Status message describing the result.
     """
     try:
         delete_url = f"{cfg.BASE_URL}{cfg.PROFILES_ENDPOINT}/{profile_id}"
@@ -1130,7 +1060,7 @@ def delete_profile(profile_id):
         return False, f"Deletion error: {e}"
 
 
-def get_all_profiles():
+def get_all_profiles() -> Tuple[CaseInsensitiveDict, CaseInsensitiveDict]:
     """
     Fetch all voice profiles from Voicebox, filtering out zero-sample ones.
 
@@ -1138,15 +1068,12 @@ def get_all_profiles():
     tracked separately for potential rebuilding.
 
     Returns:
-        tuple: (profile_map, zero_sample_profiles)
-            - profile_map (dict): Profile name -> ID mapping (valid profiles only)
-            - zero_sample_profiles (dict): Profile name -> ID mapping for zero-sample profiles
+        A tuple containing:
+            - profile_map: Profile name -> ID mapping (valid profiles only)
+            - zero_sample_profiles: Profile name -> ID mapping for zero-sample profiles
 
     Raises:
         requests.exceptions.RequestException: If the API request fails.
-
-    Note:
-        Profiles without a name or ID are silently skipped.
     """
     resp = requests.get(f"{cfg.BASE_URL}{cfg.PROFILES_ENDPOINT}")
     resp.raise_for_status()
@@ -1184,9 +1111,11 @@ def get_all_profiles():
 # Voice Profile Auto-Provisioning
 # ============================================================================
 
-def get_candidate_voice_name(npc_name, gender=None, sysname=None,
-                              substitutions=None, substitutions_gender=None,
-                              substitutions_sysname=None):
+def get_candidate_voice_name(npc_name: Optional[str], gender: Optional[str] = None,
+                             sysname: Optional[str] = None,
+                             substitutions: Optional[Dict[str, str]] = None,
+                             substitutions_gender: Optional[Dict[str, str]] = None,
+                             substitutions_sysname: Optional[Dict[str, str]] = None) -> Optional[str]:
     """
     Resolve the profile name a CSV row *would* use, without checking existence.
 
@@ -1196,15 +1125,16 @@ def get_candidate_voice_name(npc_name, gender=None, sysname=None,
     want to auto-compose a profile for.
 
     Args:
-        npc_name (str): NPC name from the CSV.
-        gender (str, optional): Gender from CSV.
-        sysname (str, optional): System name from CSV (column 1).
-        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
-            Substitution mappings.
+        npc_name: NPC name from the CSV.
+        gender: Gender from CSV.
+        sysname: System name from CSV (column 1).
+        substitutions: NPC name -> voice profile mappings.
+        substitutions_gender: NPC name|gender -> voice profile mappings.
+        substitutions_sysname: sysname -> voice profile mappings.
 
     Returns:
-        str or None: The candidate profile name, or None if the row has no
-            NPC name to resolve (e.g. description/lore lines).
+        The candidate profile name, or None if the row has no NPC name
+        to resolve (e.g. description/lore lines).
     """
     substituted = resolve_voice_substitution(
         npc_name, gender, sysname, substitutions, substitutions_gender, substitutions_sysname
@@ -1212,8 +1142,9 @@ def get_candidate_voice_name(npc_name, gender=None, sysname=None,
     return substituted or npc_name or None
 
 
-def scan_csv_needed_voice_names(substitutions=None, substitutions_gender=None,
-                                 substitutions_sysname=None):
+def scan_csv_needed_voice_names(substitutions: Optional[Dict[str, str]] = None,
+                                substitutions_gender: Optional[Dict[str, str]] = None,
+                                substitutions_sysname: Optional[Dict[str, str]] = None) -> Set[str]:
     """
     Scan the dialog CSV and collect the set of voice profile names it needs.
 
@@ -1221,17 +1152,14 @@ def scan_csv_needed_voice_names(substitutions=None, substitutions_gender=None,
     so the "needed" set matches what would actually be generated.
 
     Args:
-        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
-            Substitution mappings.
+        substitutions: NPC name -> voice profile mappings.
+        substitutions_gender: NPC name|gender -> voice profile mappings.
+        substitutions_sysname: sysname -> voice profile mappings.
 
     Returns:
-        set: Voice profile names referenced by the filtered CSV rows.
+        Voice profile names referenced by the filtered CSV rows.
     """
     needed = set()
-    strref_filter = set()
-
-    if cfg.USE_STRREF_FILTER:
-        strref_filter = load_strref_filter()
 
     for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows():
         candidate = get_candidate_voice_name(
@@ -1243,7 +1171,7 @@ def scan_csv_needed_voice_names(substitutions=None, substitutions_gender=None,
     return needed
 
 
-def scan_available_voice_dirs(voices_dir):
+def scan_available_voice_dirs(voices_dir: str) -> CaseInsensitiveDict:
     """
     Scan a voices/ directory and group WAV+TXT sample pairs by NPC name.
 
@@ -1251,12 +1179,12 @@ def scan_available_voice_dirs(voices_dir):
     usable samples for composing a profile.
 
     Args:
-        voices_dir (str): Path to the directory of NPC WAV/TXT samples.
+        voices_dir: Path to the directory of NPC WAV/TXT samples.
 
     Returns:
-        dict: NPC name -> list of sample dicts, each with 'number', 'wav_path',
-            'txt_path', 'transcript'. Only entries with at least one valid
-            sample pair are included.
+        NPC name -> list of sample dicts, each with 'number', 'wav_path',
+        'txt_path', 'transcript'. Only entries with at least one valid
+        sample pair are included.
     """
     voices_path = Path(voices_dir)
     voice_groups: defaultdict[str, list] = defaultdict(list)
@@ -1301,20 +1229,17 @@ def scan_available_voice_dirs(voices_dir):
     return CaseInsensitiveDict(voice_groups)
 
 
-def create_profile_package(voice_name, files, output_dir):
+def create_profile_package(voice_name: str, files: list, output_dir: Path) -> Optional[Path]:
     """
     Build a .voicebox.zip package for a voice from its sample files.
 
-    Writes a manifest.json + samples.json + WAV files into a temp folder,
-    then zips it up. The temp folder is always cleaned up afterwards.
-
     Args:
-        voice_name (str): The profile name to embed in the manifest.
-        files (list): Sample dicts as produced by scan_available_voice_dirs().
-        output_dir (Path): Directory to write the .voicebox.zip into.
+        voice_name: The profile name to embed in the manifest.
+        files: Sample dicts as produced by scan_available_voice_dirs().
+        output_dir: Directory to write the .voicebox.zip into.
 
     Returns:
-        Path or None: Path to the created zip file, or None on failure.
+        Path to the created zip file, or None on failure.
     """
     output_path = Path(output_dir)
     output_path.mkdir(parents=True, exist_ok=True)
@@ -1361,15 +1286,15 @@ def create_profile_package(voice_name, files, output_dir):
             shutil.rmtree(temp_dir)
 
 
-def import_profile_zip(zip_path):
+def import_profile_zip(zip_path: Path) -> Optional[dict]:
     """
     Import a composed .voicebox.zip package into Voicebox.
 
     Args:
-        zip_path (Path): Path to the .voicebox.zip file.
+        zip_path: Path to the .voicebox.zip file.
 
     Returns:
-        dict or None: Parsed JSON response on success, None on failure.
+        Parsed JSON response on success, None on failure.
     """
     try:
         with open(zip_path, "rb") as f:
@@ -1382,8 +1307,10 @@ def import_profile_zip(zip_path):
         return None
 
 
-def sync_profiles(substitutions=None, substitutions_gender=None,
-                   substitutions_sysname=None, sync_all=False):
+def sync_profiles(substitutions: Optional[Dict[str, str]] = None,
+                  substitutions_gender: Optional[Dict[str, str]] = None,
+                  substitutions_sysname: Optional[Dict[str, str]] = None,
+                  sync_all: bool = False) -> CaseInsensitiveDict:
     """
     Reconcile Voicebox's profile list against local voices/ directory.
 
@@ -1396,11 +1323,13 @@ def sync_profiles(substitutions=None, substitutions_gender=None,
         cfg.VOICES_DIR can provide, composing and importing missing/zero-sample profiles.
 
     Args:
-        substitutions/substitutions_gender/substitutions_sysname: Substitution mappings.
-        sync_all (bool): If True, process all available voices in cfg.VOICES_DIR.
+        substitutions: NPC name -> voice profile mappings.
+        substitutions_gender: NPC name|gender -> voice profile mappings.
+        substitutions_sysname: sysname -> voice profile mappings.
+        sync_all: If True, process all available voices in cfg.VOICES_DIR.
 
     Returns:
-        CaseInsensitiveDict: Freshest profile name -> id map available.
+        Freshest profile name -> id map available.
     """
     profile_map, zero_sample_profiles = get_all_profiles()
 
@@ -1517,8 +1446,9 @@ def sync_profiles(substitutions=None, substitutions_gender=None,
     return profile_map
 
 
-def sync_missing_profiles(substitutions=None, substitutions_gender=None,
-                           substitutions_sysname=None):
+def sync_missing_profiles(substitutions: Optional[Dict[str, str]] = None,
+                          substitutions_gender: Optional[Dict[str, str]] = None,
+                          substitutions_sysname: Optional[Dict[str, str]] = None) -> CaseInsensitiveDict:
     """
     Reconcile Voicebox's profile list against what the CSV needs and what
     voices/ can provide, composing and importing any missing-but-available
@@ -1527,11 +1457,12 @@ def sync_missing_profiles(substitutions=None, substitutions_gender=None,
     Convenience wrapper around sync_profiles(sync_all=False).
 
     Args:
-        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
-            Substitution mappings.
+        substitutions: NPC name -> voice profile mappings.
+        substitutions_gender: NPC name|gender -> voice profile mappings.
+        substitutions_sysname: sysname -> voice profile mappings.
 
     Returns:
-        CaseInsensitiveDict: Updated profile name -> ID map from Voicebox.
+        Updated profile name -> ID map from Voicebox.
     """
     return sync_profiles(
         substitutions=substitutions,
@@ -1545,7 +1476,7 @@ def sync_missing_profiles(substitutions=None, substitutions_gender=None,
 # Generation Memory
 # ============================================================================
 
-def load_generation_memory(memory_path):
+def load_generation_memory(memory_path: str) -> dict:
     """
     Load the generation history from a JSON file.
 
@@ -1565,16 +1496,11 @@ def load_generation_memory(memory_path):
         }
 
     Args:
-        memory_path (str): Path to the JSON memory file.
+        memory_path: Path to the JSON memory file.
 
     Returns:
-        dict: The loaded memory dictionary, or an empty dict if the file
-            doesn't exist or is corrupted.
-
-    Note:
-        If the file exists but contains invalid JSON or is not a dict,
-        the function logs a warning and returns an empty dict to allow
-        the script to continue with a fresh memory.
+        The loaded memory dictionary, or an empty dict if the file
+        doesn't exist or is corrupted.
     """
     if not os.path.exists(memory_path):
         return {}
@@ -1591,7 +1517,7 @@ def load_generation_memory(memory_path):
         return {}
 
 
-def save_generation_memory(memory, memory_path):
+def save_generation_memory(memory: dict, memory_path: str) -> None:
     """
     Save the generation history to a JSON file.
 
@@ -1599,41 +1525,34 @@ def save_generation_memory(memory, memory_path):
     for human readability. The file is overwritten completely on each save.
 
     Args:
-        memory (dict): The generation memory dictionary to save.
-        memory_path (str): Path where the JSON file should be written.
+        memory: The generation memory dictionary to save.
+        memory_path: Path where the JSON file should be written.
 
     Raises:
         OSError: If the file cannot be written due to permissions or
             filesystem errors.
         TypeError: If the memory contains data that is not JSON-serializable.
-
-    Note:
-        The function does not create parent directories; they should exist
-        before calling this function.
     """
     with open(memory_path, "w", encoding="utf-8") as f:
         json.dump(memory, f, indent=4, ensure_ascii=False)
 
 
-def is_already_generated(memory, npc_name, strref):
+def is_already_generated(memory: dict, npc_name: str, strref: str) -> bool:
     """
     Check if a specific voice line has already been generated.
 
     Args:
-        memory (dict): The generation memory dictionary.
-        npc_name (str): The name of the NPC.
-        strref (str): The STRREF identifier for the voice line.
+        memory: The generation memory dictionary.
+        npc_name: The name of the NPC.
+        strref: The STRREF identifier for the voice line.
 
     Returns:
-        bool: True if the combination exists in memory, False otherwise.
-
-    Note:
-        STRREF values are converted to strings for dictionary lookup.
+        True if the combination exists in memory, False otherwise.
     """
     return str(strref) in memory.get(npc_name, {})
 
 
-def mark_as_generated(memory, npc_name, strref):
+def mark_as_generated(memory: dict, npc_name: str, strref: str) -> None:
     """
     Record a successfully generated voice line in memory.
 
@@ -1642,14 +1561,9 @@ def mark_as_generated(memory, npc_name, strref):
     structure if it doesn't already exist.
 
     Args:
-        memory (dict): The generation memory dictionary (modified in place).
-        npc_name (str): The name of the NPC.
-        strref (str): The STRREF identifier for the voice line.
-
-    Note:
-        STRREF is stored as a string key with value True to indicate
-        successful generation. The function modifies the memory dict
-        in place and does not automatically save to disk.
+        memory: The generation memory dictionary (modified in place).
+        npc_name: The name of the NPC.
+        strref: The STRREF identifier for the voice line.
     """
     voice_memory = memory.setdefault(npc_name, {})
     voice_memory[str(strref)] = True
@@ -1659,26 +1573,22 @@ def mark_as_generated(memory, npc_name, strref):
 # TTS API Client
 # ============================================================================
 
-def submit_generation(profile_id, text, engine, model_size):
+def submit_generation(profile_id: int, text: str, engine: str, model_size: str) -> str:
     """
     Submit a text-to-speech generation request to the Voicebox API.
 
     Args:
-        profile_id (int): The numeric ID of the voice profile to use.
-        text (str): The text content to convert to speech.
-        engine (str): The TTS engine to use (e.g., "qwen").
-        model_size (str): The model size (e.g., "0.6B", "1.5B").
+        profile_id: The numeric ID of the voice profile to use.
+        text: The text content to convert to speech.
+        engine: The TTS engine to use (e.g., "qwen").
+        model_size: The model size (e.g., "0.6B", "1.5B").
 
     Returns:
-        str: The generation ID assigned by the Voicebox server.
+        The generation ID assigned by the Voicebox server.
 
     Raises:
         requests.exceptions.RequestException: If the API request fails.
         RuntimeError: If the response does not contain an "id" field.
-
-    Note:
-        The generation ID is required for subsequent status polling
-        and audio download operations.
     """
     payload = {
         "text": text, "profile_id": profile_id, "language": "en",
@@ -1693,7 +1603,7 @@ def submit_generation(profile_id, text, engine, model_size):
     return gen_id
 
 
-def wait_for_completion(gen_id):
+def wait_for_completion(gen_id: str) -> Optional[dict]:
     """
     Wait for a generation job to complete by streaming Server-Sent Events.
 
@@ -1701,19 +1611,15 @@ def wait_for_completion(gen_id):
     until the generation reaches either "completed" or "failed" status.
 
     Args:
-        gen_id (str): The generation ID returned by submit_generation().
+        gen_id: The generation ID returned by submit_generation().
 
     Returns:
-        dict: The final event data containing at least "status" and
-            potentially "duration" (for completed jobs) or "error"
-            (for failed jobs).
+        The final event data containing at least "status" and
+        potentially "duration" (for completed jobs) or "error"
+        (for failed jobs).
 
     Raises:
         requests.exceptions.RequestException: If the SSE connection fails.
-
-    Note:
-        The function blocks until the generation completes or fails.
-        For very slow generations, this may take a long time.
     """
     url = f"{cfg.BASE_URL}{cfg.GENERATE_STATUS_ENDPOINT.format(gen_id=gen_id)}"
     headers = {"Accept": "text/event-stream"}
@@ -1737,19 +1643,19 @@ def wait_for_completion(gen_id):
     return final_event
 
 
-def cancel_generation(gen_id):
+def cancel_generation(gen_id: str) -> Tuple[bool, str]:
     """
     Cancel a queued or running generation on the Voicebox server.
 
     Sends a POST request to the /generate/{generation_id}/cancel endpoint.
 
     Args:
-        gen_id (str): The generation ID to cancel.
+        gen_id: The generation ID to cancel.
 
     Returns:
-        tuple: (success, message)
-            - success (bool): True if cancellation was successful.
-            - message (str): Status message describing the result.
+        A tuple containing:
+            - success: True if cancellation was successful.
+            - message: Status message describing the result.
     """
     try:
         cancel_url = f"{cfg.BASE_URL}{cfg.GENERATE_CANCEL_ENDPOINT.format(gen_id=gen_id)}"
@@ -1761,25 +1667,20 @@ def cancel_generation(gen_id):
         return False, f"Cancellation error: {e}"
 
 
-def download_audio(gen_id, output_path):
+def download_audio(gen_id: str, output_path: str) -> None:
     """
     Download the generated audio file from the Voicebox API.
 
     Retrieves the audio for a completed generation job and saves it to
-    the specified output path. The audio is downloaded as raw WAV data
-    (or whatever format the server provides).
+    the specified output path. The audio is downloaded as raw WAV data.
 
     Args:
-        gen_id (str): The generation ID to download.
-        output_path (str): Filesystem path where the audio should be saved.
+        gen_id: The generation ID to download.
+        output_path: Filesystem path where the audio should be saved.
 
     Raises:
         requests.exceptions.RequestException: If the download request fails.
         OSError: If the output file cannot be written.
-
-    Note:
-        The function does not perform any audio conversion; it saves the
-        raw audio data exactly as received from the server.
     """
     url = f"{cfg.BASE_URL}{cfg.AUDIO_ENDPOINT.format(gen_id=gen_id)}"
     resp = requests.get(url)
@@ -1792,7 +1693,7 @@ def download_audio(gen_id, output_path):
 # Text Processing
 # ============================================================================
 
-def load_patcher_config(config_path):
+def load_patcher_config(config_path: str) -> dict:
     """
     Load the patcher configuration from a JSON file.
 
@@ -1802,23 +1703,20 @@ def load_patcher_config(config_path):
     - Phonetic substitution rules for improved TTS pronunciation
 
     Args:
-        config_path (str): Path to the JSON configuration file.
+        config_path: Path to the JSON configuration file.
 
     Returns:
-        dict: The loaded configuration object.
+        The loaded configuration object.
 
     Raises:
         FileNotFoundError: If the configuration file doesn't exist.
         json.JSONDecodeError: If the file contains invalid JSON.
-
-    Note:
-        Missing optional fields will default to empty lists/dicts.
     """
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
 
-def preprocess_text(text, patcher_config):
+def preprocess_text(text: str, patcher_config: dict) -> str:
     """
     Apply comprehensive text transformations for TTS preparation.
 
@@ -1829,15 +1727,11 @@ def preprocess_text(text, patcher_config):
         4. Token cleanup: Remove any remaining <...> tokens
 
     Args:
-        text (str): The raw input text from the CSV file.
-        patcher_config (dict): Loaded patcher configuration.
+        text: The raw input text from the CSV file.
+        patcher_config: Loaded patcher configuration.
 
     Returns:
-        str: The preprocessed text, ready for TTS generation.
-
-    Note:
-        The function gracefully handles missing configuration keys and
-        skips malformed regex patterns.
+        The preprocessed text, ready for TTS generation.
     """
     pc_name = patcher_config.get("pcName", "CHARNAME")
     pc_race = patcher_config.get("pcRace", "RACE")
@@ -1887,26 +1781,20 @@ def preprocess_text(text, patcher_config):
 # Audio Processing
 # ============================================================================
 
-def convert_to_ogg(input_path, output_path=None, quality=2):
+def convert_to_ogg(input_path: str, output_path: Optional[str] = None, quality: int = 2) -> None:
     """
     Convert an audio file to Ogg Vorbis format using ffmpeg.
 
     Uses ffmpeg to convert audio to the Ogg Vorbis codec with libvorbis.
 
     Args:
-        input_path (str): Path to the source audio file (typically WAV).
-        output_path (str, optional): Path for the output file. If None,
-            overwrites the input file.
-        quality (int, optional): libvorbis quality scale from 0 (lowest)
-            to 10 (highest). Defaults to 2.
+        input_path: Path to the source audio file (typically WAV).
+        output_path: Path for the output file. If None, overwrites the input file.
+        quality: libvorbis quality scale from 0 (lowest) to 10 (highest). Defaults to 2.
 
     Raises:
         subprocess.CalledProcessError: If ffmpeg fails to convert the file.
         FileNotFoundError: If ffmpeg is not installed or not in PATH.
-
-    Note:
-        The function forces the Ogg container format regardless of file
-        extension using `-f ogg`.
     """
     if output_path is None:
         output_path = input_path
@@ -1935,173 +1823,126 @@ def is_valid_text(text: str) -> bool:
         - Strings with only punctuation (e.g., "?", "...", "!!")
         - Strings with only special characters
 
-    Note:
-        Numbers-only text like "5" or "123" is considered valid,
-        as TTS engines can read numerals as words (e.g., "five").
-
     Args:
-        text (str): The text to validate.
+        text: The text to validate.
 
     Returns:
-        bool: True if text contains at least one alphanumeric character,
-              False otherwise.
+        True if text contains at least one alphanumeric character, False otherwise.
     """
     return bool(text and any(char.isalnum() for char in text))
 
 
-def scan_csv_for_npc_targets():
+def scan_csv_for_npc_targets() -> dict:
     """
     Scan CSV with ALL existing filters applied and build NPC target candidates.
-    
-    Reads configuration directly from cfg.* at runtime to avoid stale state:
+
+    Reads configuration directly from cfg.* at runtime:
     - CSV filtering (STRREF filter, filename prefix, TARGET_VOICES)
     - SKIP_ALREADY_GENERATED and generation memory
     - Voice profile availability (Voicebox and voices/ directory)
-    
+
     Returns:
-        dict: {
-            npc_name: {
-                "display_name": str,
-                "voice_name": str,
-                "status": "on_voicebox" | "importable" | "missing",
-                "lines_count": int,
-                "chars_count": int,
-                "in_target_voices": bool,
-            }
-        }
+        A dictionary keyed by NPC display name, where each value contains:
+            display_name: str
+            voice_name: str
+            status: "on_voicebox" | "importable" | "missing"
+            lines_count: int
+            chars_count: int
+            in_target_voices: bool
     """
-    # Read cfg values at start to avoid stale state
     csv_path = cfg.CSV_PATH
     skip_already_generated = cfg.SKIP_ALREADY_GENERATED
     memory_path = cfg.GENERATION_MEMORY_PATH
     patcher_config_path = cfg.PATCHER_CONFIG_PATH
     voices_dir = cfg.VOICES_DIR
-    
-    # Load dependencies (these functions read cfg directly)
+
     substitutions, substitutions_gender, substitutions_sysname = load_voice_substitutions_all()
     profile_map, _ = get_all_profiles()
     available_voices = scan_available_voice_dirs(voices_dir)
-    
-    # Load generation memory if needed
+
     generation_memory = {}
     if skip_already_generated:
         generation_memory = load_generation_memory(memory_path)
-    
-    # Load patcher config if needed
+
     patcher_config = None
     try:
         patcher_config = load_patcher_config(patcher_config_path)
     except Exception:
         pass
-    
-    # Collect NPC data
+
     npc_data = {}
-    
-    # Use existing iter_filtered_csv_rows() - it reads cfg directly.
-    # scanning_npc_list=True: this picker's whole job is to let
-    # the user change the TARGET_VOICES selection, so it must show every
-    # NPC regardless of what's currently selected - not just the ones
-    # already in cfg.TARGET_VOICES (which would make it impossible to
-    # ever select anyone new once TARGET_VOICES is non-empty).
+
     for strref, sysname, npc_name, gender, csv_filename, text in iter_filtered_csv_rows(scanning_npc_list=True):
-        # Preprocess text (reads cfg inside preprocess_text if needed)
         if patcher_config:
             text = preprocess_text(text, patcher_config)
-        
-        # Skip invalid text
+
         if not is_valid_text(text):
             continue
-        
-        # Determine voice name (reads cfg.USE_VOICE_FALLBACK etc. inside get_voice_profile_name)
+
         voice_name = get_voice_profile_name(
             npc_name, gender, profile_map, sysname,
             substitutions, substitutions_gender, substitutions_sysname
         )
-        
-        # Determine display name
+
         if npc_name:
             display_name = npc_name
         elif sysname:
             display_name = f"Unknown ({sysname})"
         else:
             display_name = "Description"
-        
-        # Skip if already generated
+
         if skip_already_generated and is_already_generated(generation_memory, display_name, strref):
             continue
-        
-        # Initialize NPC entry if new
+
         if display_name not in npc_data:
-            # Determine status by reading current cfg values.
-            #
-            # "on_voicebox" is checked against voice_name (the resolved,
-            # possibly-substituted profile name) - that's genuinely what
-            # would be used at generation time.
-            #
-            # "importable" must ALSO check display_name/npc_name directly
-            # against available_voices: sample folders in VOICES_DIR are
-            # named after the raw NPC name (see profiles-manage_gui.py's
-            # get_available_voice_profiles()/get_existing_voice_files()),
-            # not after whatever substitution or fallback voice_name may
-            # resolve to. An NPC with no substitution rule and no existing
-            # profile has voice_name == None, so checking only voice_name
-            # here would always report "missing" even with a same-named
-            # sample folder sitting right there in VOICES_DIR. Checking
-            # voice_name too still catches the case where a *substituted*
-            # name has its own importable samples.
             if voice_name and voice_name in profile_map:
                 status = "on_voicebox"
             elif (voice_name and voice_name in available_voices) or display_name in available_voices:
                 status = "importable"
             else:
                 status = "missing"
-            
+
             npc_data[display_name] = {
                 "display_name": display_name,
                 "voice_name": voice_name or "None",
                 "status": status,
                 "lines_count": 0,
                 "chars_count": 0,
-                "in_target_voices": display_name in cfg.TARGET_VOICES,  # Read cfg.TARGET_VOICES directly
+                "in_target_voices": display_name in cfg.TARGET_VOICES,
             }
-        
-        # Increment counters
+
         npc_data[display_name]["lines_count"] += 1
         npc_data[display_name]["chars_count"] += len(text)
-    
+
     return npc_data
 
 
-def filter_and_sort_rows(selected_rows, profile_map):
+def filter_and_sort_rows(selected_rows: list, profile_map: dict) -> list:
     """
     Filter out rows with missing voice profiles and sort for optimal processing.
 
     Removes rows where the voice profile doesn't exist on the server, then sorts
-    by voice name to group similar voices together for better caching and
-    performance.
+    by voice name to group similar voices together for better caching.
 
     Args:
-        selected_rows (list): List of (strref, display_name, voice_name, filename, text).
-        profile_map (dict): Map of profile names to IDs.
+        selected_rows: List of (strref, display_name, voice_name, filename, text).
+        profile_map: Map of profile names to IDs.
 
     Returns:
-        list: Filtered and sorted rows.
+        Filtered and sorted rows.
     """
     valid_rows = [row for row in selected_rows if row[2] in profile_map]
     valid_rows.sort(key=lambda row: (row[2].lower(), row[1]))
     return valid_rows
 
 
-def load_strref_filter():
+def load_strref_filter() -> Set[str]:
     """
     Load the STRREF filter list from cfg.STRREF_FILTER_FILE.
 
     Returns:
-        set: Set of strref strings to process, or empty set if the filter
-            couldn't be loaded (in which case a warning is logged).
-
-    Note:
-        The filter file is expected to contain a JSON array of STRREF values.
+        Set of strref strings to process, or empty set if the filter
+        couldn't be loaded (in which case a warning is logged).
     """
     filter_file = cfg.STRREF_FILTER_FILE
     if not os.path.exists(filter_file):
@@ -2121,12 +1962,9 @@ def load_strref_filter():
         return set()
 
 
-def iter_filtered_csv_rows(scanning_npc_list: bool = False):
+def iter_filtered_csv_rows(scanning_npc_list: bool = False) -> Iterator[Tuple[str, str, str, str, str, str]]:
     """
     Parse the dialog CSV and yield rows that pass the shared row-level filters.
-
-    This is the common core used by both load_and_filter_csv() and
-    scan_csv_needed_voice_names().
 
     Filters applied, in order:
         - Row must have at least 8 columns.
@@ -2138,16 +1976,13 @@ def iter_filtered_csv_rows(scanning_npc_list: bool = False):
         - text must be non-empty.
 
     Args:
-        scanning_npc_list (bool): Whether to restrict rows to
-            cfg.TARGET_VOICES. Defaults to False (the normal generation
-            scope). Pass True for callers that need to see every NPC
-            regardless of the current TARGET_VOICES selection - e.g. the
-            NPC Targets picker itself, which would otherwise only ever
-            show whichever NPCs are already selected, with no way to
-            select any others once TARGET_VOICES is non-empty.
+        scanning_npc_list: Whether to restrict rows to cfg.TARGET_VOICES.
+            Defaults to False (the normal generation scope). Pass True for
+            callers that need to see every NPC regardless of the current
+            TARGET_VOICES selection.
 
     Yields:
-        tuple: (strref, sysname, npc_name, gender, csv_filename, text)
+        Tuples of (strref, sysname, npc_name, gender, csv_filename, text)
     """
     csv_path = cfg.CSV_PATH
     if not os.path.exists(csv_path):
@@ -2186,26 +2021,29 @@ def iter_filtered_csv_rows(scanning_npc_list: bool = False):
             yield strref, sysname, npc_name, gender, csv_filename, text
 
 
-def load_and_filter_csv(patcher_config, generation_memory, profile_map=None,
-                         substitutions=None, substitutions_gender=None,
-                         substitutions_sysname=None):
+def load_and_filter_csv(patcher_config: Optional[dict], generation_memory: dict,
+                        profile_map: Optional[dict] = None,
+                        substitutions: Optional[Dict[str, str]] = None,
+                        substitutions_gender: Optional[Dict[str, str]] = None,
+                        substitutions_sysname: Optional[Dict[str, str]] = None) -> Tuple[List[tuple], dict]:
     """
     Load CSV data, apply filters, and prepare rows for generation.
-    
+
     Statistics are grouped by voice profile + NPC name combination,
     so we can see how each NPC uses each voice profile.
 
     Args:
-        patcher_config (dict): Patcher configuration for text preprocessing.
-        generation_memory (dict): Generation memory for skip checking.
-        profile_map (dict, optional): Map of available voice profiles for validation.
-        substitutions/substitutions_gender/substitutions_sysname (dict, optional):
-            Substitution mappings.
+        patcher_config: Patcher configuration for text preprocessing.
+        generation_memory: Generation memory for skip checking.
+        profile_map: Map of available voice profiles for validation.
+        substitutions: NPC name -> voice profile mappings.
+        substitutions_gender: NPC name|gender -> voice profile mappings.
+        substitutions_sysname: sysname -> voice profile mappings.
 
     Returns:
-        tuple: (selected_rows, voice_stats)
-            - selected_rows (list): List of (strref, display_name, voice_name, filename, text)
-            - voice_stats (dict): Statistics per voice profile + NPC combination
+        A tuple containing:
+            - selected_rows: List of (strref, display_name, voice_name, filename, text)
+            - voice_stats: Statistics per voice profile + NPC combination
     """
     selected_rows = []
     voice_stats = {}
@@ -2228,17 +2066,13 @@ def load_and_filter_csv(patcher_config, generation_memory, profile_map=None,
         else:
             display_name = "Description"
 
-        # Preprocess text first (before any stats)
         text = preprocess_text(text, patcher_config) if patcher_config else text
 
-        # skip lines with invalid text
         if not is_valid_text(text):
             continue
 
-        # Create a unique key: voice_name + display_name
         key = f"{voice_name}|{display_name}" if voice_name else f"None|{display_name}"
 
-        # Initialize stats for this voice + NPC combination if not exists
         if key not in voice_stats:
             voice_stats[key] = {
                 "voice_name": voice_name,
@@ -2258,19 +2092,16 @@ def load_and_filter_csv(patcher_config, generation_memory, profile_map=None,
         voice_stats[key]["total"] += 1
         voice_stats[key]["chars"]["total"] += len(text)
 
-        # If no voice_name, skip - can't generate
         if voice_name is None:
             voice_stats[key]["skipped"] += 1
             voice_stats[key]["chars"]["skipped"] += len(text)
             continue
 
-        # If voice_name not in profile_map, skip
         if profile_map is not None and voice_name not in profile_map:
             voice_stats[key]["skipped"] += 1
             voice_stats[key]["chars"]["skipped"] += len(text)
             continue
 
-        # If already generated, skip
         if cfg.SKIP_ALREADY_GENERATED and is_already_generated(generation_memory, display_name, strref):
             voice_stats[key]["done"] += 1
             voice_stats[key]["chars"]["done"] += len(text)
@@ -2286,7 +2117,8 @@ def load_and_filter_csv(patcher_config, generation_memory, profile_map=None,
 
     return selected_rows, voice_stats
 
-def estimate_generation_time(regressor, chars):
+
+def estimate_generation_time(regressor: Regression, chars: int) -> float:
     """
     Estimate generation time from historical data or fallback.
 
@@ -2294,16 +2126,17 @@ def estimate_generation_time(regressor, chars):
     text length. Falls back to a conservative estimate if insufficient data.
 
     Args:
-        regressor (Regression): Regression object with historical (chars, time) data.
-        chars (int): Number of characters in the current text.
+        regressor: Regression object with historical (chars, time) data.
+        chars: Number of characters in the current text.
 
     Returns:
-        float: Estimated time in seconds.
+        Estimated time in seconds.
     """
     if len(regressor) > 1:
         estimated_sec = regressor.slope() * chars + regressor.intercept()
         return max(estimated_sec, 2.0)
     return 10.0
+
 
 # ============================================================================
 # Accessibility of VoiceBox backend
@@ -2319,12 +2152,12 @@ class HealthCheckWorker(QObject):
     """
     health_checked = Signal(bool, dict)
 
-    def __init__(self, interval_ms=10000):
+    def __init__(self, interval_ms: int = 10000):
         super().__init__()
         self.interval_ms = interval_ms
-        self._timer = None
+        self._timer: Optional[QTimer] = None
 
-    def start(self):
+    def start(self) -> None:
         """Create and start the polling QTimer. Call only after moveToThread."""
         self._timer = QTimer()
         self._timer.timeout.connect(self.check_now)
@@ -2332,21 +2165,14 @@ class HealthCheckWorker(QObject):
         self.check_now()
 
     @Slot()
-    def stop(self):
-        """
-        Stop the polling QTimer.
-
-        Must run on the worker thread (the one the timer lives on) - never
-        called directly from the UI thread. Invoke it via
-        ``QMetaObject.invokeMethod(worker, "stop", Qt.ConnectionType.QueuedConnection)``
-        so Qt marshals the call onto the correct thread first.
-        """
+    def stop(self) -> None:
+        """Stop the polling QTimer. Must be called on the worker thread."""
         if self._timer is not None:
             self._timer.stop()
             self._timer.deleteLater()
             self._timer = None
 
-    def check_now(self):
+    def check_now(self) -> None:
         """Perform a single health check immediately."""
         try:
             resp = requests.get(f"{cfg.BASE_URL}/health", timeout=5)
@@ -2354,6 +2180,7 @@ class HealthCheckWorker(QObject):
             self.health_checked.emit(True, resp.json())
         except Exception as e:
             self.health_checked.emit(False, {"error": str(e)})
+
 
 # ============================================================================
 # Profile fetcher
@@ -2367,12 +2194,13 @@ class ProfilesFetchWorker(QObject):
     profiles_loaded = Signal(dict)
     failed = Signal(str)
 
-    def fetch(self):
+    def fetch(self) -> None:
         try:
             profile_map, _ = get_all_profiles()
             self.profiles_loaded.emit(dict(profile_map))
         except Exception as e:
             self.failed.emit(str(e))
+
 
 # ============================================================================
 # Profile Sync Worker (runs on a background QThread)
@@ -2387,12 +2215,11 @@ class ProfileSyncWorker(QObject):
         finished(): Emitted when synchronization completes successfully.
         failed(str): Emitted with an error message if synchronization fails.
     """
-
     stage = Signal(str)
     finished = Signal()
     failed = Signal(str)
 
-    def run(self):
+    def run(self) -> None:
         """
         Execute full voice profile synchronization on the background thread.
 
@@ -2439,31 +2266,25 @@ class NPCTargetsScanWorker(QObject):
     Reads all configuration directly from cfg.* - no parameters needed
     to avoid stale state issues.
     """
-    
-    progress = Signal(str)  # Status message
-    finished = Signal(dict)  # NPC data dictionary
-    failed = Signal(str)     # Error message
-    
+    progress = Signal(str)
+    finished = Signal(dict)
+    failed = Signal(str)
+
     def __init__(self):
         super().__init__()
-        # No parameters - will read cfg directly in run()
-    
-    def run(self):
+
+    def run(self) -> None:
         """
         Execute NPC target scan.
-        
+
         All cfg values are read at runtime inside scan_csv_for_npc_targets()
         and its helper functions, ensuring we always use current config state.
         """
         try:
             self.progress.emit("Scanning CSV for NPCs...")
-            
-            # This function reads all cfg values directly
             npc_data = scan_csv_for_npc_targets()
-            
             self.progress.emit(f"Found {len(npc_data)} NPCs")
             self.finished.emit(npc_data)
-            
         except Exception as e:
             logger.error(f"Failed to scan NPCs: {e}")
             self.failed.emit(str(e))
@@ -2496,13 +2317,7 @@ class GenerationWorker(QObject):
         overall_progress(dict): Live progress across all jobs.
         finished(dict): Final run statistics on normal completion.
         failed(str): Fatal error message (instead of finished).
-
-    Note:
-        This object must be moved to a QThread before calling run().
-        All heavy processing runs in the background thread, while Qt
-        signals safely update the UI in the main thread.
     """
-
     stage = Signal(str)
     job_progress = Signal(dict)
     overall_progress = Signal(dict)
@@ -2510,17 +2325,11 @@ class GenerationWorker(QObject):
     failed = Signal(str)
 
     def __init__(self):
-        """
-        Initialize the GenerationWorker.
-
-        Sets up the internal stop flag event and tracks active generation ID
-        for cancellation support.
-        """
         super().__init__()
         self._stop_requested = threading.Event()
-        self._current_gen_id = None
+        self._current_gen_id: Optional[str] = None
 
-    def request_stop(self):
+    def request_stop(self) -> None:
         """
         Ask the worker to stop after the current job.
 
@@ -2539,32 +2348,25 @@ class GenerationWorker(QObject):
     # Progress reporting
     # ------------------------------------------------------------------
 
-    def _job_progress_ticker(self, stop_event, job_idx, total_jobs, filename, strref,
-                          estimated_sec, timeout_sec, npc_name, voice_name, chars):
+    def _job_progress_ticker(self, stop_event: threading.Event, job_idx: int, total_jobs: int,
+                             filename: str, strref: str, estimated_sec: float,
+                             timeout_sec: Optional[float], npc_name: str, voice_name: str,
+                             chars: int) -> None:
         """
-        Background thread: emits job_progress every 0.5s while a single
+        Background thread that emits job_progress every 0.5s while a single
         generation is in flight, driving the job QProgressBar in the UI.
 
-        This function runs as a daemon thread and emits job_progress signals
-        that are safely received by the main GUI thread to update the progress
-        bar and label in real-time.
-
         Args:
-            stop_event (threading.Event): Event to signal when the job completes.
-            job_idx (int): Current job index (1-based).
-            total_jobs (int): Total number of jobs.
-            filename (str): The filename being generated.
-            strref (str): STRREF identifier.
-            estimated_sec (float): Estimated duration for this job in seconds.
-            timeout_sec (float): Maximum allowed duration for this job in seconds.
-            npc_name (str): NPC name being processed.
-            voice_name (str): Voice profile name used.
-            chars (int): Number of characters in the text.
-
-        Note:
-            The function exits cleanly when stop_event is set.
-            The emitted data dict contains all job progress information needed
-            by the GUI to update the job progress bar and label.
+            stop_event: Event to signal when the job completes.
+            job_idx: Current job index (1-based).
+            total_jobs: Total number of jobs.
+            filename: The filename being generated.
+            strref: STRREF identifier.
+            estimated_sec: Estimated duration for this job in seconds.
+            timeout_sec: Maximum allowed duration for this job in seconds.
+            npc_name: NPC name being processed.
+            voice_name: Voice profile name used.
+            chars: Number of characters in the text.
         """
         start_time = time.time()
         while not stop_event.is_set():
@@ -2575,27 +2377,27 @@ class GenerationWorker(QObject):
                 "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
                 "percent": percent, "elapsed": elapsed, "estimated": estimated_sec,
                 "timeout": timeout_sec,
-                # No "status" field = generation phase
             })
             time.sleep(0.5)
 
-    def _compute_overall_progress(self, total_chars_processed, total_chars_all, total_jobs,
-                                   idx, overall_regressor, avg_time_per_char, elapsed_total):
+    def _compute_overall_progress(self, total_chars_processed: int, total_chars_all: int,
+                                  total_jobs: int, idx: int, overall_regressor: Regression,
+                                  avg_time_per_char: Optional[float], elapsed_total: float) -> dict:
         """
         Compute the numbers for the overall progress bar and label.
 
         Args:
-            total_chars_processed (int): Characters processed so far.
-            total_chars_all (int): Total characters to process.
-            total_jobs (int): Total number of jobs.
-            idx (int): Number of jobs already completed (0-based).
-            overall_regressor (Regression): Regression for overall time estimation.
-            avg_time_per_char (float): Running average seconds per character.
-            elapsed_total (float): Total elapsed time in seconds.
+            total_chars_processed: Characters processed so far.
+            total_chars_all: Total characters to process.
+            total_jobs: Total number of jobs.
+            idx: Number of jobs already completed (0-based).
+            overall_regressor: Regression for overall time estimation.
+            avg_time_per_char: Running average seconds per character.
+            elapsed_total: Total elapsed time in seconds.
 
         Returns:
-            dict: Overall progress data with "ready" flag, or {"ready": False}
-                if insufficient data.
+            Overall progress data with "ready" flag, or {"ready": False}
+            if insufficient data.
         """
         if avg_time_per_char is None or total_chars_all <= 0:
             return {"ready": False}
@@ -2619,19 +2421,16 @@ class GenerationWorker(QObject):
     # Job execution
     # ------------------------------------------------------------------
 
-    def _timeout_monitor(self, stop_event, gen_id, timeout_sec, start_time):
+    def _timeout_monitor(self, stop_event: threading.Event, gen_id: str,
+                         timeout_sec: float, start_time: float) -> None:
         """
         Monitor thread that checks for timeout and cancels the generation.
 
         Args:
-            stop_event (threading.Event): Event to signal when generation completes.
-            gen_id (str): The generation ID to cancel.
-            timeout_sec (float): Timeout in seconds.
-            start_time (float): Timestamp when the job started.
-
-        Note:
-            This function runs as a daemon thread and exits cleanly when
-            stop_event is set.
+            stop_event: Event to signal when generation completes.
+            gen_id: The generation ID to cancel.
+            timeout_sec: Timeout in seconds.
+            start_time: Timestamp when the job started.
         """
         while not stop_event.is_set():
             if time.time() - start_time > timeout_sec:
@@ -2639,9 +2438,11 @@ class GenerationWorker(QObject):
                 break
             time.sleep(1.0)
 
-    def process_generation_job(self, idx, total_jobs, strref, npc_name, voice_name, filename, text,
-                            profile_id, regressor, generation_memory,
-                            retry_count=0, retry_delay=0.0):
+    def process_generation_job(self, idx: int, total_jobs: int, strref: str,
+                               npc_name: str, voice_name: str, filename: str, text: str,
+                               profile_id: int, regressor: Regression,
+                               generation_memory: dict, retry_count: int = 0,
+                               retry_delay: float = 0.0) -> Tuple[bool, float, float, int, int]:
         """
         Execute a single TTS generation job with optional retry on failure.
 
@@ -2652,9 +2453,9 @@ class GenerationWorker(QObject):
             4. Starts a timeout monitor thread (if enabled)
             5. Waits for completion via SSE streaming
             6. Emits status updates for post-processing phases:
-            - "Downloading..." during audio download
-            - "Converting to OGG..." during ffmpeg conversion
-            - "Saving memory..." during memory save
+               - "Downloading..." during audio download
+               - "Converting to OGG..." during ffmpeg conversion
+               - "Saving memory..." during memory save
             7. Downloads and converts the audio
             8. Records success in generation memory
             9. Returns results for statistics tracking
@@ -2663,35 +2464,26 @@ class GenerationWorker(QObject):
         times with a delay of retry_delay seconds between attempts.
 
         Args:
-            idx (int): Current job index (1-based).
-            total_jobs (int): Total number of jobs.
-            strref (str): STRREF identifier.
-            npc_name (str): NPC name (for memory and folder).
-            voice_name (str): Voice profile name.
-            filename (str): Output filename base.
-            text (str): Preprocessed text to generate.
-            profile_id (int): Voice profile ID.
-            regressor (Regression): Regression for time estimation.
-            generation_memory (dict): Generation memory dictionary.
-            retry_count (int): Number of retry attempts on failure.
-            retry_delay (float): Delay in seconds between retries.
+            idx: Current job index (1-based).
+            total_jobs: Total number of jobs.
+            strref: STRREF identifier.
+            npc_name: NPC name (for memory and folder).
+            voice_name: Voice profile name.
+            filename: Output filename base.
+            text: Preprocessed text to generate.
+            profile_id: Voice profile ID.
+            regressor: Regression for time estimation.
+            generation_memory: Generation memory dictionary.
+            retry_count: Number of retry attempts on failure.
+            retry_delay: Delay in seconds between retries.
 
         Returns:
-            tuple: (success, elapsed_time, audio_duration, chars_processed, retry_attempts)
-                - success (bool): True if generation succeeded.
-                - elapsed_time (float): Time taken for generation in seconds.
-                - audio_duration (float): Duration of generated audio.
-                - chars_processed (int): Number of characters in the text.
-                - retry_attempts (int): Number of retries made (0 for first success).
-
-        Note:
-            The progress ticker thread runs in the background and emits
-            job_progress signals to update the GUI's progress bar.
-            The timeout monitor cancels the generation if it exceeds the
-            configured threshold (hard maximum or estimated * multiplier).
-            Stop requests are honored between attempts.
-            Post-generation phases emit status updates to keep the user informed
-            of download, conversion, and save progress.
+            A tuple containing:
+                - success: True if generation succeeded.
+                - elapsed_time: Time taken for generation in seconds.
+                - audio_duration: Duration of generated audio.
+                - chars_processed: Number of characters in the text.
+                - retry_attempts: Number of retries made (0 for first success).
         """
         chars = len(text)
         estimated_sec = estimate_generation_time(regressor, chars)
@@ -2703,7 +2495,6 @@ class GenerationWorker(QObject):
         last_audio_duration = 0
 
         while attempt < max_attempts:
-            # Check for stop request before starting a new attempt
             if self._stop_requested.is_set():
                 logger.info(f"⏹ Stop requested - aborting retries for {filename}")
                 break
@@ -2726,7 +2517,7 @@ class GenerationWorker(QObject):
             ticker = threading.Thread(
                 target=self._job_progress_ticker,
                 args=(stop_event, idx, total_jobs, filename, strref,
-                    estimated_sec, timeout_sec, npc_name, voice_name, chars),
+                      estimated_sec, timeout_sec, npc_name, voice_name, chars),
                 daemon=True,
             )
             ticker.start()
@@ -2757,15 +2548,14 @@ class GenerationWorker(QObject):
                     monitor_thread.join(timeout=0.5)
 
                 elapsed = time.time() - start_time
-                
-                # --- POST-GENERATION PHASE: Downloading ---
+
                 self.job_progress.emit({
                     "idx": idx, "total": total_jobs, "strref": strref, "filename": filename,
                     "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
                     "percent": 100, "elapsed": elapsed, "estimated": estimated_sec,
                     "timeout": timeout_sec, "status": "Downloading..."
                 })
-                
+
                 stop_event.set()
                 ticker.join(timeout=1.0)
                 self._current_gen_id = None
@@ -2780,10 +2570,8 @@ class GenerationWorker(QObject):
 
                     temp_path = output_path + ".tmp"
                     try:
-                        # Download
                         download_audio(gen_id, temp_path)
-                        
-                        # --- POST-GENERATION PHASE: Converting ---
+
                         if cfg.CONVERT_TO_OGG:
                             self.job_progress.emit({
                                 "idx": idx, "total": total_jobs, "strref": strref, "filename": filename,
@@ -2795,8 +2583,7 @@ class GenerationWorker(QObject):
                             os.remove(temp_path)
                         else:
                             os.rename(temp_path, output_path)
-                        
-                        # --- POST-GENERATION PHASE: Saving ---
+
                         self.job_progress.emit({
                             "idx": idx, "total": total_jobs, "strref": strref, "filename": filename,
                             "npc_name": npc_name, "voice_name": voice_name, "chars": chars,
@@ -2838,7 +2625,9 @@ class GenerationWorker(QObject):
 
         return False, last_elapsed, last_audio_duration, chars, retry_attempts
 
-    def process_generation_jobs_all(self, profile_map, generation_memory, selected_rows, total_jobs, total_chars_all):
+    def process_generation_jobs_all(self, profile_map: dict, generation_memory: dict,
+                                    selected_rows: list, total_jobs: int,
+                                    total_chars_all: int) -> Tuple[int, Optional[float], dict, int]:
         """
         Process all generation jobs in the selected rows with real-time progress tracking.
 
@@ -2847,47 +2636,26 @@ class GenerationWorker(QObject):
         (regression-based time estimation) and tracks retry/error statistics for
         reporting in the final summary.
 
-        The function manages the following aspects for each job:
-            - Emits overall_progress before each job (updates overall bar)
-            - Calls process_generation_job() with retry support
-            - Updates regression models for time estimation using successful jobs only
-            - Logs job completion or failure with appropriate detail
-            - Tracks failed tasks for final reporting
-            - Honors stop requests between jobs
-            - Tracks successful job count for accurate final summary
-
-        Performance statistics:
-            - Character-based linear regression (regressor) for individual job estimation
-            - Overall regression (overall_regressor) for ETA calculations
-            - Running average time per character for fallback estimation
-
         Args:
-            profile_map (dict): Voice profile name -> ID mapping.
-            generation_memory (dict): Generation memory dictionary.
-            selected_rows (list): List of (strref, display_name, voice_name, filename, text).
-            total_jobs (int): Total number of jobs.
-            total_chars_all (int): Total character count across all jobs.
+            profile_map: Voice profile name -> ID mapping.
+            generation_memory: Generation memory dictionary.
+            selected_rows: List of (strref, display_name, voice_name, filename, text).
+            total_jobs: Total number of jobs.
+            total_chars_all: Total character count across all jobs.
 
         Returns:
-            tuple: (total_chars_processed, avg_time_per_char, retry_stats, successful_jobs)
-                - total_chars_processed (int): Total characters successfully generated.
-                - avg_time_per_char (float): Running average seconds per character.
-                - retry_stats (dict): Statistics tracking retry behavior.
-                - successful_jobs (int): Number of successfully generated files.
-
-        Note:
-            Skipped rows (missing profile_id) are logged as warnings but not counted as failures.
-            Retry statistics are only tracked for jobs that were actually processed.
-            Stop requests are honored between jobs (current job finishes first).
-            The successful_jobs count is used in the final summary for accurate reporting.
+            A tuple containing:
+                - total_chars_processed: Total characters successfully generated.
+                - avg_time_per_char: Running average seconds per character.
+                - retry_stats: Statistics tracking retry behavior.
+                - successful_jobs: Number of successfully generated files.
         """
         total_chars_processed = 0
         total_start_time = time.time()
         avg_time_per_char = None
         overall_regressor = Regression()
         regressor = Regression()
-        
-        # Track successful jobs count
+
         successful_jobs = 0
 
         retry_stats = {
@@ -2949,7 +2717,7 @@ class GenerationWorker(QObject):
     # Entry point
     # ------------------------------------------------------------------
 
-    def run(self):
+    def run(self) -> None:
         """
         Execute the complete generation pipeline on the background thread.
 
@@ -2964,20 +2732,12 @@ class GenerationWorker(QObject):
             8. Processes all generation jobs with progress reporting
             9. Displays the final summary
 
-        All logging goes through the logger (which is routed to both file
-        and the GUI log panel). Progress updates are emitted via signals.
-
         Signals emitted:
-            - stage(str): For each major step (profile sync, CSV scan, etc.)
+            - stage(str): For each major step
             - job_progress(dict): Every 0.5s during a job
             - overall_progress(dict): Before each job
             - finished(dict): On successful completion
             - failed(str): On fatal error
-
-        Note:
-            If the user requests stop via request_stop(), the worker will
-            finish the current job then halt before starting the next one.
-            In-flight generations are also cancelled for a responsive feel.
         """
         try:
             log_header_start()
@@ -3043,25 +2803,25 @@ class GenerationWorker(QObject):
             total_chars_processed, avg_time_per_char, retry_stats, successful_jobs = self.process_generation_jobs_all(
                 profile_map, generation_memory, selected_rows, total_jobs, total_chars_all
             )
-            
+
             was_stopped = self._stop_requested.is_set()
-            
+
             log_final_summary(
-                total_jobs, 
-                total_chars_processed, 
-                avg_time_per_char, 
-                voice_stats, 
-                retry_stats, 
+                total_jobs,
+                total_chars_processed,
+                avg_time_per_char,
+                voice_stats,
+                retry_stats,
                 was_stopped,
                 successful_jobs
             )
 
             self.stage.emit("Stopped." if was_stopped else "Done.")
             self.finished.emit({
-                "total_jobs": total_jobs, 
+                "total_jobs": total_jobs,
                 "total_chars_processed": total_chars_processed,
-                "avg_time_per_char": avg_time_per_char, 
-                "npc_stats": voice_stats, 
+                "avg_time_per_char": avg_time_per_char,
+                "npc_stats": voice_stats,
                 "retry_stats": retry_stats,
                 "was_stopped": was_stopped,
             })
@@ -3070,8 +2830,9 @@ class GenerationWorker(QObject):
             logger.error(f"❌ Unexpected error: {e}")
             self.failed.emit(str(e))
 
+
 # ============================================================================
-# Configuration Dialog
+# NPC Targets Picker + Configuration Dialog
 # ============================================================================
 
 class NPCTargetsDialog(QDialog):
@@ -3079,23 +2840,22 @@ class NPCTargetsDialog(QDialog):
     Standalone dialog for picking which NPCs to generate for (TARGET_VOICES)
     and for toggling "Skip already generated" (SKIP_ALREADY_GENERATED).
 
-    Split out of ConfigDialog because the two settings are entangled: the
-    NPC list's line counts and "already generated" status depend on
-    SKIP_ALREADY_GENERATED, so changing that setting has to be reflected
-    immediately in this list, not after a separate "Save Config" click
-    elsewhere. To make that work, SKIP_ALREADY_GENERATED is written to
-    appconfig the instant its checkbox is toggled (live, like every other
-    cfg.* read in this app - no parameter passing) and the list is
-    immediately rescanned against that new value.
+    These two settings are deliberately kept together: the NPC list's line
+    counts and "already generated" status depend on SKIP_ALREADY_GENERATED,
+    so toggling it needs to be reflected in the list immediately. To make
+    that work, SKIP_ALREADY_GENERATED is written to appconfig the instant
+    its checkbox is toggled (live, like every other cfg.* value in this
+    app - no parameter passing), and the list is rescanned right away
+    against the new value.
 
     TARGET_VOICES itself is NOT live - it's only written when the user
-    clicks "Save & Close", same as it was in the old NPC Targets tab.
-    Only SKIP_ALREADY_GENERATED needed to be live here; the NPC selection
-    is naturally a batch edit (check/uncheck many rows, then commit).
+    clicks "Save & Close". Selecting NPCs is naturally a batch edit
+    (check/uncheck many rows, then commit), so only SKIP_ALREADY_GENERATED
+    needed the live treatment here.
 
-    The NPC list loads automatically when this dialog opens and again
-    whenever SKIP_ALREADY_GENERATED changes - there's no manual "Refresh
-    from CSV" button anymore.
+    The NPC list loads automatically when this dialog opens, and again
+    whenever SKIP_ALREADY_GENERATED changes - there is no manual refresh
+    button.
     """
 
     def __init__(self, parent=None):
@@ -3104,15 +2864,15 @@ class NPCTargetsDialog(QDialog):
         self.resize(800, 600)
         self._npc_data_loaded = False
         self._raw_npc_data = {}
+        self.npc_scan_thread: Optional[QThread] = None
+        self.npc_scan_worker: Optional[NPCTargetsScanWorker] = None
         self._build_ui()
-        # Auto-load on open - no manual refresh button.
         self._refresh_npc_targets()
 
     # ------------------------------------------------------------------
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         layout = QVBoxLayout(self)
 
-        # --- Skip-already-generated (live) ---
         self.skip_generated_check = QCheckBox("Skip already generated")
         self.skip_generated_check.setChecked(cfg.SKIP_ALREADY_GENERATED)
         self.skip_generated_check.setToolTip(
@@ -3126,7 +2886,6 @@ class NPCTargetsDialog(QDialog):
         sep.setFrameShape(QFrame.Shape.HLine)
         layout.addWidget(sep)
 
-        # --- Filter/Search Controls ---
         filter_layout = QHBoxLayout()
 
         search_label = QLabel("🔍 Search:")
@@ -3157,7 +2916,6 @@ class NPCTargetsDialog(QDialog):
 
         layout.addLayout(filter_layout)
 
-        # --- NPC Table ---
         self.npc_targets_table = QTableWidget()
         self.npc_targets_table.setColumnCount(4)
         self.npc_targets_table.setHorizontalHeaderLabels(["☑", "NPC Name", "Status", "Lines"])
@@ -3173,7 +2931,6 @@ class NPCTargetsDialog(QDialog):
 
         layout.addWidget(self.npc_targets_table, stretch=1)
 
-        # --- Action Buttons ---
         buttons_layout = QHBoxLayout()
 
         self.select_all_btn = QPushButton("Select All")
@@ -3198,12 +2955,10 @@ class NPCTargetsDialog(QDialog):
 
         layout.addLayout(buttons_layout)
 
-        # --- Status Label ---
         self.npc_status_label = QLabel("Loading NPC list...")
         self.npc_status_label.setStyleSheet("color: gray; font-style: italic;")
         layout.addWidget(self.npc_status_label)
 
-        # --- Dialog buttons ---
         dialog_buttons = QHBoxLayout()
         dialog_buttons.addStretch()
         self.cancel_npc_btn = QPushButton("Cancel")
@@ -3215,11 +2970,10 @@ class NPCTargetsDialog(QDialog):
         dialog_buttons.addWidget(self.save_npc_btn)
         layout.addLayout(dialog_buttons)
 
-        # Selection/save actions need a completed scan to operate on.
         self._set_actions_enabled(False)
 
     # ------------------------------------------------------------------
-    def _set_actions_enabled(self, enabled: bool):
+    def _set_actions_enabled(self, enabled: bool) -> None:
         """Enable/disable everything that depends on a completed scan."""
         for widget in (
             self.select_all_btn, self.select_none_btn, self.select_profiles_btn,
@@ -3229,29 +2983,23 @@ class NPCTargetsDialog(QDialog):
             widget.setEnabled(enabled)
 
     # ------------------------------------------------------------------
-    def _on_skip_generated_toggled(self, checked: bool):
+    def _on_skip_generated_toggled(self, checked: bool) -> None:
         """
         Write SKIP_ALREADY_GENERATED to appconfig immediately, then rescan.
 
-        This is what makes it "live": scan_csv_for_npc_targets() (called by
-        the background worker below) reads cfg.SKIP_ALREADY_GENERATED at
-        the moment it runs, so persisting the new value *before* triggering
-        the rescan is what makes the list actually reflect the new setting.
-        Previously the checkbox lived in a different dialog, was only
-        persisted on a separate "Save Config" click, and rescanning still
-        read the old (unsaved) value in the meantime - hence the bug.
+        The new value must be persisted *before* the rescan is triggered
+        since scan_csv_for_npc_targets() reads cfg.SKIP_ALREADY_GENERATED
+        at runtime.
         """
         cfg.SKIP_ALREADY_GENERATED = checked
         self._refresh_npc_targets()
 
     # ------------------------------------------------------------------
-    def _refresh_npc_targets(self):
+    def _refresh_npc_targets(self) -> None:
         """
         (Re)scan the CSV for NPC targets on a background thread.
 
-        Reads all configuration directly from cfg.* inside the worker -
-        no parameters passed in, so it always reflects whatever was just
-        saved (including SKIP_ALREADY_GENERATED a moment ago).
+        Reads all configuration directly from cfg.* inside the worker.
         """
         self._set_actions_enabled(False)
         self.skip_generated_check.setEnabled(False)
@@ -3274,19 +3022,22 @@ class NPCTargetsDialog(QDialog):
 
         self.npc_scan_thread.start()
 
-    def _on_npc_scan_progress(self, message: str):
+    def _on_npc_scan_progress(self, message: str) -> None:
+        """Update the status label with a progress message from the scan worker."""
         self.npc_status_label.setText(message)
 
-    def _on_npc_scan_finished(self, npc_data: dict):
-        # --- TEMP PROFILING: remove once we know where the time actually goes ---
-        _t_slot_entered = time.perf_counter()
-        _delivery_gap = _t_slot_entered - getattr(self.npc_scan_worker, "_t_result_ready", _t_slot_entered)
+    def _on_npc_scan_finished(self, npc_data: dict) -> None:
+        """
+        Handle a completed scan: populate the table and refresh the status label.
 
+        Args:
+            npc_data: NPC data as returned by scan_csv_for_npc_targets(),
+                keyed by display name.
+        """
         self._raw_npc_data = npc_data
         self._npc_data_loaded = True
 
         self._populate_npc_table(npc_data)
-        _t_populated = time.perf_counter()
 
         selected_count = sum(1 for d in npc_data.values() if d["in_target_voices"])
         selected_lines = sum(d["lines_count"] for d in npc_data.values() if d["in_target_voices"])
@@ -3296,43 +3047,35 @@ class NPCTargetsDialog(QDialog):
         )
         self.npc_status_label.setStyleSheet("color: green;")
 
-        # Repopulating clears sorting and unhides every row, so reapply
-        # whatever search/status filter and sort order were active before
-        # this (re)scan - otherwise switching SKIP_ALREADY_GENERATED would
-        # silently reset them every time.
         self._filter_npc_table()
         self._sort_npc_table()
 
-    def _on_npc_scan_failed(self, error: str):
+    def _on_npc_scan_failed(self, error: str) -> None:
+        """Show the scan failure in the status label."""
         self.npc_status_label.setText(f"❌ Scan failed: {error}")
         self.npc_status_label.setStyleSheet("color: red;")
 
-    def _on_npc_scan_thread_finished(self):
+    def _on_npc_scan_thread_finished(self) -> None:
+        """Re-enable the checkbox and row-dependent actions once the scan thread exits."""
         self.skip_generated_check.setEnabled(True)
         self._set_actions_enabled(self._npc_data_loaded)
 
     # ------------------------------------------------------------------
-    def _populate_npc_table(self, npc_data: dict):
-        """Populate table with NPC data."""
+    def _populate_npc_table(self, npc_data: dict) -> None:
+        """
+        Fill the table with one row per NPC, replacing its current contents.
+
+        Args:
+            npc_data: NPC data as returned by scan_csv_for_npc_targets(),
+                keyed by display name.
+        """
         table = self.npc_targets_table
 
-        # Two changes from the naive per-row insertRow() approach, neither
-        # changing behavior - purely how Qt is asked to do the same work:
-        #   1. setRowCount(n) once instead of insertRow() once per row - the
-        #      table doesn't have to process a rowsInserted change (and the
-        #      layout/geometry recalculation that follows) 1437 times over,
-        #      just once.
-        #   2. setUpdatesEnabled(False) while populating - suspends repaints
-        #      until the loop is done, instead of repainting after every
-        #      single setItem()/setCellWidget() call.
-        # Measured cause of a ~2.6s populate for 1437 rows; this is a
-        # standard fix for QTableWidget + per-row cell widgets being slow.
         table.setUpdatesEnabled(False)
         try:
             table.setRowCount(len(npc_data))
 
             for row, (npc_name, data) in enumerate(npc_data.items()):
-                # Checkbox column
                 checkbox = QCheckBox()
                 checkbox.setChecked(data["in_target_voices"])
                 checkbox_widget = QWidget()
@@ -3342,10 +3085,8 @@ class NPCTargetsDialog(QDialog):
                 checkbox_layout.setContentsMargins(0, 0, 0, 0)
                 table.setCellWidget(row, 0, checkbox_widget)
 
-                # NPC Name
                 table.setItem(row, 1, QTableWidgetItem(data["display_name"]))
 
-                # Status
                 status_text = {
                     "on_voicebox": "✅ On Voicebox",
                     "importable": "📁 Importable",
@@ -3353,13 +3094,11 @@ class NPCTargetsDialog(QDialog):
                 }[data["status"]]
                 table.setItem(row, 2, QTableWidgetItem(status_text))
 
-                # Lines count
                 lines_item = _NumericTableWidgetItem(f"{data['lines_count']:,}")
                 lines_item.setData(Qt.ItemDataRole.UserRole + 1, data['lines_count'])
                 lines_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
                 table.setItem(row, 3, lines_item)
 
-                # Store raw data for sorting
                 name_item = table.item(row, 1)
                 if name_item is not None:
                     name_item.setData(Qt.ItemDataRole.UserRole, data)
@@ -3367,7 +3106,7 @@ class NPCTargetsDialog(QDialog):
             table.setUpdatesEnabled(True)
 
     # ------------------------------------------------------------------
-    def _filter_npc_table(self):
+    def _filter_npc_table(self) -> None:
         """Apply search and status filters to NPC table."""
         if not self._npc_data_loaded:
             return
@@ -3394,7 +3133,7 @@ class NPCTargetsDialog(QDialog):
         self._update_npc_status_label()
 
     # ------------------------------------------------------------------
-    def _sort_npc_table(self):
+    def _sort_npc_table(self) -> None:
         """Sort NPC table based on selected criterion."""
         if not self._npc_data_loaded:
             return
@@ -3409,7 +3148,7 @@ class NPCTargetsDialog(QDialog):
             self.npc_targets_table.sortItems(3, Qt.SortOrder.AscendingOrder)
 
     # ------------------------------------------------------------------
-    def _set_all_npc_checkboxes(self, checked: bool):
+    def _set_all_npc_checkboxes(self, checked: bool) -> None:
         """Set all visible NPC checkboxes to checked state."""
         if not self._npc_data_loaded:
             return
@@ -3425,7 +3164,7 @@ class NPCTargetsDialog(QDialog):
         self._update_npc_status_label()
 
     # ------------------------------------------------------------------
-    def _select_npcs_with_profiles(self):
+    def _select_npcs_with_profiles(self) -> None:
         """Select only NPCs with available profiles (on Voicebox or importable)."""
         if not self._npc_data_loaded:
             return
@@ -3445,14 +3184,14 @@ class NPCTargetsDialog(QDialog):
         self._update_npc_status_label()
 
     # ------------------------------------------------------------------
-    def _clear_all_targets(self):
+    def _clear_all_targets(self) -> None:
         """Clear all TARGET_VOICES (uncheck all + set to empty list)."""
         if not self._npc_data_loaded:
             return
         self._set_all_npc_checkboxes(False)
 
     # ------------------------------------------------------------------
-    def _update_npc_status_label(self):
+    def _update_npc_status_label(self) -> None:
         """Update status label with current selection stats."""
         if not self._npc_data_loaded:
             return
@@ -3475,7 +3214,7 @@ class NPCTargetsDialog(QDialog):
         )
 
     # ------------------------------------------------------------------
-    def _save_and_close(self):
+    def _save_and_close(self) -> None:
         """Write TARGET_VOICES from the current checkbox selection and close."""
         if not self._npc_data_loaded:
             self.reject()
@@ -3498,20 +3237,18 @@ class NPCTargetsDialog(QDialog):
 
 class ConfigDialog(QDialog):
     """
-    Modal dialog holding every user-editable setting, grouped into tabs.
+    Modal dialog holding every user-editable setting, grouped into tabs:
 
-    Replaces the old single giant "Configuration" box on the main window.
-    All the same fields are still here (nothing was removed) - they are
-    just organized into logical tabs:
-
-        Connection  - Voicebox URL/health, engine, model size
-        Generation  - retry, timeout safeguard, limit, ogg conversion,
-                      skip-already-generated
-        Voice Fallback - enable/refresh + male/female/neutral combos
+        Connection      - Voicebox URL/health, engine, model size
+        Generation      - retry, timeout safeguard, ogg conversion,
+                          job limit, and the button that opens
+                          NPCTargetsDialog (which owns TARGET_VOICES and
+                          SKIP_ALREADY_GENERATED)
+        Voice Fallback  - enable/refresh + male/female/neutral combos
 
     The dialog owns the widgets; GenerateWindow reaches them via
-    ``self.config_dialog.<widget_name>`` so the rest of the app's code
-    barely had to change.
+    ``self.config_dialog.<widget_name>`` rather than this class exposing
+    bespoke getters for every field.
     """
 
     def __init__(self, parent=None):
@@ -3520,7 +3257,7 @@ class ConfigDialog(QDialog):
         self.setMinimumWidth(480)
         self._build_ui()
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         outer = QVBoxLayout(self)
 
         tabs = QTabWidget()
@@ -3530,10 +3267,6 @@ class ConfigDialog(QDialog):
         tabs.addTab(self._build_generation_tab(), "⚙️ Generation")
         tabs.addTab(self._build_fallback_tab(), "🗣️ Voice Fallback")
 
-        # ---------- Dialog buttons ----------
-        # Manual QPushButtons (rather than QDialogButtonBox's role-based
-        # auto-ordering) so we control both the left-to-right order and
-        # what each one does: Cancel just closes; Save Config saves then closes.
         button_row = QHBoxLayout()
         button_row.addStretch()
         self.cancel_config_btn = QPushButton("Cancel")
@@ -3550,10 +3283,6 @@ class ConfigDialog(QDialog):
         form = QFormLayout(tab)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # Note: the health-status dot lives on the main window's compact
-        # configuration bar (it's created here but re-parented there in
-        # GenerateWindow._build_ui, since it needs to stay visible even
-        # when this dialog is closed).
         self.base_url_edit = QLineEdit(cfg.BASE_URL)
         self.health_dot = QLabel()
         self.health_dot.setFixedSize(14, 14)
@@ -3584,7 +3313,6 @@ class ConfigDialog(QDialog):
         form = QFormLayout(tab)
         form.setLabelAlignment(Qt.AlignmentFlag.AlignRight)
 
-        # Retry
         retry_box = QHBoxLayout()
         self.retry_count_spin = QSpinBox()
         self.retry_count_spin.setRange(0, 20)
@@ -3599,7 +3327,6 @@ class ConfigDialog(QDialog):
         retry_box.addWidget(self.retry_delay_spin)
         form.addRow("<b>Retry:</b>", retry_box)
 
-        # Timeout safeguard
         self.timeout_enable_check = QCheckBox("Enabled")
         self.timeout_enable_check.setChecked(cfg.ENABLE_TIMEOUT_SAFEGUARD)
         form.addRow("<b>Timeout safeguard:</b>", self.timeout_enable_check)
@@ -3622,7 +3349,6 @@ class ConfigDialog(QDialog):
         sep1.setFrameShape(QFrame.Shape.HLine)
         form.addRow(sep1)
 
-        # Ogg / skip already generated
         self.convert_ogg_check = QCheckBox("Convert generated audio to Ogg")
         self.convert_ogg_check.setChecked(cfg.CONVERT_TO_OGG)
         form.addRow("<b>Audio:</b>", self.convert_ogg_check)
@@ -3657,7 +3383,6 @@ class ConfigDialog(QDialog):
         sep2.setFrameShape(QFrame.Shape.HLine)
         form.addRow(sep2)
 
-        # Limit
         self.limit_spin = QSpinBox()
         self.limit_spin.setRange(0, 1_000_000)
         self.limit_spin.setValue(cfg.LIMIT)
@@ -3671,7 +3396,7 @@ class ConfigDialog(QDialog):
         return tab
 
     # ------------------------------------------------------------------
-    def _open_npc_targets_dialog(self):
+    def _open_npc_targets_dialog(self) -> None:
         """Open the standalone NPC Targets dialog (modal)."""
         dlg = NPCTargetsDialog(self)
         dlg.exec()
@@ -3732,21 +3457,9 @@ class GenerateWindow(QMainWindow):
     The window creates a background thread with a GenerationWorker to
     run the generation pipeline without blocking the UI. All progress
     updates are delivered via Qt signals and safely update the widgets.
-
-    Note:
-        The log panel is fed by a custom logging handler (QtLogHandler)
-        that bridges Python's logging system to the GUI, so any existing
-        logger.info/warning/error calls automatically appear in the UI.
     """
 
     def __init__(self):
-        """
-        Initialize the TTS Voice Generator main window.
-
-        Sets up the application title, default window dimensions, logging
-        subsystem connections, worker thread references, and builds all
-        graphical user interface widgets.
-        """
         super().__init__()
         self.setWindowTitle("🎙️ TTS Voice Generator")
         self.resize(1100, 750)
@@ -3757,10 +3470,12 @@ class GenerateWindow(QMainWindow):
         global logger
         logger = log_initialize(self.log_signal)
 
-        self.gen_thread: QThread | None = None
-        self.worker: GenerationWorker | None = None
-        self.sync_thread: QThread | None = None
-        self.sync_worker: ProfileSyncWorker | None = None
+        self.gen_thread: Optional[QThread] = None
+        self.worker: Optional[GenerationWorker] = None
+        self.sync_thread: Optional[QThread] = None
+        self.sync_worker: Optional[ProfileSyncWorker] = None
+        self.profiles_thread: Optional[QThread] = None
+        self.profiles_worker: Optional[ProfilesFetchWorker] = None
 
         self.health_thread = QThread()
         self.health_worker = HealthCheckWorker(interval_ms=10000)
@@ -3776,7 +3491,7 @@ class GenerateWindow(QMainWindow):
     # UI Construction
     # ------------------------------------------------------------------
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         """
         Build the main window's UI components.
 
@@ -3786,16 +3501,11 @@ class GenerateWindow(QMainWindow):
             3. Progress group - Job progress bar and Overall progress bar
             4. Log group - Scrollable text display
             5. Status bar - For temporary status messages
-
-        The layout uses a combination of QVBoxLayout and QGridLayout for
-        a clean, organized appearance. The log panel uses a monospace font
-        for better readability of log messages.
         """
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # ---------- Configuration (compact bar + dialog) ----------
         self.config_dialog = ConfigDialog(self)
         self.config_dialog.save_config_btn.clicked.connect(self._save_config_edits)
         self.config_dialog.refresh_voices_btn.clicked.connect(self._refresh_fallback_voices)
@@ -3812,7 +3522,6 @@ class GenerateWindow(QMainWindow):
         layout.addWidget(config_bar)
         self._update_config_summary()
 
-        # ---------- Run controls ----------
         controls_layout = QHBoxLayout()
         self.start_btn = QPushButton("▶️ Start Generation")
         self.start_btn.clicked.connect(self._start)
@@ -3829,7 +3538,6 @@ class GenerateWindow(QMainWindow):
         controls_layout.addWidget(self.sync_btn)
         layout.addLayout(controls_layout)
 
-        # ---------- Progress ----------
         progress_group = QGroupBox("📊 Progress")
         progress_layout = QVBoxLayout(progress_group)
 
@@ -3847,7 +3555,6 @@ class GenerateWindow(QMainWindow):
 
         layout.addWidget(progress_group)
 
-        # ---------- Log panel ----------
         log_group = QGroupBox("📜 Log")
         log_layout = QVBoxLayout(log_group)
         self.log_view = QTextEdit()
@@ -3863,23 +3570,13 @@ class GenerateWindow(QMainWindow):
     # Log panel
     # ------------------------------------------------------------------
 
-    def _append_log(self, message: str, levelno: int):
+    def _append_log(self, message: str, levelno: int) -> None:
         """
         Append a log message to the GUI log panel with appropriate coloring.
 
-        Connected to LogSignal.message, this slot receives log messages
-        from the background thread and safely updates the QTextEdit.
-
         Args:
-            message (str): The log message to display.
-            levelno (int): Logging level number (logging.INFO, logging.WARNING, etc.).
-
-        Note:
-            WARNING messages are colored amber (#c98a1c).
-            ERROR messages are colored red (#d64545).
-            All other messages use the default text color.
-            The cursor is moved to the end after each append.
-            Multi-line messages are split and appended line by line.
+            message: The log message to display.
+            levelno: Logging level number (logging.INFO, logging.WARNING, etc.).
         """
         color = {
             logging.WARNING: QColor("#c98a1c"),
@@ -3896,30 +3593,12 @@ class GenerateWindow(QMainWindow):
     # Run control
     # ------------------------------------------------------------------
 
-    def _start(self):
+    def _start(self) -> None:
         """
         Start the generation process on a background thread.
 
         Creates a QThread and a GenerationWorker, connects all signals,
-        and starts the thread. The UI is updated to reflect the running state:
-            - Start button is disabled
-            - Stop button is enabled
-            - Progress bars are reset
-            - Log panel is cleared
-
-        The worker's run() method is called when the thread starts.
-        All heavy processing runs in the background while the UI stays responsive.
-
-        Signals connected:
-            - worker.stage -> status bar updates
-            - worker.job_progress -> job progress bar updates
-            - worker.overall_progress -> overall progress bar updates
-            - worker.finished -> finalize (enable controls)
-            - worker.failed -> handle error (enable controls)
-
-        Note:
-            The thread is automatically cleaned up when finished/failed signals
-            are emitted (thread.quit() is called via connection).
+        and starts the thread. The UI is updated to reflect the running state.
         """
         self.log_view.clear()
         self.job_bar.setValue(0)
@@ -3947,41 +3626,25 @@ class GenerateWindow(QMainWindow):
 
         self.gen_thread.start()
 
-    def _stop(self):
+    def _stop(self) -> None:
         """
         Request the generation to stop after the current job.
 
-        Calls request_stop() on the worker, which:
-            1. Sets a stop flag
-            2. Cancels any in-flight generation (if possible)
-            3. Halts before starting the next job
-
-        The UI is updated to reflect the stopping state:
-            - Stop button is disabled (prevents duplicate clicks)
-            - Status bar shows "Stopping after current job..."
-
-        Note:
-            The worker may take a few seconds to stop if it's in the middle
-            of waiting for a generation to complete. The cancellation request
-            is sent immediately to reduce wait time.
+        Calls request_stop() on the worker, which sets a stop flag and
+        cancels any in-flight generation.
         """
         if self.worker:
             self.worker.request_stop()
             self.stop_btn.setEnabled(False)
             self.statusBar().showMessage("Stopping after current job...", 5000)
 
-    def _on_thread_finished(self):
-        """
-        Re-enable UI controls when the generation background thread finishes.
-
-        Resets button states so the user can initiate a new generation run
-        or sync profiles.
-        """
+    def _on_thread_finished(self) -> None:
+        """Re-enable UI controls when the generation background thread finishes."""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.sync_btn.setEnabled(True)
 
-    def _start_sync_all(self):
+    def _start_sync_all(self) -> None:
         """
         Start full voice profile synchronization on a background thread.
 
@@ -4013,7 +3676,7 @@ class GenerateWindow(QMainWindow):
 
         self.sync_thread.start()
 
-    def _on_sync_finished(self):
+    def _on_sync_finished(self) -> None:
         """
         Handle successful completion of voice profile synchronization.
 
@@ -4026,25 +3689,19 @@ class GenerateWindow(QMainWindow):
         self.job_label.setText("Voice profile sync complete.")
         self.overall_label.setText("Overall: idle")
 
-    def _on_sync_failed(self, error: str):
+    def _on_sync_failed(self, error: str) -> None:
         """
         Handle failure during voice profile synchronization.
 
         Args:
-            error (str): Error message describing the synchronization failure.
-
-        Displays the error in the status bar and updates labels with the error details.
+            error: Error message describing the synchronization failure.
         """
         self.statusBar().showMessage(f"Voice profile sync failed: {error}", 8000)
         self.job_label.setText(f"❌ {error}")
         self.overall_label.setText("Overall: error")
 
-    def _on_sync_thread_finished(self):
-        """
-        Re-enable UI controls when the profile sync thread finishes.
-
-        Restores start and sync button states so new actions can be initiated.
-        """
+    def _on_sync_thread_finished(self) -> None:
+        """Re-enable UI controls when the profile sync thread finishes."""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.sync_btn.setEnabled(True)
@@ -4053,49 +3710,37 @@ class GenerateWindow(QMainWindow):
     # Worker signal handlers
     # ------------------------------------------------------------------
 
-    def _on_stage(self, text: str):
+    def _on_stage(self, text: str) -> None:
         """
         Update the status bar with the current stage message.
 
         Args:
-            text (str): Short status message for the current pipeline stage.
+            text: Short status message for the current pipeline stage.
         """
         self.statusBar().showMessage(text, 5000)
 
-    def _on_job_progress(self, data: dict):
+    def _on_job_progress(self, data: dict) -> None:
         """
         Update the job progress bar and label with status information.
 
-        Handles two modes of operation:
-            1. Generation phase: Shows elapsed/estimated time and progress bar
-            2. Post-processing phase: Shows status text (Downloading, Converting, Saving)
-                with a full progress bar
-
         Args:
-            data (dict): Job progress data containing:
-                - idx (int): Current job index (1-based)
-                - total (int): Total number of jobs
-                - strref (str): STRREF identifier
-                - filename (str): Output filename
-                - npc_name (str): NPC name being processed
-                - voice_name (str): Voice profile name used
-                - chars (int): Number of characters in the text
-                - percent (float): Completion percentage (0-100)
-                - elapsed (float): Elapsed time in seconds
-                - estimated (float): Estimated total time in seconds
-                - timeout (float, optional): Maximum allowed time in seconds
-                - status (str, optional): Post-processing status message
-
-        Note:
-            When status is provided, the progress bar is set to 100% and the
-            label shows the status message instead of elapsed/estimated time.
-            The status message indicates post-generation work like downloading,
-            converting, or saving.
+            data: Job progress data containing:
+                - idx: Current job index (1-based)
+                - total: Total number of jobs
+                - strref: STRREF identifier
+                - filename: Output filename
+                - npc_name: NPC name being processed
+                - voice_name: Voice profile name used
+                - chars: Number of characters in the text
+                - percent: Completion percentage (0-100)
+                - elapsed: Elapsed time in seconds
+                - estimated: Estimated total time in seconds
+                - timeout: Maximum allowed time in seconds (optional)
+                - status: Post-processing status message (optional)
         """
-        # If status is provided (post-generation phase), show status text
         if data.get("status"):
             status_text = data["status"]
-            self.job_bar.setValue(100)  # Show full bar during post-processing
+            self.job_bar.setValue(100)
             job_width = len(str(data["total"]))
             voice_part = f" ({data['voice_name']})" if data["voice_name"] != data["npc_name"] else ""
             self.job_label.setText(
@@ -4105,17 +3750,15 @@ class GenerateWindow(QMainWindow):
                 f"({data['chars']} chars)  {data['npc_name']}{voice_part}"
             )
             return
-        
-        # Normal progress update (during generation)
+
         self.job_bar.setValue(int(data["percent"]))
         job_width = len(str(data["total"]))
         voice_part = f" ({data['voice_name']})" if data["voice_name"] != data["npc_name"] else ""
-        
-        # Build time string
+
         time_part = f"{format_time(data['elapsed'])} / {format_time(data['estimated'])}"
         if data.get("timeout"):
             time_part += f" (max: {format_time(data['timeout'])})"
-        
+
         self.job_label.setText(
             f"[{data['idx']:>{job_width}}/{data['total']:>{job_width}}] "
             f"{data['strref']}/{data['filename']}  "
@@ -4123,13 +3766,12 @@ class GenerateWindow(QMainWindow):
             f"({data['chars']} chars)  {data['npc_name']}{voice_part}"
         )
 
-
-    def _on_overall_progress(self, data: dict):
+    def _on_overall_progress(self, data: dict) -> None:
         """
         Update the overall progress bar and label.
 
         Args:
-            data (dict): Overall progress data containing percent,
+            data: Overall progress data containing percent,
                 chars_processed, chars_total, elapsed, eta_seconds, finish_str.
         """
         if not data.get("ready"):
@@ -4146,22 +3788,18 @@ class GenerateWindow(QMainWindow):
             f"({chars_per_sec:.1f} chars/sec)"
         )
 
-    def _on_finished(self, stats: dict):
+    def _on_finished(self, stats: dict) -> None:
         """
         Handle successful completion of the generation pipeline.
 
         Args:
-            stats (dict): Final statistics from the run:
-                - total_jobs (int): Total jobs processed
-                - total_chars_processed (int): Total characters generated
-                - avg_time_per_char (float): Average time per character
-                - npc_stats (dict): Per-NPC statistics
-                - retry_stats (dict): Retry statistics
-
-        Note:
-            The progress bars are set to 100% (if there were jobs).
-            The status bar shows "Finished.".
-            The start/stop buttons are re-enabled when the thread finishes.
+            stats: Final statistics from the run:
+                - total_jobs: Total jobs processed
+                - total_chars_processed: Total characters generated
+                - avg_time_per_char: Average time per character
+                - npc_stats: Per-NPC statistics
+                - retry_stats: Retry statistics
+                - was_stopped: Whether the run was stopped by the user
         """
         total_jobs = stats["total_jobs"]
         if total_jobs == 0:
@@ -4173,29 +3811,23 @@ class GenerateWindow(QMainWindow):
             self.job_label.setText(f"Finished {total_jobs} job(s).")
         self.statusBar().showMessage("Finished.", 5000)
 
-    def _on_failed(self, message: str):
+    def _on_failed(self, message: str) -> None:
         """
         Handle a fatal error during the generation pipeline.
 
         Args:
-            message (str): Error message describing the failure.
-
-        Note:
-            The status bar shows "Failed: {message}".
-            The job label shows an error icon and the message.
-            The start/stop buttons are re-enabled when the thread finishes.
-            The background thread is stopped automatically.
+            message: Error message describing the failure.
         """
         self.statusBar().showMessage(f"Failed: {message}", 8000)
         self.job_label.setText(f"❌ {message}")
 
-    def _open_config_dialog(self):
+    def _open_config_dialog(self) -> None:
         """Show the configuration dialog (non-modal so the log/progress stay visible)."""
         self.config_dialog.show()
         self.config_dialog.raise_()
         self.config_dialog.activateWindow()
 
-    def _update_config_summary(self):
+    def _update_config_summary(self) -> None:
         """Refresh the one-line summary shown on the compact configuration bar."""
         d = self.config_dialog
         bits = [
@@ -4207,7 +3839,7 @@ class GenerateWindow(QMainWindow):
             bits.append("fallback on")
         self.config_summary_label.setText("  •  ".join(bits))
 
-    def _save_config_edits(self):
+    def _save_config_edits(self) -> None:
         """Apply edited configuration fields to appconfig in one batched write."""
         d = self.config_dialog
         _appconfig_set_many({
@@ -4227,11 +3859,6 @@ class GenerateWindow(QMainWindow):
             "FALLBACK_VOICE_FEMALE": d.fallback_female_combo.currentText().strip(),
             "FALLBACK_VOICE_NEUTRAL": d.fallback_neutral_combo.currentText().strip(),
         })
-        # SKIP_ALREADY_GENERATED and TARGET_VOICES are NOT saved here - both
-        # are managed live by NPCTargetsDialog (opened via the "Manage NPC
-        # Targets…" button above): SKIP_ALREADY_GENERATED writes to appconfig
-        # the instant its checkbox is toggled, and TARGET_VOICES writes when
-        # that dialog's own Save & Close is clicked. Nothing to batch here.
 
         logger.info("Configuration updated from UI.")
         self.statusBar().showMessage("Configuration saved.", 3000)
@@ -4239,7 +3866,7 @@ class GenerateWindow(QMainWindow):
         QTimer.singleShot(0, self.health_worker.check_now)
         self.config_dialog.close()
 
-    def _on_health_checked(self, reachable: bool, info: dict):
+    def _on_health_checked(self, reachable: bool, info: dict) -> None:
         """Update the health dot color and tooltip from a /health poll result."""
         if reachable:
             color = "#2ecc71"
@@ -4248,9 +3875,9 @@ class GenerateWindow(QMainWindow):
             color = "#e74c3c"
             tooltip = f"Unreachable: {info.get('error', 'unknown error')}"
         self.config_dialog.health_dot.setStyleSheet(f"background-color: {color}; border-radius: 7px;")
-        self.config_dialog.health_dot.setToolTip(tooltip)       
+        self.config_dialog.health_dot.setToolTip(tooltip)
 
-    def _refresh_fallback_voices(self):
+    def _refresh_fallback_voices(self) -> None:
         """Fetch the current profile list in the background and repopulate the fallback combos."""
         self.config_dialog.refresh_voices_btn.setEnabled(False)
         self.profiles_thread = QThread()
@@ -4263,7 +3890,7 @@ class GenerateWindow(QMainWindow):
         self.profiles_worker.failed.connect(self.profiles_thread.quit)
         self.profiles_thread.start()
 
-    def _on_profiles_loaded(self, profile_map: dict):
+    def _on_profiles_loaded(self, profile_map: dict) -> None:
         names = sorted(profile_map.keys(), key=str.lower)
         d = self.config_dialog
         for combo in (d.fallback_male_combo, d.fallback_female_combo, d.fallback_neutral_combo):
@@ -4275,29 +3902,22 @@ class GenerateWindow(QMainWindow):
         d.refresh_voices_btn.setEnabled(True)
         self.statusBar().showMessage(f"Loaded {len(names)} voice profiles.", 3000)
 
-    def _on_profiles_failed(self, message: str):
+    def _on_profiles_failed(self, message: str) -> None:
         self.config_dialog.refresh_voices_btn.setEnabled(True)
-        self.statusBar().showMessage(f"Could not load voice profiles: {message}", 5000)        
+        self.statusBar().showMessage(f"Could not load voice profiles: {message}", 5000)
 
-    def closeEvent(self, event):
+    def closeEvent(self, event) -> None:
         """
         Stop background threads cleanly before the window closes.
 
         The health-check QTimer lives on health_thread, so it must be
-        stopped *from* that thread - calling `_timer.stop()` directly here
-        (from the UI/main thread) is exactly what produces:
-            QObject::killTimer: Timers cannot be stopped from another thread
-        `QMetaObject.invokeMethod(..., QueuedConnection)` marshals the call
-        onto the worker thread's event loop instead, so the timer is
-        stopped and deleted by the thread that owns it. Only once that's
-        done do we quit() and wait() for the thread to actually finish.
+        stopped *from* that thread to avoid "Timers cannot be stopped
+        from another thread" warnings.
         """
         QMetaObject.invokeMethod(self.health_worker, "stop", Qt.ConnectionType.QueuedConnection)
         self.health_thread.quit()
         self.health_thread.wait(2000)
 
-        # If a generation or profile-sync job is still running, ask it to
-        # stop and give it a moment to unwind before we tear down the window.
         if self.gen_thread is not None and self.gen_thread.isRunning():
             if self.worker:
                 self.worker.request_stop()
@@ -4308,23 +3928,20 @@ class GenerateWindow(QMainWindow):
             self.sync_thread.quit()
             self.sync_thread.wait(2000)
 
-        super().closeEvent(event) 
+        super().closeEvent(event)
 
 
 # ============================================================================
 # Application Entry Point
 # ============================================================================
 
-def main():
+def main() -> None:
     """
     Application entry point.
 
     Creates the QApplication, instantiates the main window, and starts
     the Qt event loop. The GUI will remain responsive while the generation
     pipeline runs on a background thread.
-
-    Note:
-        The application exits when the main window is closed.
     """
     app = QApplication(sys.argv)
     window = GenerateWindow()
