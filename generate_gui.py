@@ -711,7 +711,7 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
         processed_jobs,
         total_jobs,
     ]
-    job_width = max(len(str(n)) for n in job_numbers if n > 0) + 1
+    job_width = max((len(str(n)) for n in job_numbers if n > 0), default=9) + 1
     
     char_numbers = [
         total_chars_all,
@@ -719,14 +719,14 @@ def log_final_summary(total_jobs, total_chars_processed, avg_time_per_char, voic
         total_done_chars,
         total_skipped_chars,
     ]
-    char_width = max(len(str(n)) for n in char_numbers if n > 0) + 1
+    char_width = max((len(str(n)) for n in char_numbers if n > 0), default=9) + 1
 
     retry_numbers = [
         retry_stats.get('failed_attempts', 0) if retry_stats else 0,
         retry_stats.get('successful_retries', 0) if retry_stats else 0,
         retry_stats.get('failed_tasks', 0) if retry_stats else 0,
     ]
-    retry_width = max(len(str(n)) for n in retry_numbers if n > 0) + 1 if retry_stats else 10
+    retry_width = max((len(str(n)) for n in retry_numbers if n > 0), default=9) + 1 if retry_stats else 10
 
     # Ensure minimum widths
     job_width = max(job_width, 10)
