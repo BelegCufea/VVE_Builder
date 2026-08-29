@@ -195,6 +195,29 @@ DEFAULTS: dict = {
     # Dialog Report Preparation
     "EXTRACT_DIR": r"extracted",
     "GENDER_MAP": {1: "M", 2: "F", 3: "O", 4: "N"},
+
+    # ============================================================================
+    # Transcription check settings
+    # ============================================================================
+
+    # How many wav files to sample per NPC directory for transcription checking
+    "SAMPLES_PER_NPC": 5,
+
+    # Parallel transcription calls (1 = sequential, 4-8 recommended)
+    "SAMPLE_CONCURRENCY": 4,
+
+    # Per-call timeout for the /transcribe endpoint (seconds)
+    "SAMPLE_TIMEOUT_SECONDS": 300,
+
+    # Retry configuration for transcription failures
+    "SAMPLE_RETRY_COUNT": 2,
+    "SAMPLE_RETRY_DELAY": 2.0,
+
+    # Similarity score thresholds (0-100) for color-coding results.
+    # Used to classify the WORST (minimum) score per NPC in the NPC table.
+    "SIMILARITY_EXCELLENT": 95.0,
+    "SIMILARITY_GOOD": 85.0,
+    "SIMILARITY_POOR": 70.0,
 }
 
 # ============================================================================
