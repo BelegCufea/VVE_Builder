@@ -203,9 +203,6 @@ DEFAULTS: dict = {
     # How many wav files to sample per NPC directory for transcription checking
     "SAMPLES_PER_NPC": 5,
 
-    # Parallel transcription calls (1 = sequential, 4-8 recommended)
-    "SAMPLE_CONCURRENCY": 4,
-
     # Per-call timeout for the /transcribe endpoint (seconds)
     "SAMPLE_TIMEOUT_SECONDS": 300,
 

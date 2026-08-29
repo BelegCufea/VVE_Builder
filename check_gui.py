@@ -7,7 +7,9 @@ The resulting similarity scores reveal which NPCs have problematic audio or
 incorrect transcriptions.
 
 Features:
-  - Parallel transcription via QThreadPool (cfg.SAMPLE_CONCURRENCY threads)
+  - Sequential transcription, one /transcribe call at a time (the local
+    Voicebox service handles one request at a time regardless, so this
+    keeps things simple and easy to debug without giving up throughput)
   - NPC-centric result grid sorted by worst similarity score (lowest first)
   - Drill-down panel showing all samples for the selected NPC
   - Side-by-side text comparison dialog with copy buttons
@@ -32,7 +34,7 @@ from typing import Dict, List, Optional, Tuple
 
 import requests
 from PySide6.QtCore import (
-    Qt, QObject, QRunnable, QThread, QThreadPool, QTimer, Signal,
+    Qt, QObject, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
@@ -103,114 +105,87 @@ def format_finish_time(eta_seconds: float) -> str:
     return "..."
 
 
-class TranscribeTask(QRunnable, QObject):
-    """Transcribe a single .wav file via Voicebox /transcribe endpoint.
+def transcribe_sample(
+    wav_path: Path,
+    strref: int,
+    npc_name: str,
+    text_for_scoring: str,
+) -> dict:
+    """Transcribe a single .wav file via the Voicebox /transcribe endpoint.
 
-    Each instance handles one audio file, posting it to the configured
-    Voicebox service and computing a similarity score against the expected
-    text. Results are emitted via the 'done' signal for consumption by
-    the main thread.
+    Posts the audio file with retry logic, computes a similarity score
+    between the expected and transcribed text, and returns the result row.
+    Runs synchronously on the calling thread - called sequentially, once per
+    sample, from CheckWorker.run().
 
-    The task runs on the QThreadPool, allowing parallel transcription
-    without blocking the GUI thread.
+    Args:
+        wav_path: Path to the .wav file to transcribe.
+        strref: String reference ID associated with this audio.
+        npc_name: Name of the NPC this audio belongs to.
+        text_for_scoring: The expected text for similarity scoring.
 
-    Signals:
-        done: Emitted when transcription is complete, with a dict containing
-              NPC, StrRef, AudioFile, CSVText, TranscribedText, and SimilarityScore.
+    Returns:
+        Dict containing NPC, StrRef, AudioFile, CSVText, TranscribedText,
+        and SimilarityScore.
     """
+    url = (
+        cfg.BASE_URL.rstrip("/")
+        + "/"
+        + cfg.TRANSCRIBE_ENDPOINT.lstrip("/")
+    )
 
-    done = Signal(dict)
+    transcribed_text = ""
+    success = False
+    last_error = ""
 
-    def __init__(
-        self,
-        wav_path: Path,
-        strref: int,
-        npc_name: str,
-        text_for_scoring: str,
-    ) -> None:
-        """Initialize a transcription task.
+    for attempt in range(cfg.SAMPLE_RETRY_COUNT + 1):
+        try:
+            with open(wav_path, "rb") as f:
+                resp = requests.post(
+                    url,
+                    files={"file": (wav_path.name, f, "audio/wav")},
+                    timeout=cfg.SAMPLE_TIMEOUT_SECONDS,
+                )
+            resp.raise_for_status()
+            transcribed_text = resp.json().get("text", "")
+            success = True
+            break
+        except Exception as ex:
+            last_error = str(ex)
+            if attempt < cfg.SAMPLE_RETRY_COUNT:
+                time.sleep(cfg.SAMPLE_RETRY_DELAY)
 
-        Args:
-            wav_path: Path to the .wav file to transcribe.
-            strref: String reference ID associated with this audio.
-            npc_name: Name of the NPC this audio belongs to.
-            text_for_scoring: The expected text for similarity scoring.
-        """
-        QObject.__init__(self)
-        QRunnable.__init__(self)
-        self.wav_path = wav_path
-        self.strref = strref
-        self.npc_name = npc_name
-        self.text_for_scoring = text_for_scoring
+    if not success:
+        transcribed_text = f"<ERROR: {last_error}>"
 
-    def run(self) -> None:
-        """Execute the transcription request.
+    score = round(
+        SequenceMatcher(
+            None,
+            text_for_scoring.strip().lower(),
+            transcribed_text.strip().lower(),
+        ).ratio() * 100,
+        2,
+    )
 
-        Posts the audio file to the Voicebox /transcribe endpoint with retry
-        logic. Computes similarity score between expected and transcribed
-        text, then emits the result via the 'done' signal.
-        """
-        url = (
-            cfg.BASE_URL.rstrip("/")
-            + "/"
-            + cfg.TRANSCRIBE_ENDPOINT.lstrip("/")
-        )
-
-        transcribed_text = ""
-        success = False
-        last_error = ""
-
-        for attempt in range(cfg.SAMPLE_RETRY_COUNT + 1):
-            try:
-                with open(self.wav_path, "rb") as f:
-                    resp = requests.post(
-                        url,
-                        files={"file": (self.wav_path.name, f, "audio/wav")},
-                        timeout=cfg.SAMPLE_TIMEOUT_SECONDS,
-                    )
-                resp.raise_for_status()
-                transcribed_text = resp.json().get("text", "")
-                success = True
-                break
-            except Exception as ex:
-                last_error = str(ex)
-                if attempt < cfg.SAMPLE_RETRY_COUNT:
-                    time.sleep(cfg.SAMPLE_RETRY_DELAY)
-
-        if not success:
-            transcribed_text = f"<ERROR: {last_error}>"
-
-        score = round(
-            SequenceMatcher(
-                None,
-                self.text_for_scoring.strip().lower(),
-                transcribed_text.strip().lower(),
-            ).ratio() * 100,
-            2,
-        )
-
-        row = {
-            "NPC": self.npc_name,
-            "StrRef": self.strref,
-            "AudioFile": self.wav_path.name,
-            "CSVText": self.text_for_scoring,
-            "TranscribedText": transcribed_text,
-            "SimilarityScore": score,
-        }
-
-        self.done.emit(row)
+    return {
+        "NPC": npc_name,
+        "StrRef": strref,
+        "AudioFile": wav_path.name,
+        "CSVText": text_for_scoring,
+        "TranscribedText": transcribed_text,
+        "SimilarityScore": score,
+    }
 
 
 class CheckWorker(QObject):
-    """Background worker that orchestrates NPC scanning and parallel transcription.
+    """Background worker that orchestrates NPC scanning and transcription.
 
     This worker discovers NPC directories, loads the text lookup from CSV,
-    submits transcription tasks to a QThreadPool, tracks progress, and emits
-    results to the GUI via Qt signals. It operates entirely on a background
-    thread to avoid blocking the UI.
-
-    Uses QThreadPool for parallel /transcribe calls (max concurrency set from
-    cfg.SAMPLE_CONCURRENCY at construction time).
+    transcribes samples sequentially (one /transcribe call at a time - the
+    local Voicebox service only handles one request at a time anyway, so
+    there's no throughput to gain from concurrency, only complexity), tracks
+    progress, and emits results to the GUI via Qt signals. It operates
+    entirely on a background thread to avoid blocking the UI.
 
     Signals:
         stage: Short status string for the status bar.
@@ -229,18 +204,13 @@ class CheckWorker(QObject):
     failed = Signal(str)
 
     def __init__(self) -> None:
-        """Initialize the worker with thread-safe state and a task pool."""
+        """Initialize the worker."""
         super().__init__()
         self._stop_requested = threading.Event()
-        self._lock = threading.Lock()
-        self._pool = QThreadPool()
-        self._pool.setMaxThreadCount(cfg.SAMPLE_CONCURRENCY)
-        self._npc_results: Dict[str, List[dict]] = {}
-        self._pending_per_npc: Dict[str, int] = {}
         self._total_samples_done = 0
 
     def request_stop(self) -> None:
-        """Request the worker to stop processing after the current batch."""
+        """Request the worker to stop processing after the current sample."""
         self._stop_requested.set()
 
     def run(self) -> None:
@@ -316,33 +286,17 @@ class CheckWorker(QObject):
         self.stage.emit(
             f"Transcribing {total_samples} samples across {len(npc_batches)} NPCs..."
         )
-        self._npc_results = {}
-        self._pending_per_npc = {}
         self._total_samples_done = 0
         start_time = time.time()
+        last_overall_emit = 0.0
 
         for npc_name, batch in npc_batches.items():
             if self._stop_requested.is_set():
                 break
-            with self._lock:
-                self._npc_results[npc_name] = []
-                self._pending_per_npc[npc_name] = 0
 
-            for wav_path, strref, text_for_scoring in batch:
-                task = TranscribeTask(
-                    wav_path=wav_path,
-                    strref=strref,
-                    npc_name=npc_name,
-                    text_for_scoring=text_for_scoring,
-                )
-                task.done.connect(
-                    self.slot_sample_done,
-                    type=Qt.ConnectionType.DirectConnection,
-                )
-                with self._lock:
-                    self._pending_per_npc[npc_name] += 1
-                self._pool.start(task)
-
+            # Show the NPC immediately as "in progress" rather than waiting
+            # for all its samples - sequential processing means that could
+            # otherwise be a long wait for NPCs with many samples.
             self.npc_completed.emit({
                 "npc": npc_name,
                 "samples": [],
@@ -351,60 +305,69 @@ class CheckWorker(QObject):
                 "done": False,
             })
 
-        self.stage.emit("Waiting for transcription to complete...")
-        poll_interval = 0.25
-        last_overall_emit = 0.0
+            npc_samples: List[dict] = []
+            for wav_path, strref, text_for_scoring in batch:
+                if self._stop_requested.is_set():
+                    break
 
-        while True:
-            if self._stop_requested.is_set():
-                time.sleep(1.0)
-                break
-            active = self._pool.activeThreadCount()
-            with self._lock:
-                all_drained = not any(self._pending_per_npc.values())
-            if active == 0 and all_drained:
-                break
-            now = time.time()
-            if now - last_overall_emit >= poll_interval:
-                self._emit_overall_progress(
-                    total_samples=total_samples,
-                    elapsed=now - start_time,
+                row = transcribe_sample(
+                    wav_path=wav_path,
+                    strref=strref,
+                    npc_name=npc_name,
+                    text_for_scoring=text_for_scoring,
                 )
-                last_overall_emit = now
-            time.sleep(poll_interval)
+                npc_samples.append(row)
+                self._total_samples_done += 1
 
-        if self._stop_requested.is_set():
-            logger.warning("Stop requested - discarding incomplete results.")
+                # Incremental update so the sample count/scores tick up live
+                # instead of only appearing once the whole NPC is done.
+                scores = [
+                    s["SimilarityScore"] for s in npc_samples
+                    if isinstance(s["SimilarityScore"], (int, float))
+                ]
+                self.npc_completed.emit({
+                    "npc": npc_name,
+                    "samples": list(npc_samples),
+                    "worst_score": min(scores) if scores else None,
+                    "avg_score": (sum(scores) / len(scores)) if scores else None,
+                    "done": False,
+                })
 
-        with self._lock:
-            npc_names = list(self._npc_results.keys())
-        for npc_name in npc_names:
-            with self._lock:
-                samples = list(self._npc_results.get(npc_name, []))
-            if not samples:
+                now = time.time()
+                if now - last_overall_emit >= 0.25:
+                    self._emit_overall_progress(
+                        total_samples=total_samples,
+                        elapsed=now - start_time,
+                    )
+                    last_overall_emit = now
+
+            if not npc_samples:
                 continue
+
             scores = [
-                s["SimilarityScore"] for s in samples
+                s["SimilarityScore"] for s in npc_samples
                 if isinstance(s["SimilarityScore"], (int, float))
             ]
             worst = min(scores) if scores else None
             avg = (sum(scores) / len(scores)) if scores else None
             self.npc_completed.emit({
                 "npc": npc_name,
-                "samples": samples,
+                "samples": npc_samples,
                 "worst_score": worst,
                 "avg_score": avg,
                 "done": True,
             })
+
+        if self._stop_requested.is_set():
+            logger.warning("Stop requested - discarding incomplete NPC's samples.")
 
         self._emit_overall_progress(
             total_samples=total_samples,
             elapsed=time.time() - start_time,
         )
 
-        with self._lock:
-            total_npcs = len(self._npc_results)
-            total_done = self._total_samples_done
+        total_npcs = len(npc_batches)
+        total_done = self._total_samples_done
 
         logger.info("=" * 60)
         logger.info("TRANSCRIPTION CHECK COMPLETE")
@@ -416,43 +379,6 @@ class CheckWorker(QObject):
             "total_npcs": total_npcs,
             "total_samples": total_done,
         })
-
-    def slot_sample_done(self, row: dict) -> None:
-        """Handle a completed transcription task.
-
-        Called via DirectConnection from the QThreadPool thread that finished
-        the task. Updates thread-safe state and emits npc_completed when
-        all samples for an NPC are done.
-
-        Args:
-            row: Dict containing the transcription result for one sample.
-        """
-        npc = row["NPC"]
-        samples: list = []
-        npc_done = False
-        with self._lock:
-            self._npc_results.setdefault(npc, []).append(row)
-            pending = self._pending_per_npc.get(npc, 1)
-            self._pending_per_npc[npc] = max(0, pending - 1)
-            self._total_samples_done += 1
-            npc_done = self._pending_per_npc.get(npc, 0) == 0
-            if npc_done:
-                samples = list(self._npc_results.get(npc, []))
-
-        if npc_done:
-            scores = [
-                s["SimilarityScore"] for s in samples
-                if isinstance(s["SimilarityScore"], (int, float))
-            ]
-            worst = min(scores) if scores else None
-            avg = (sum(scores) / len(scores)) if scores else None
-            self.npc_completed.emit({
-                "npc": npc,
-                "samples": samples,
-                "worst_score": worst,
-                "avg_score": avg,
-                "done": True,
-            })
 
     def _load_text_lookup(self, csv_path: Path) -> Dict[int, str]:
         """Load the StrRef to text mapping from a CSV file.
@@ -481,8 +407,7 @@ class CheckWorker(QObject):
 
     def _emit_overall_progress(self, total_samples: int, elapsed: float) -> None:
         """Emit an overall_progress dict for the GUI progress bar."""
-        with self._lock:
-            samples_done = self._total_samples_done
+        samples_done = self._total_samples_done
 
         if samples_done == 0 or elapsed == 0:
             ready = False
@@ -730,7 +655,7 @@ class CheckWindow(QMainWindow):
         self.export_btn.clicked.connect(self._export_csv)
         self.stats_label = QLabel(
             f"NPCs: -  Samples: -  Avg: -%  "
-            f"(config: {cfg.SAMPLES_PER_NPC} samples/NPC, concurrency {cfg.SAMPLE_CONCURRENCY})"
+            f"(config: {cfg.SAMPLES_PER_NPC} samples/NPC, sequential)"
         )
         self.stats_label.setStyleSheet("color: gray; font-size: 11px;")
         toolbar.addWidget(self.start_btn)
