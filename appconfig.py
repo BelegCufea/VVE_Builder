@@ -122,6 +122,7 @@ DEFAULTS: dict = {
     "GENERATE_STATUS_ENDPOINT": "/generate/{gen_id}/status",
     "GENERATE_CANCEL_ENDPOINT": "/generate/{gen_id}/cancel",
     "AUDIO_ENDPOINT": "/audio/{gen_id}",
+    "TRANSCRIBE_ENDPOINT": "/transcribe",
 
     # =======================================================================
     # Other variables needed by or shared between scripts

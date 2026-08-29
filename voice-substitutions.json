@@ -59,7 +59,9 @@
     "Black Market Thief|F": "Black Market Thief_F",
     "Customer|M": "Customer_M",
     "Customer|F": "Customer_F",
-    "Zyntris|F": "Zyntris_F"
+    "Zyntris|F": "Zyntris_F",
+    "Beggar Child|F": "Beggar Child_F",
+    "Beggar Child|M": "Beggar Child_M"
   },
   "sysname": {
     "GORALT1": "BG1 Narrator",
@@ -132,6 +134,7 @@
     "ARNMAN11": "Trainee_ARNMAN11",
     "ARNMAN10": "Trainee_ARNMAN10",
     "ARNTRA04": "Trainee_ARNTRA04",
-    "OHHSTONE": "RealNameMissing_OHHSTONE"
+    "OHHSTONE": "RealNameMissing_OHHSTONE",
+    "OHBMHSM": "BG1 Narrator"
   }
 }
