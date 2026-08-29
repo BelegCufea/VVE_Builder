@@ -1,16 +1,19 @@
 """
-Transcription Check Tool - GUI wrapper for generate-check.py's workflow.
+Transcription Check Tool - GUI for validating Voicebox transcription quality.
 
-Runs the same NPC-directory walk -> Voicebox /transcribe -> similarity-score
-pipeline, but as a PySide6 desktop app with:
+Scans NPC audio directories, sends each .wav file to the Voicebox /transcribe
+endpoint, and scores the result against the expected text from the CSV lookup.
+The resulting similarity scores reveal which NPCs have problematic audio or
+incorrect transcriptions.
+
+Features:
   - Parallel transcription via QThreadPool (cfg.SAMPLE_CONCURRENCY threads)
   - NPC-centric result grid sorted by worst similarity score (lowest first)
   - Drill-down panel showing all samples for the selected NPC
   - Side-by-side text comparison dialog with copy buttons
-  - Real-time progress + ETA
+  - Real-time progress bar with ETA and throughput metrics
 
-All cfg.* values are read once at startup and treated as immutable during
-the run. No Settings dialog - configuration lives in appconfig.py.
+Configuration lives in appconfig.py; all cfg.* values are read once at startup.
 
 Usage:
     python check_gui.py
@@ -28,8 +31,10 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import requests
-from PySide6.QtCore import Qt, QObject, QRunnable, QThread, QThreadPool, QTimer, Signal, Slot
-from PySide6.QtGui import QFont, QTextCursor, QColor
+from PySide6.QtCore import (
+    Qt, QObject, QRunnable, QThread, QThreadPool, QTimer, Signal,
+)
+from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox,
@@ -38,73 +43,31 @@ from PySide6.QtWidgets import (
 )
 
 from appconfig import cfg
-from utils import from_base36, filename_re, load_patcher_config, preprocess_text
+from utils import (
+    from_base36, filename_re, load_patcher_config, preprocess_text,
+    setup_logging,
+)
 
+logger = setup_logging("check_gui", console_level=logging.ERROR)
+for _noisy in ("urllib3", "urllib3.connectionpool", "requests"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
 
-# ============================================================================
-# Logging
-# ============================================================================
-
-class LogSignal(QObject):
-    """Bridges Python logging records into Qt signals."""
-    message = Signal(str, int)
-
-
-class QtLogHandler(logging.Handler):
-    """Intercepts logging calls and emits them as Qt signals."""
-    def __init__(self, log_signal: LogSignal):
-        super().__init__()
-        self.log_signal = log_signal
-
-    def emit(self, record: logging.LogRecord) -> None:
-        try:
-            msg = self.format(record)
-            self.log_signal.message.emit(msg, record.levelno)
-        except Exception:
-            pass
-
-
-def log_initialize(log_signal: LogSignal) -> logging.Logger:
-    """Configure logging: file (DEBUG), console (ERROR), GUI panel (INFO)."""
-    log_dir = Path(cfg.LOG_DIR)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / "check_gui.log"
-    logger = logging.getLogger("check_gui")
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    logger.setLevel(logging.DEBUG)
-
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
-    ))
-    logger.addHandler(file_handler)
-
-    if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.ERROR)
-        console_handler.setFormatter(logging.Formatter('%(message)s'))
-        logger.addHandler(console_handler)
-
-    gui_handler = QtLogHandler(log_signal)
-    gui_handler.setLevel(logging.INFO)
-    gui_handler.setFormatter(logging.Formatter('%(message)s'))
-    logger.addHandler(gui_handler)
-
-    for noisy in ("urllib3", "urllib3.connectionpool", "requests"):
-        logging.getLogger(noisy).setLevel(logging.WARNING)
-
-    logger.propagate = False
-    return logger
-
-
-# ============================================================================
-# Formatting helpers
-# ============================================================================
 
 def format_time(seconds: float) -> str:
-    """Format seconds as a human-readable string."""
+    """Convert a duration in seconds to a human-readable string.
+
+    Converts seconds to a compact format with appropriate units:
+    - Under 60 seconds: "Xs" (e.g., "45.5s")
+    - 1-59 minutes: "XmYs" (e.g., "5m30s")
+    - 1-23 hours: "XhYm" (e.g., "2h15m")
+    - 24+ hours: "XdYh" (e.g., "3d5h")
+
+    Args:
+        seconds: Duration in seconds.
+
+    Returns:
+        A formatted string representing the duration.
+    """
     if seconds < 60:
         return f"{seconds:.1f}s"
     minutes = int(seconds // 60)
@@ -121,7 +84,17 @@ def format_time(seconds: float) -> str:
 
 
 def format_finish_time(eta_seconds: float) -> str:
-    """Return expected finish time as absolute HH:MM:SS or date+time."""
+    """Return the expected finish time as a formatted time string.
+
+    If the estimated time is today, returns time in "HH:MM:SS" format.
+    Otherwise, includes the date in locale-appropriate format.
+
+    Args:
+        eta_seconds: Estimated seconds until completion.
+
+    Returns:
+        Formatted finish time string, or "..." if eta_seconds <= 0.
+    """
     if eta_seconds > 0:
         finish = datetime.now() + timedelta(seconds=eta_seconds)
         if finish.date() == datetime.now().date():
@@ -130,16 +103,20 @@ def format_finish_time(eta_seconds: float) -> str:
     return "..."
 
 
-# ============================================================================
-# TranscribeTask - one QRunnable per wav file
-# ============================================================================
-
 class TranscribeTask(QRunnable, QObject):
-    """
-    Transcribe a single .wav file via Voicebox /transcribe.
+    """Transcribe a single .wav file via Voicebox /transcribe endpoint.
 
-    Lives on QThreadPool; result and any error are delivered via the
-    worker's done signal so the main thread is never blocked on network I/O.
+    Each instance handles one audio file, posting it to the configured
+    Voicebox service and computing a similarity score against the expected
+    text. Results are emitted via the 'done' signal for consumption by
+    the main thread.
+
+    The task runs on the QThreadPool, allowing parallel transcription
+    without blocking the GUI thread.
+
+    Signals:
+        done: Emitted when transcription is complete, with a dict containing
+              NPC, StrRef, AudioFile, CSVText, TranscribedText, and SimilarityScore.
     """
 
     done = Signal(dict)
@@ -149,24 +126,30 @@ class TranscribeTask(QRunnable, QObject):
         wav_path: Path,
         strref: int,
         npc_name: str,
-        csv_text: str,
-        patcher_config: Optional[dict],
-        timeout: float,
-        retry_count: int,
-        retry_delay: float,
-    ):
+        text_for_scoring: str,
+    ) -> None:
+        """Initialize a transcription task.
+
+        Args:
+            wav_path: Path to the .wav file to transcribe.
+            strref: String reference ID associated with this audio.
+            npc_name: Name of the NPC this audio belongs to.
+            text_for_scoring: The expected text for similarity scoring.
+        """
         QObject.__init__(self)
         QRunnable.__init__(self)
         self.wav_path = wav_path
         self.strref = strref
         self.npc_name = npc_name
-        self.csv_text = csv_text
-        self.patcher_config = patcher_config
-        self.timeout = timeout
-        self.retry_count = retry_count
-        self.retry_delay = retry_delay
+        self.text_for_scoring = text_for_scoring
 
     def run(self) -> None:
+        """Execute the transcription request.
+
+        Posts the audio file to the Voicebox /transcribe endpoint with retry
+        logic. Computes similarity score between expected and transcribed
+        text, then emits the result via the 'done' signal.
+        """
         url = (
             cfg.BASE_URL.rstrip("/")
             + "/"
@@ -177,13 +160,13 @@ class TranscribeTask(QRunnable, QObject):
         success = False
         last_error = ""
 
-        for attempt in range(self.retry_count + 1):
+        for attempt in range(cfg.SAMPLE_RETRY_COUNT + 1):
             try:
                 with open(self.wav_path, "rb") as f:
                     resp = requests.post(
                         url,
                         files={"file": (self.wav_path.name, f, "audio/wav")},
-                        timeout=self.timeout,
+                        timeout=cfg.SAMPLE_TIMEOUT_SECONDS,
                     )
                 resp.raise_for_status()
                 transcribed_text = resp.json().get("text", "")
@@ -191,21 +174,16 @@ class TranscribeTask(QRunnable, QObject):
                 break
             except Exception as ex:
                 last_error = str(ex)
-                if attempt < self.retry_count:
-                    time.sleep(self.retry_delay)
+                if attempt < cfg.SAMPLE_RETRY_COUNT:
+                    time.sleep(cfg.SAMPLE_RETRY_DELAY)
 
         if not success:
             transcribed_text = f"<ERROR: {last_error}>"
 
-        # Apply the same preprocessing generate_gui.py does before scoring
-        text_for_scoring = self.csv_text
-        if self.patcher_config:
-            text_for_scoring = preprocess_text(text_for_scoring, self.patcher_config)
-
         score = round(
             SequenceMatcher(
                 None,
-                text_for_scoring.strip().lower(),
+                self.text_for_scoring.strip().lower(),
                 transcribed_text.strip().lower(),
             ).ratio() * 100,
             2,
@@ -215,7 +193,7 @@ class TranscribeTask(QRunnable, QObject):
             "NPC": self.npc_name,
             "StrRef": self.strref,
             "AudioFile": self.wav_path.name,
-            "CSVText": self.csv_text,
+            "CSVText": self.text_for_scoring,
             "TranscribedText": transcribed_text,
             "SimilarityScore": score,
         }
@@ -223,29 +201,38 @@ class TranscribeTask(QRunnable, QObject):
         self.done.emit(row)
 
 
-# ============================================================================
-# CheckWorker - orchestrates NPC scan + parallel transcription
-# ============================================================================
-
 class CheckWorker(QObject):
-    """
-    Background worker that walks NPC directories, transcribes samples, and
-    emits progress/results to the GUI via Qt signals.
+    """Background worker that orchestrates NPC scanning and parallel transcription.
 
-    Uses QThreadPool for parallel /transcribe calls (maxConcurrency set from
+    This worker discovers NPC directories, loads the text lookup from CSV,
+    submits transcription tasks to a QThreadPool, tracks progress, and emits
+    results to the GUI via Qt signals. It operates entirely on a background
+    thread to avoid blocking the UI.
+
+    Uses QThreadPool for parallel /transcribe calls (max concurrency set from
     cfg.SAMPLE_CONCURRENCY at construction time).
+
+    Signals:
+        stage: Short status string for the status bar.
+        overall_progress: Dict containing progress metrics (ready, percent,
+            samples_done, samples_total, elapsed, eta_seconds, finish_str).
+        npc_completed: Dict with npc name, samples, worst_score, avg_score,
+            and done flag.
+        finished: Dict with total_npcs and total_samples on completion.
+        failed: Error message string on fatal error.
     """
 
-    # Signals (thread-safe, delivered via Qt::QueuedConnection by default)
-    stage = Signal(str)             # short status for the status bar
-    overall_progress = Signal(dict)  # overall bar update
-    npc_completed = Signal(dict)     # one NPC's results ready
-    finished = Signal(dict)          # entire run complete
-    failed = Signal(str)             # fatal error
+    stage = Signal(str)
+    overall_progress = Signal(dict)
+    npc_completed = Signal(dict)
+    finished = Signal(dict)
+    failed = Signal(str)
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize the worker with thread-safe state and a task pool."""
         super().__init__()
         self._stop_requested = threading.Event()
+        self._lock = threading.Lock()
         self._pool = QThreadPool()
         self._pool.setMaxThreadCount(cfg.SAMPLE_CONCURRENCY)
         self._npc_results: Dict[str, List[dict]] = {}
@@ -253,19 +240,24 @@ class CheckWorker(QObject):
         self._total_samples_done = 0
 
     def request_stop(self) -> None:
-        """Ask the worker to stop after the current NPC."""
+        """Request the worker to stop processing after the current batch."""
         self._stop_requested.set()
 
     def run(self) -> None:
-        """Scan + transcribe all NPC directories on the worker thread."""
-        logger = logging.getLogger("check_gui")
+        """Entry point for the worker thread.
+
+        Runs the full scan-transcribe-finalize pipeline and emits signals
+        for UI updates. Catches all exceptions to emit them via the
+        'failed' signal.
+        """
         try:
-            self._run_impl(logger)
+            self._run_impl()
         except Exception as ex:
             logger.error(f"Fatal error: {ex}")
             self.failed.emit(str(ex))
 
-    def _run_impl(self, logger: logging.Logger) -> None:
+    def _run_impl(self) -> None:
+        """Execute the three-phase workflow: discover, transcribe, finalize."""
         self.stage.emit("Loading CSV lookup...")
         text_lookup = self._load_text_lookup(cfg.CSV_PATH)
 
@@ -281,7 +273,6 @@ class CheckWorker(QObject):
             self.failed.emit(f"OUTPUT_DIR does not exist: {output_dir}")
             return
 
-        # Phase 1: discover all NPC directories and their wav files
         self.stage.emit("Discovering NPC directories...")
         npc_dirs = sorted(p for p in output_dir.iterdir() if p.is_dir())
 
@@ -311,6 +302,8 @@ class CheckWorker(QObject):
                     continue
                 strref = from_base36(match.group(1))
                 csv_text = text_lookup.get(strref, "")
+                if patcher_config:
+                    csv_text = preprocess_text(csv_text, patcher_config)
                 batch.append((wav_file, strref, csv_text))
             if batch:
                 npc_batches[npc_dir.name] = batch
@@ -320,7 +313,6 @@ class CheckWorker(QObject):
             f"Will check {len(npc_batches)} NPCs ({total_samples} total samples)."
         )
 
-        # Phase 2: submit all transcription tasks in parallel
         self.stage.emit(
             f"Transcribing {total_samples} samples across {len(npc_batches)} NPCs..."
         )
@@ -332,29 +324,25 @@ class CheckWorker(QObject):
         for npc_name, batch in npc_batches.items():
             if self._stop_requested.is_set():
                 break
-            self._npc_results[npc_name] = []
-            self._pending_per_npc[npc_name] = 0
+            with self._lock:
+                self._npc_results[npc_name] = []
+                self._pending_per_npc[npc_name] = 0
 
-            for wav_path, strref, csv_text in batch:
+            for wav_path, strref, text_for_scoring in batch:
                 task = TranscribeTask(
                     wav_path=wav_path,
                     strref=strref,
                     npc_name=npc_name,
-                    csv_text=csv_text,
-                    patcher_config=patcher_config,
-                    timeout=cfg.SAMPLE_TIMEOUT_SECONDS,
-                    retry_count=cfg.SAMPLE_RETRY_COUNT,
-                    retry_delay=cfg.SAMPLE_RETRY_DELAY,
+                    text_for_scoring=text_for_scoring,
                 )
-                # QueuedConnection keeps slot_sample_done on the worker thread
                 task.done.connect(
                     self.slot_sample_done,
-                    type=Qt.ConnectionType.QueuedConnection,
+                    type=Qt.ConnectionType.DirectConnection,
                 )
-                self._pending_per_npc[npc_name] += 1
+                with self._lock:
+                    self._pending_per_npc[npc_name] += 1
                 self._pool.start(task)
 
-            # Emit "in progress" placeholder so the UI shows the NPC name immediately
             self.npc_completed.emit({
                 "npc": npc_name,
                 "samples": [],
@@ -363,7 +351,6 @@ class CheckWorker(QObject):
                 "done": False,
             })
 
-        # Phase 3: wait for all tasks to drain
         self.stage.emit("Waiting for transcription to complete...")
         poll_interval = 0.25
         last_overall_emit = 0.0
@@ -373,7 +360,9 @@ class CheckWorker(QObject):
                 time.sleep(1.0)
                 break
             active = self._pool.activeThreadCount()
-            if active == 0 and not any(self._pending_per_npc.values()):
+            with self._lock:
+                all_drained = not any(self._pending_per_npc.values())
+            if active == 0 and all_drained:
                 break
             now = time.time()
             if now - last_overall_emit >= poll_interval:
@@ -384,12 +373,14 @@ class CheckWorker(QObject):
                 last_overall_emit = now
             time.sleep(poll_interval)
 
-        # Phase 4: finalize
         if self._stop_requested.is_set():
             logger.warning("Stop requested - discarding incomplete results.")
 
-        for npc_name in list(self._npc_results.keys()):
-            samples = self._npc_results.get(npc_name, [])
+        with self._lock:
+            npc_names = list(self._npc_results.keys())
+        for npc_name in npc_names:
+            with self._lock:
+                samples = list(self._npc_results.get(npc_name, []))
             if not samples:
                 continue
             scores = [
@@ -411,28 +402,44 @@ class CheckWorker(QObject):
             elapsed=time.time() - start_time,
         )
 
+        with self._lock:
+            total_npcs = len(self._npc_results)
+            total_done = self._total_samples_done
+
         logger.info("=" * 60)
         logger.info("TRANSCRIPTION CHECK COMPLETE")
-        logger.info(f"  NPCs checked : {len(self._npc_results)}")
-        logger.info(f"  Samples done : {self._total_samples_done}")
+        logger.info(f"  NPCs checked : {total_npcs}")
+        logger.info(f"  Samples done : {total_done}")
         logger.info("=" * 60)
 
         self.finished.emit({
-            "total_npcs": len(self._npc_results),
-            "total_samples": self._total_samples_done,
+            "total_npcs": total_npcs,
+            "total_samples": total_done,
         })
 
-    @Slot(dict)
     def slot_sample_done(self, row: dict) -> None:
-        """Called by TranscribeTask.done on the CheckWorker thread."""
-        npc = row["NPC"]
-        self._npc_results.setdefault(npc, []).append(row)
-        pending = self._pending_per_npc.get(npc, 1)
-        self._pending_per_npc[npc] = max(0, pending - 1)
-        self._total_samples_done += 1
+        """Handle a completed transcription task.
 
-        if self._pending_per_npc.get(npc, 0) == 0:
-            samples = self._npc_results.get(npc, [])
+        Called via DirectConnection from the QThreadPool thread that finished
+        the task. Updates thread-safe state and emits npc_completed when
+        all samples for an NPC are done.
+
+        Args:
+            row: Dict containing the transcription result for one sample.
+        """
+        npc = row["NPC"]
+        samples: list = []
+        npc_done = False
+        with self._lock:
+            self._npc_results.setdefault(npc, []).append(row)
+            pending = self._pending_per_npc.get(npc, 1)
+            self._pending_per_npc[npc] = max(0, pending - 1)
+            self._total_samples_done += 1
+            npc_done = self._pending_per_npc.get(npc, 0) == 0
+            if npc_done:
+                samples = list(self._npc_results.get(npc, []))
+
+        if npc_done:
             scores = [
                 s["SimilarityScore"] for s in samples
                 if isinstance(s["SimilarityScore"], (int, float))
@@ -447,8 +454,15 @@ class CheckWorker(QObject):
                 "done": True,
             })
 
-    def _load_text_lookup(self, csv_path) -> Dict[int, str]:
-        """Load StrRef -> Text lookup from CSV."""
+    def _load_text_lookup(self, csv_path: Path) -> Dict[int, str]:
+        """Load the StrRef to text mapping from a CSV file.
+
+        Args:
+            csv_path: Path to the CSV file containing StrRef and Text columns.
+
+        Returns:
+            Dict mapping StrRef (int) to Text (str).
+        """
         lookup: Dict[int, str] = {}
         try:
             with open(csv_path, "r", encoding="utf-8-sig", newline="") as f:
@@ -460,31 +474,34 @@ class CheckWorker(QObject):
                         continue
                     lookup[strref] = row.get("Text", "")
         except FileNotFoundError:
-            logging.getLogger("check_gui").warning(
+            logger.warning(
                 f"CSV not found: {csv_path} - using empty text for scoring."
             )
         return lookup
 
     def _emit_overall_progress(self, total_samples: int, elapsed: float) -> None:
         """Emit an overall_progress dict for the GUI progress bar."""
-        if self._total_samples_done == 0 or elapsed == 0:
+        with self._lock:
+            samples_done = self._total_samples_done
+
+        if samples_done == 0 or elapsed == 0:
             ready = False
             eta_seconds = 0.0
         else:
-            rate = self._total_samples_done / elapsed
-            remaining = total_samples - self._total_samples_done
+            rate = samples_done / elapsed
+            remaining = total_samples - samples_done
             eta_seconds = remaining / rate if rate > 0 else 0.0
             ready = True
 
         percent = (
-            (self._total_samples_done / total_samples * 100)
+            (samples_done / total_samples * 100)
             if total_samples > 0 else 0
         )
 
         self.overall_progress.emit({
             "ready": ready,
             "percent": min(percent, 100.0),
-            "samples_done": self._total_samples_done,
+            "samples_done": samples_done,
             "samples_total": total_samples,
             "elapsed": elapsed,
             "eta_seconds": eta_seconds,
@@ -497,8 +514,22 @@ class CheckWorker(QObject):
 # ============================================================================
 
 class _NumericTableWidgetItem(QTableWidgetItem):
-    """Sorts numerically instead of lexicographically."""
-    def __lt__(self, other):
+    """Table widget item that sorts numerically instead of lexicographically.
+
+    Stores the numeric value in UserRole+1 data and uses it for comparison
+    in __lt__, allowing proper numeric sorting for columns like scores
+    and counts.
+    """
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        """Compare numeric values for sorting.
+
+        Args:
+            other: The item to compare against.
+
+        Returns:
+            True if self's numeric value is less than other's.
+        """
         self_val = self.data(Qt.ItemDataRole.UserRole + 1)
         other_val = (
             other.data(Qt.ItemDataRole.UserRole + 1)
@@ -515,25 +546,36 @@ class _NumericTableWidgetItem(QTableWidgetItem):
 
 class SampleDetailDialog(QDialog):
     """
-    Popup showing one sample's CSV text and transcribed text side-by-side.
+    Dialog showing side-by-side comparison of CSV text and transcribed text.
+
+    Displays one sample's expected text alongside what was transcribed,
+    with a color-coded similarity score header and copy-to-clipboard buttons
+    for each pane.
 
     Features:
-      - Color-coded similarity score header
-      - Two read-only text panes (CSV TEXT | TRANSCRIBED)
-      - Copy-to-clipboard buttons for each pane (with brief "Copied!" flash)
+      - Color-coded similarity score header (Excellent/Good/Poor/Bad)
+      - Two read-only text panes with monospace font
+      - Copy-to-clipboard buttons with "Copied!" feedback
     """
 
-    def __init__(self, row: dict, thresholds: Tuple[float, float, float],
-                 parent=None):
+    def __init__(self, row: dict, parent: Optional[QWidget] = None) -> None:
+        """Initialize the detail dialog.
+
+        Args:
+            row: Dict containing sample data (StrRef, AudioFile, CSVText,
+                 TranscribedText, SimilarityScore).
+            parent: Optional parent widget.
+        """
         super().__init__(parent)
         self.setWindowTitle(f"StrRef {row['StrRef']} - {row['AudioFile']}")
         self.resize(1000, 600)
 
         outer = QVBoxLayout(self)
 
-        # Header with score
         score = row["SimilarityScore"]
-        excellent, good, poor = thresholds
+        excellent = cfg.SIMILARITY_EXCELLENT
+        good = cfg.SIMILARITY_GOOD
+        poor = cfg.SIMILARITY_POOR
         if score >= excellent:
             score_color = "#2ecc71"
             score_label = f"EXCELLENT - {score:.2f}%"
@@ -554,11 +596,9 @@ class SampleDetailDialog(QDialog):
         score_label_widget.setAlignment(Qt.AlignmentFlag.AlignCenter)
         outer.addWidget(score_label_widget)
 
-        # Text panes (horizontal split)
         splitter = QSplitter(Qt.Orientation.Horizontal)
         mono_font = QFont("Consolas", 9)
 
-        # Left: CSV Text
         csv_widget = QWidget()
         csv_layout = QVBoxLayout(csv_widget)
         csv_layout.setContentsMargins(0, 0, 0, 0)
@@ -577,7 +617,6 @@ class SampleDetailDialog(QDialog):
         )
         csv_layout.addWidget(self.csv_copy_btn)
 
-        # Right: Transcribed Text
         trans_widget = QWidget()
         trans_layout = QVBoxLayout(trans_widget)
         trans_layout.setContentsMargins(0, 0, 0, 0)
@@ -602,7 +641,6 @@ class SampleDetailDialog(QDialog):
         splitter.setStretchFactor(1, 1)
         outer.addWidget(splitter, stretch=1)
 
-        # Close button
         btn_row = QHBoxLayout()
         btn_row.addStretch()
         close_btn = QPushButton("Close")
@@ -612,6 +650,12 @@ class SampleDetailDialog(QDialog):
         outer.addLayout(btn_row)
 
     def _copy_to_clipboard(self, text: str, btn: QPushButton) -> None:
+        """Copy text to clipboard and show temporary "Copied!" feedback.
+
+        Args:
+            text: The text to copy to clipboard.
+            btn: The button to modify for visual feedback.
+        """
         clipboard = QApplication.clipboard()
         clipboard.setText(text)
         orig = btn.text()
@@ -620,6 +664,12 @@ class SampleDetailDialog(QDialog):
         QTimer.singleShot(1500, lambda: self._restore_button(btn, orig))
 
     def _restore_button(self, btn: QPushButton, original_text: str) -> None:
+        """Restore button text and enabled state after clipboard copy.
+
+        Args:
+            btn: The button to restore.
+            original_text: The original button text to restore.
+        """
         btn.setText(original_text)
         btn.setEnabled(True)
 
@@ -630,32 +680,30 @@ class SampleDetailDialog(QDialog):
 
 class CheckWindow(QMainWindow):
     """
-    Main window for the Transcription Check GUI.
+    Main window for the Transcription Check GUI application.
 
-    Layout (top to bottom):
-      1. Toolbar: Start / Stop / Export CSV + summary stats label
-      2. Overall progress bar + ETA label
-      3. NPC results table (one row per NPC, sorted by worst score)
-      4. Detail panel (shows samples for the selected NPC)
-      5. Log panel (scrolling text)
-      6. Status bar
+    Provides a complete interface for running transcription quality checks:
+      1. Toolbar with Start/Stop/Export controls and stats display
+      2. Overall progress bar with ETA
+      3. NPC results table sorted by worst similarity score
+      4. Detail panel showing samples for selected NPC
+      5. Status bar for short status messages
+
+    The check runs on a background thread, with real-time updates
+    as each NPC completes.
     """
 
-    def __init__(self):
+    def __init__(self) -> None:
+        """Initialize the main window and build the UI."""
         super().__init__()
         self.setWindowTitle("Transcription Check")
         self.resize(1100, 850)
-
-        self.log_signal = LogSignal()
-        self.log_signal.message.connect(self._append_log)
-
-        global logger
-        logger = log_initialize(self.log_signal)
 
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[CheckWorker] = None
         self._all_npc_data: Dict[str, dict] = {}
         self._selected_npc: Optional[str] = None
+        self._npc_row_index: Dict[str, int] = {}
 
         self._build_ui()
         logger.info("Transcription Check ready.")
@@ -665,6 +713,7 @@ class CheckWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
+        """Construct all UI elements and lay them out in the main window."""
         central = QWidget()
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
@@ -721,7 +770,7 @@ class CheckWindow(QMainWindow):
         self.npc_table.itemSelectionChanged.connect(self._on_npc_selected)
         self.npc_table.setSortingEnabled(True)
         tg_layout.addWidget(self.npc_table)
-        layout.addWidget(tg, stretch=2)
+        layout.addWidget(tg, stretch=3)
 
         # Detail panel
         dg = QGroupBox("Sample Details")
@@ -753,44 +802,29 @@ class CheckWindow(QMainWindow):
         self.detail_table.setColumnWidth(4, 300)
         self.detail_table.hide()
         dl.addWidget(self.detail_table)
-        layout.addWidget(dg, stretch=1)
-
-        # Log panel
-        lg = QGroupBox("Log")
-        lg_layout = QVBoxLayout(lg)
-        self.log_view = QTextEdit()
-        self.log_view.setReadOnly(True)
-        self.log_view.setFont(QFont("Consolas", 9))
-        lg_layout.addWidget(self.log_view)
-        layout.addWidget(lg, stretch=1)
+        layout.addWidget(dg, stretch=3)
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready", 3000)
-
-    # ------------------------------------------------------------------
-    # Log panel
-    # ------------------------------------------------------------------
-
-    def _append_log(self, message: str, levelno: int) -> None:
-        color = {
-            logging.WARNING: QColor("#c98a1c"),
-            logging.ERROR: QColor("#d64545"),
-        }.get(levelno, self.log_view.palette().text().color())
-        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
-        for line in message.split("\n"):
-            self.log_view.setTextColor(color)
-            self.log_view.append(line)
-        self.log_view.moveCursor(QTextCursor.MoveOperation.End)
 
     # ------------------------------------------------------------------
     # Run control
     # ------------------------------------------------------------------
 
     def _start(self) -> None:
-        """Start the check on a background thread."""
-        self.log_view.clear()
+        """Start the check on a background thread.
+
+        Initializes state, creates the worker and its thread, connects
+        signals, and begins processing.
+        """
         self._all_npc_data.clear()
+        self._npc_row_index.clear()
         self._selected_npc = None
+        # Sorting re-shuffles rows on every single insert/update, which both
+        # invalidates the row-index cache and gets expensive with hundreds+
+        # of NPCs updating live. Keep it off during the run; re-enable and
+        # sort once at the end.
+        self.npc_table.setSortingEnabled(False)
         self.npc_table.setRowCount(0)
         self.detail_table.setRowCount(0)
         self.detail_table.hide()
@@ -819,6 +853,7 @@ class CheckWindow(QMainWindow):
         self._worker_thread.start()
 
     def _stop(self) -> None:
+        """Request the worker to stop after the current batch."""
         if self._worker:
             self._worker.request_stop()
             self.stop_btn.setEnabled(False)
@@ -876,10 +911,15 @@ class CheckWindow(QMainWindow):
         self.export_btn.setEnabled(
             bool(self._all_npc_data) and stats["total_samples"] > 0)
         self.statusBar().showMessage("Check complete.", 5000)
+        # Row order was frozen (insertion order) during the run to keep the
+        # row-index cache valid; sort once now, worst score first.
+        self.npc_table.setSortingEnabled(True)
+        self.npc_table.sortItems(1, Qt.SortOrder.AscendingOrder)
 
     def _on_failed(self, message: str) -> None:
         self.statusBar().showMessage(f"Failed: {message}", 8000)
         self.overall_label.setText(f"Failed: {message}")
+        self.npc_table.setSortingEnabled(True)
 
     # ------------------------------------------------------------------
     # NPC table helpers
@@ -888,6 +928,7 @@ class CheckWindow(QMainWindow):
     def _append_npc_row(self, npc_data: dict) -> int:
         row = self.npc_table.rowCount()
         self.npc_table.insertRow(row)
+        self._npc_row_index[npc_data["npc"]] = row
         self._populate_npc_row(row, npc_data)
         return row
 
@@ -924,13 +965,21 @@ class CheckWindow(QMainWindow):
         self._apply_status_color(si, worst)
         self.npc_table.setItem(row, 4, si)
 
-        self._apply_row_background(row, worst)
-
     def _find_npc_row(self, npc_name: str) -> Optional[int]:
-        for row in range(self.npc_table.rowCount()):
+        # O(1) lookup via cache instead of scanning the table. This matters
+        # once there are hundreds/thousands of NPC rows (see cfg batch size).
+        row = self._npc_row_index.get(npc_name)
+        if row is not None and 0 <= row < self.npc_table.rowCount():
             item = self.npc_table.item(row, 0)
             if item and item.text() == npc_name:
                 return row
+        # Cache miss (e.g. row order changed) - fall back to a scan and
+        # repair the cache so future lookups are O(1) again.
+        for r in range(self.npc_table.rowCount()):
+            item = self.npc_table.item(r, 0)
+            if item and item.text() == npc_name:
+                self._npc_row_index[npc_name] = r
+                return r
         return None
 
     def _apply_status_color(self, item: QTableWidgetItem, worst: Optional[float]) -> None:
@@ -949,22 +998,6 @@ class CheckWindow(QMainWindow):
         else:
             item.setText("Bad")
             item.setForeground(QColor("#e74c3c"))
-
-    def _apply_row_background(self, row: int, worst: Optional[float]) -> None:
-        if worst is None:
-            return
-        if worst >= cfg.SIMILARITY_EXCELLENT:
-            color = QColor("#d5f5e3")
-        elif worst >= cfg.SIMILARITY_GOOD:
-            color = QColor("#fef9e7")
-        elif worst >= cfg.SIMILARITY_POOR:
-            color = QColor("#fdebd0")
-        else:
-            color = QColor("#fdedec")
-        for col in range(self.npc_table.columnCount()):
-            cell = self.npc_table.item(row, col)
-            if cell:
-                cell.setBackground(color)
 
     def _update_stats_label(self) -> None:
         all_scores = [
@@ -1013,6 +1046,13 @@ class CheckWindow(QMainWindow):
 
         self.detail_placeholder.hide()
         self.detail_table.show()
+        # Sort by score, lowest first (errors float to the end)
+        samples = sorted(
+            samples,
+            key=lambda s: s["SimilarityScore"]
+            if isinstance(s["SimilarityScore"], (int, float))
+            else float("inf"),
+        )
         self.detail_table.setRowCount(len(samples))
 
         for row, sample in enumerate(samples):
@@ -1068,12 +1108,7 @@ class CheckWindow(QMainWindow):
         row_idx = item.row()
         if row_idx >= len(samples):
             return
-        thresholds = (
-            cfg.SIMILARITY_EXCELLENT,
-            cfg.SIMILARITY_GOOD,
-            cfg.SIMILARITY_POOR,
-        )
-        dlg = SampleDetailDialog(samples[row_idx], thresholds, self)
+        dlg = SampleDetailDialog(samples[row_idx], self)
         dlg.exec()
 
     # ------------------------------------------------------------------
