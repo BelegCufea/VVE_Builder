@@ -1,4 +1,5 @@
 import csv
+import json
 import random
 import re
 from pathlib import Path
@@ -55,6 +56,85 @@ def load_text_lookup(csv_path: str | Path) -> dict[int, str]:
     return lookup
 
 
+def load_patcher_config(config_path: str) -> dict:
+    """
+    Load the patcher configuration from a JSON file.
+
+    Args:
+        config_path: Path to the JSON configuration file.
+
+    Returns:
+        The loaded configuration object.
+
+    Raises:
+        FileNotFoundError: If the configuration file doesn't exist.
+        json.JSONDecodeError: If the file contains invalid JSON.
+    """
+    with open(config_path, 'r', encoding='utf-8') as f:
+        return json.load(f)
+
+
+def preprocess_text(text: str, patcher_config: dict) -> str:
+    """
+    Apply comprehensive text transformations for TTS preparation.
+
+    Processes the input text through several transformation stages:
+        1. Identity tokens: Replace <CHARNAME>, <GABBER>, <RACE>, <PRO_RACE>
+        2. Gender tokens: Replace <HE>, <SHE>, <HIS>, <HER>, <HIM>, etc.
+        3. Phonetic rules: Apply regex-based substitutions
+        4. Token cleanup: Remove any remaining <...> tokens
+
+    Args:
+        text: The raw input text from the CSV file.
+        patcher_config: Loaded patcher configuration.
+
+    Returns:
+        The preprocessed text, ready for TTS generation.
+    """
+    pc_name = patcher_config.get("pcName", "CHARNAME")
+    pc_race = patcher_config.get("pcRace", "RACE")
+    identity_tokens = patcher_config.get("identityTokens", [])
+
+    token_map = {}
+    for token in identity_tokens:
+        if token == "CHARNAME" or token == "GABBER":
+            token_map[token] = pc_name
+        elif token == "PRO_RACE" or token == "RACE":
+            token_map[token] = pc_race
+    for token, replacement in token_map.items():
+        text = text.replace(f"<{token}>", replacement)
+
+    pc_gender = patcher_config.get("pcGender", "neutral")
+    gender_tokens = patcher_config.get("genderTokens", {})
+    for token, forms in gender_tokens.items():
+        replacement = forms.get(pc_gender, "")
+        if replacement:
+            text = text.replace(f"<{token}>", replacement)
+
+    phonetic_rules = patcher_config.get("phoneticRules", [])
+    for rule in phonetic_rules:
+        pattern = rule.get("pattern")
+        replacement_template = rule.get("replacement", "")
+        try:
+            compiled_pattern = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
+            if replacement_template and '$' in replacement_template:
+                def repl_func(match, _template=replacement_template):
+                    """Expand $1, $2, ... placeholders using the regex match groups."""
+                    result = _template
+                    for i in range(1, match.lastindex + 1 if match.lastindex else 0):
+                        group_value = match.group(i) or ''
+                        result = result.replace(f'${i}', group_value)
+                    return result
+                text = compiled_pattern.sub(repl_func, text)
+            else:
+                text = compiled_pattern.sub(replacement_template, text)
+        except re.error:
+            continue
+
+    text = re.sub(r'<[^>]+>', '', text)
+    return text
+
+
 def transcribe_audio(audio_path: Path) -> str:
     """Send audio to VoiceBox and return transcription."""
 
@@ -101,6 +181,13 @@ def collect_samples() -> list:
 
     text_lookup = load_text_lookup(cfg.CSV_PATH)
 
+    # Load patcher config for text preprocessing (mirrors generate_gui.py behavior)
+    patcher_config = None
+    try:
+        patcher_config = load_patcher_config(cfg.PATCHER_CONFIG_PATH)
+    except Exception:
+        pass  # gracefully fall back to None → text used raw
+
     pattern = filename_re()
 
     results = []
@@ -136,6 +223,10 @@ def collect_samples() -> list:
             strref = from_base36(match.group(1))
 
             csv_text = text_lookup.get(strref, "")
+            
+            # Apply text preprocessing (same as generate_gui.py does before generation)
+            if patcher_config:
+                csv_text = preprocess_text(csv_text, patcher_config)
 
             try:
                 transcribed_text = transcribe_audio(wav_file)
