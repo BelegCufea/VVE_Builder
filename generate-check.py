@@ -1,41 +1,13 @@
 import csv
 import json
 import random
-import re
 from pathlib import Path
 from difflib import SequenceMatcher
 
 import requests
 
 from appconfig import cfg
-
-
-BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-
-def from_base36(s: str) -> int:
-    """Convert a base36 string back to an integer StrRef."""
-    s = s.upper()
-
-    value = 0
-    for ch in s:
-        value = value * 36 + BASE36_ALPHABET.index(ch)
-
-    return value
-
-
-def filename_re() -> re.Pattern:
-    """
-    Matches filenames like:
-        TS000ABC.WAV
-
-    where TS is cfg.FILENAME_PREFIX and 000ABC is the
-    base36-encoded StrRef.
-    """
-    return re.compile(
-        re.escape(cfg.FILENAME_PREFIX) + r"([0-9A-Za-z]{6})\.WAV$",
-        re.IGNORECASE,
-    )
+from utils import from_base36, filename_re, load_patcher_config, preprocess_text
 
 
 def load_text_lookup(csv_path: str | Path) -> dict[int, str]:
@@ -54,85 +26,6 @@ def load_text_lookup(csv_path: str | Path) -> dict[int, str]:
             lookup[strref] = row.get("Text", "")
 
     return lookup
-
-
-def load_patcher_config(config_path: str) -> dict:
-    """
-    Load the patcher configuration from a JSON file.
-
-    Args:
-        config_path: Path to the JSON configuration file.
-
-    Returns:
-        The loaded configuration object.
-
-    Raises:
-        FileNotFoundError: If the configuration file doesn't exist.
-        json.JSONDecodeError: If the file contains invalid JSON.
-    """
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-
-def preprocess_text(text: str, patcher_config: dict) -> str:
-    """
-    Apply comprehensive text transformations for TTS preparation.
-
-    Processes the input text through several transformation stages:
-        1. Identity tokens: Replace <CHARNAME>, <GABBER>, <RACE>, <PRO_RACE>
-        2. Gender tokens: Replace <HE>, <SHE>, <HIS>, <HER>, <HIM>, etc.
-        3. Phonetic rules: Apply regex-based substitutions
-        4. Token cleanup: Remove any remaining <...> tokens
-
-    Args:
-        text: The raw input text from the CSV file.
-        patcher_config: Loaded patcher configuration.
-
-    Returns:
-        The preprocessed text, ready for TTS generation.
-    """
-    pc_name = patcher_config.get("pcName", "CHARNAME")
-    pc_race = patcher_config.get("pcRace", "RACE")
-    identity_tokens = patcher_config.get("identityTokens", [])
-
-    token_map = {}
-    for token in identity_tokens:
-        if token == "CHARNAME" or token == "GABBER":
-            token_map[token] = pc_name
-        elif token == "PRO_RACE" or token == "RACE":
-            token_map[token] = pc_race
-    for token, replacement in token_map.items():
-        text = text.replace(f"<{token}>", replacement)
-
-    pc_gender = patcher_config.get("pcGender", "neutral")
-    gender_tokens = patcher_config.get("genderTokens", {})
-    for token, forms in gender_tokens.items():
-        replacement = forms.get(pc_gender, "")
-        if replacement:
-            text = text.replace(f"<{token}>", replacement)
-
-    phonetic_rules = patcher_config.get("phoneticRules", [])
-    for rule in phonetic_rules:
-        pattern = rule.get("pattern")
-        replacement_template = rule.get("replacement", "")
-        try:
-            compiled_pattern = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
-            if replacement_template and '$' in replacement_template:
-                def repl_func(match, _template=replacement_template):
-                    """Expand $1, $2, ... placeholders using the regex match groups."""
-                    result = _template
-                    for i in range(1, match.lastindex + 1 if match.lastindex else 0):
-                        group_value = match.group(i) or ''
-                        result = result.replace(f'${i}', group_value)
-                    return result
-                text = compiled_pattern.sub(repl_func, text)
-            else:
-                text = compiled_pattern.sub(replacement_template, text)
-        except re.error:
-            continue
-
-    text = re.sub(r'<[^>]+>', '', text)
-    return text
 
 
 def transcribe_audio(audio_path: Path) -> str:

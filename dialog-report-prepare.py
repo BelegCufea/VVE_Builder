@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from appconfig import cfg
+from utils import load_patcher_config, iter_files_ci
 
 # ==================== CONFIGURATION ====================
 
@@ -214,18 +215,8 @@ def parse_cre(path: Path) -> CreInfo | None:
     return CreInfo(path.stem.upper(), long_name_strref, short_name_strref, dialog_resref, gender_byte)
 
 
-def iter_files_ci(directory: Path, extension: str):
-    """Case-insensitive glob for a given extension, e.g. 'cre' or 'd'."""
-    pattern = "".join(f"[{c.lower()}{c.upper()}]" for c in extension)
-    return directory.glob(f"*.{pattern}")
-
-
 # ==================== STEP 5: build lookup tables ====================
 STRIP_COLOR_RE = re.compile(r"\^0x[0-9a-fA-F]{8}(.*?)\^-")
-
-def load_patcher_config(config_path: Path) -> dict:
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
 
 def build_dlg_to_cre_info(
     extract_dir: Path, 

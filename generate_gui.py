@@ -32,6 +32,15 @@ from runstats import Regression
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from utils import (
+    CaseInsensitiveDict,
+    get_canonical_key,
+    to_base36,
+    load_patcher_config,
+    preprocess_text,
+    convert_to_ogg,
+)
+
 from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt, Slot, QMetaObject
 from PySide6.QtGui import QFont, QTextCursor, QColor
 from PySide6.QtWidgets import (
@@ -45,174 +54,6 @@ from PySide6.QtWidgets import (
 # ============================================================================
 # Logging
 # ============================================================================
-
-class CaseInsensitiveDict(dict):
-    """
-    A dictionary with case-insensitive string keys while preserving original key casing.
-
-    Stores key-value pairs where string keys can be accessed, retrieved, checked,
-    or deleted with any letter casing. Tracks the canonical (original) casing
-    of keys for iteration and representation.
-
-    Type parameters:
-        V: The value type stored in the dictionary.
-    """
-
-    def __init__(self, *args, **kwargs):
-        """
-        Initialize the case-insensitive dictionary.
-
-        Args:
-            *args: Optional positional arguments (mapping or iterable of key-value pairs).
-            **kwargs: Optional keyword arguments to populate the dictionary.
-        """
-        self._keys: Dict[str, str] = {}
-        super().__init__()
-        if args or kwargs:
-            self.update(*args, **kwargs)
-
-    def __setitem__(self, key, value):
-        """
-        Set self[key] to value with case-insensitive tracking for string keys.
-
-        Args:
-            key: The dictionary key.
-            value: The value to associate with the key.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            old_canonical = self._keys.get(lower)
-            if old_canonical is not None and old_canonical != key:
-                super().pop(old_canonical, None)
-            self._keys[lower] = key
-            super().__setitem__(key, value)
-        else:
-            super().__setitem__(key, value)
-
-    def __getitem__(self, key):
-        """
-        Get self[key] using case-insensitive comparison for string keys.
-
-        Args:
-            key: The key to look up.
-
-        Returns:
-            The value associated with key.
-
-        Raises:
-            KeyError: If key is not present in the dictionary.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            if lower in self._keys:
-                return super().__getitem__(self._keys[lower])
-        return super().__getitem__(key)
-
-    def __contains__(self, key):
-        """
-        Check if key is present using case-insensitive comparison for string keys.
-
-        Args:
-            key: The key to check.
-
-        Returns:
-            bool: True if key is found, False otherwise.
-        """
-        if isinstance(key, str):
-            return key.lower() in self._keys
-        return super().__contains__(key)
-
-    def get(self, key, default=None):
-        """
-        Return the value for key if key is in the dictionary, else default.
-
-        Args:
-            key: The key to search for.
-            default: Value to return if key is not found (defaults to None).
-
-        Returns:
-            The value for key or default.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            if lower in self._keys:
-                return super().get(self._keys[lower], default)
-        return super().get(key, default)
-
-    def pop(self, key, *args):
-        """
-        Remove specified key and return the corresponding value.
-
-        Args:
-            key: The key to remove (case-insensitive for string keys).
-            *args: Optional default value if key is not found.
-
-        Returns:
-            The removed value, or default if provided and key is missing.
-
-        Raises:
-            KeyError: If key is not found and no default is provided.
-        """
-        if isinstance(key, str):
-            lower = key.lower()
-            if lower in self._keys:
-                canonical = self._keys.pop(lower)
-                return super().pop(canonical, *args)
-        return super().pop(key, *args)
-
-    def get_canonical_key(self, key: str) -> str:
-        """
-        Get the original (canonical) casing used when key was stored.
-
-        Args:
-            key: The key to check.
-
-        Returns:
-            The canonical key string if stored, otherwise key unchanged.
-        """
-        if isinstance(key, str):
-            return self._keys.get(key.lower(), key)
-        return key
-
-    def update(self, *args, **kwargs):
-        """
-        Update the dictionary with key/value pairs from mapping or iterable.
-
-        Args:
-            *args: Positional argument which can be another mapping or iterable of pairs.
-            **kwargs: Additional key/value pairs passed as keyword arguments.
-        """
-        if args:
-            if hasattr(args[0], "items"):
-                for k, v in args[0].items():
-                    self[k] = v
-            elif hasattr(args[0], "keys"):
-                for k in args[0]:
-                    self[k] = args[0][k]
-            else:
-                for k, v in args[0]:
-                    self[k] = v
-        for k, v in kwargs.items():
-            self[k] = v
-
-
-def get_canonical_key(mapping: dict, key: str) -> str:
-    """
-    Retrieve the canonical key from a mapping or return the key as-is.
-
-    Args:
-        mapping: Mapping object (e.g. CaseInsensitiveDict or standard dict).
-        key: The key to look up.
-
-    Returns:
-        The canonical key if available, else key.
-    """
-    get_key = getattr(mapping, "get_canonical_key", None)
-    if callable(get_key):
-        canonical_key = get_key(key)
-        return canonical_key if isinstance(canonical_key, str) else key
-    return key
-
 
 class LogSignal(QObject):
     """
@@ -854,31 +695,6 @@ def sanitize_filename(name: str) -> str:
     return name
 
 
-def to_base36(value: int) -> str:
-    """
-    Convert a non-negative integer to its base36 representation.
-
-    Args:
-        value: Non-negative integer to convert.
-
-    Returns:
-        Base36 representation of the value.
-
-    Raises:
-        ValueError: If value is negative.
-    """
-    if value < 0:
-        raise ValueError(f"Value must be non-negative, got {value}")
-    if value == 0:
-        return "0"
-    alphabet = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-    result = ""
-    while value > 0:
-        result = alphabet[value % 36] + result
-        value //= 36
-    return result
-
-
 def generate_resref(strref: Union[int, str], prefix: str = "TS") -> str:
     """
     Generate an 8-character resref from a StrRef number.
@@ -907,7 +723,7 @@ def generate_resref(strref: Union[int, str], prefix: str = "TS") -> str:
         strref_int = strref
     if strref_int < 0:
         raise ValueError(f"StrRef must be non-negative, got {strref_int}")
-    suffix = to_base36(strref_int).rjust(6, '0')
+    suffix = to_base36(strref_int, width=6)
     return (prefix + suffix).upper()
 
 
@@ -989,7 +805,7 @@ def resolve_voice_substitution(npc_name: Optional[str], gender: Optional[str] = 
 
 
 def get_voice_profile_name(npc_name: Optional[str], gender: Optional[str] = None,
-                           profile_map: Optional[dict] = None, sysname: Optional[str] = None,
+                           profile_map: Optional[CaseInsensitiveDict] = None, sysname: Optional[str] = None,
                            substitutions: Optional[Dict[str, str]] = None,
                            substitutions_gender: Optional[Dict[str, str]] = None,
                            substitutions_sysname: Optional[Dict[str, str]] = None) -> Optional[str]:
@@ -1384,6 +1200,9 @@ def sync_profiles(substitutions: Optional[Dict[str, str]] = None,
             time.sleep(cfg.PROFILE_SYNC_RETRY_DELAY)
 
             logger.info(f"  Rebuilding profile: {canonical_name}...")
+            if not canonical_name:
+                failed.append(voice_name)
+                continue
             zip_path = create_profile_package(canonical_name, available[voice_name], cfg.PROFILE_PACKAGES_DIR)
             if not zip_path:
                 failed.append(voice_name)
@@ -1400,6 +1219,9 @@ def sync_profiles(substitutions: Optional[Dict[str, str]] = None,
         logger.info(f"🧩 Composing and importing {len(composable)} profile(s) from {cfg.VOICES_DIR}/...")
         for voice_name in composable:
             canonical_name = get_canonical_key(available, voice_name)
+            if not canonical_name:
+                failed.append(voice_name)
+                continue
             zip_path = create_profile_package(canonical_name, available[voice_name], cfg.PROFILE_PACKAGES_DIR)
             if not zip_path:
                 failed.append(voice_name)
@@ -1693,121 +1515,6 @@ def download_audio(gen_id: str, output_path: str) -> None:
 # Text Processing
 # ============================================================================
 
-def load_patcher_config(config_path: str) -> dict:
-    """
-    Load the patcher configuration from a JSON file.
-
-    The patcher config contains text transformation rules including:
-    - Identity token mappings (e.g., <CHARNAME> -> actual character name)
-    - Gender token variations (e.g., <HE> -> "he", "she", or "they")
-    - Phonetic substitution rules for improved TTS pronunciation
-
-    Args:
-        config_path: Path to the JSON configuration file.
-
-    Returns:
-        The loaded configuration object.
-
-    Raises:
-        FileNotFoundError: If the configuration file doesn't exist.
-        json.JSONDecodeError: If the file contains invalid JSON.
-    """
-    with open(config_path, 'r', encoding='utf-8') as f:
-        return json.load(f)
-
-
-def preprocess_text(text: str, patcher_config: dict) -> str:
-    """
-    Apply comprehensive text transformations for TTS preparation.
-
-    Processes the input text through several transformation stages:
-        1. Identity tokens: Replace <CHARNAME>, <GABBER>, <RACE>, <PRO_RACE>
-        2. Gender tokens: Replace <HE>, <SHE>, <HIS>, <HER>, <HIM>, etc.
-        3. Phonetic rules: Apply regex-based substitutions
-        4. Token cleanup: Remove any remaining <...> tokens
-
-    Args:
-        text: The raw input text from the CSV file.
-        patcher_config: Loaded patcher configuration.
-
-    Returns:
-        The preprocessed text, ready for TTS generation.
-    """
-    pc_name = patcher_config.get("pcName", "CHARNAME")
-    pc_race = patcher_config.get("pcRace", "RACE")
-    identity_tokens = patcher_config.get("identityTokens", [])
-
-    token_map = {}
-    for token in identity_tokens:
-        if token == "CHARNAME" or token == "GABBER":
-            token_map[token] = pc_name
-        elif token == "PRO_RACE" or token == "RACE":
-            token_map[token] = pc_race
-    for token, replacement in token_map.items():
-        text = text.replace(f"<{token}>", replacement)
-
-    pc_gender = patcher_config.get("pcGender", "neutral")
-    gender_tokens = patcher_config.get("genderTokens", {})
-    for token, forms in gender_tokens.items():
-        replacement = forms.get(pc_gender, "")
-        if replacement:
-            text = text.replace(f"<{token}>", replacement)
-
-    phonetic_rules = patcher_config.get("phoneticRules", [])
-    for rule in phonetic_rules:
-        pattern = rule.get("pattern")
-        replacement_template = rule.get("replacement", "")
-        try:
-            compiled_pattern = re.compile(pattern, flags=re.IGNORECASE | re.MULTILINE)
-            if replacement_template and '$' in replacement_template:
-                def repl_func(match, _template=replacement_template):
-                    """Expand $1, $2, ... placeholders using the regex match groups."""
-                    result = _template
-                    for i in range(1, match.lastindex + 1 if match.lastindex else 0):
-                        group_value = match.group(i) or ''
-                        result = result.replace(f'${i}', group_value)
-                    return result
-                text = compiled_pattern.sub(repl_func, text)
-            else:
-                text = compiled_pattern.sub(replacement_template, text)
-        except re.error:
-            continue
-
-    text = re.sub(r'<[^>]+>', '', text)
-    return text
-
-
-# ============================================================================
-# Audio Processing
-# ============================================================================
-
-def convert_to_ogg(input_path: str, output_path: Optional[str] = None, quality: int = 2) -> None:
-    """
-    Convert an audio file to Ogg Vorbis format using ffmpeg.
-
-    Uses ffmpeg to convert audio to the Ogg Vorbis codec with libvorbis.
-
-    Args:
-        input_path: Path to the source audio file (typically WAV).
-        output_path: Path for the output file. If None, overwrites the input file.
-        quality: libvorbis quality scale from 0 (lowest) to 10 (highest). Defaults to 2.
-
-    Raises:
-        subprocess.CalledProcessError: If ffmpeg fails to convert the file.
-        FileNotFoundError: If ffmpeg is not installed or not in PATH.
-    """
-    if output_path is None:
-        output_path = input_path
-
-    cmd = ['ffmpeg', '-y', '-i', input_path, '-c:a', 'libvorbis',
-           '-qscale:a', str(quality), '-f', 'ogg', output_path]
-
-    try:
-        subprocess.run(cmd, check=True, capture_output=True)
-    except subprocess.CalledProcessError as e:
-        logger.error(f"ffmpeg stderr:\n{e.stderr.decode('utf-8', errors='ignore') if isinstance(e.stderr, bytes) else e.stderr}")
-        raise
-
 
 # ============================================================================
 # CSV Processing
@@ -1917,7 +1624,7 @@ def scan_csv_for_npc_targets() -> dict:
     return npc_data
 
 
-def filter_and_sort_rows(selected_rows: list, profile_map: dict) -> list:
+def filter_and_sort_rows(selected_rows: list, profile_map: CaseInsensitiveDict) -> list:
     """
     Filter out rows with missing voice profiles and sort for optimal processing.
 
@@ -2022,7 +1729,7 @@ def iter_filtered_csv_rows(scanning_npc_list: bool = False) -> Iterator[Tuple[st
 
 
 def load_and_filter_csv(patcher_config: Optional[dict], generation_memory: dict,
-                        profile_map: Optional[dict] = None,
+                        profile_map: Optional[CaseInsensitiveDict] = None,
                         substitutions: Optional[Dict[str, str]] = None,
                         substitutions_gender: Optional[Dict[str, str]] = None,
                         substitutions_sysname: Optional[Dict[str, str]] = None) -> Tuple[List[tuple], dict]:
@@ -2579,7 +2286,8 @@ class GenerationWorker(QObject):
                                 "percent": 100, "elapsed": elapsed, "estimated": estimated_sec,
                                 "timeout": timeout_sec, "status": "Converting to OGG..."
                             })
-                            convert_to_ogg(temp_path, output_path, cfg.OGG_QUALITY)
+                            if not convert_to_ogg(temp_path, output_path, cfg.OGG_QUALITY):
+                                raise RuntimeError(f"OGG conversion failed for {filename}")
                             os.remove(temp_path)
                         else:
                             os.rename(temp_path, output_path)

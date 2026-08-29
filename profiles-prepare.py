@@ -16,6 +16,7 @@ import shutil
 import logging
 
 from appconfig import cfg
+from utils import setup_logging
 
 
 # Ensure UTF-8 output on Windows
@@ -23,20 +24,8 @@ if sys.platform == 'win32':
     sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding='utf-8')
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
-# Setup logging - log to both console and file
-log_dir = Path(cfg.LOG_DIR)
-log_dir.mkdir(parents=True, exist_ok=True)
-log_file = log_dir / f"{Path(__file__).stem}.log"
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S',
-    handlers=[
-        logging.FileHandler(log_file, encoding='utf-8'),
-        logging.StreamHandler()
-    ]
-)
-logger = logging.getLogger(__name__)
+# Setup logging
+logger = setup_logging(__name__)
 
 
 @dataclass

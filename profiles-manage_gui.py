@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from appconfig import cfg
+from utils import setup_logging, convert_to_ogg
 
 import pandas as pd
 from PySide6.QtCore import Qt, QUrl, QTimer
@@ -44,70 +45,7 @@ from PySide6.QtGui import QColor, QCursor
 # Logging Setup
 # ============================================================================
 
-# Ensure log directory exists
-log_dir = Path(cfg.LOG_DIR)
-log_dir.mkdir(parents=True, exist_ok=True)
-log_file = log_dir / f"{Path(__file__).stem}.log"
-
-# Configure logging to both file and console
-logger = logging.getLogger(__name__)
-logger.setLevel(logging.DEBUG)
-
-file_handler = logging.FileHandler(log_file, encoding='utf-8')
-file_handler.setLevel(logging.DEBUG)
-file_handler.setFormatter(logging.Formatter(fmt='%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'))
-
-stream_handler = logging.StreamHandler()
-stream_handler.setLevel(logging.ERROR) 
-stream_handler.setFormatter(logging.Formatter('%(message)s'))
-
-if not logger.handlers:
-    logger.addHandler(file_handler)
-    logger.addHandler(stream_handler)
-
-logger.propagate = False
-
-
-# ============================================================================
-# Audio Processing Functions
-# ============================================================================
-
-def convert_to_ogg(input_path: Path, output_path: Path, quality: Optional[int] = None) -> bool:
-    """
-    Convert audio file to Ogg Vorbis format using ffmpeg.
-    
-    Args:
-        input_path: Path to input audio file
-        output_path: Path to output Ogg file (will be overwritten if exists)
-        quality: Vorbis quality (0-10, 4 is good quality/size balance).
-            Defaults to the current cfg.OGG_QUALITY if not given.
-    
-    Returns:
-        bool: True if conversion succeeded, False otherwise
-    """
-    if quality is None:
-        quality = cfg.OGG_QUALITY
-    cmd = [
-        'ffmpeg',
-        '-y',                      # Overwrite output files
-        '-i', str(input_path),     # Input file
-        '-c:a', 'libvorbis',       # Use libvorbis codec
-        '-qscale:a', str(quality), # Quality setting
-        '-f', 'ogg',               # Force Ogg container format
-        str(output_path)
-    ]
-    
-    try:
-        logger.debug(f"Converting: {input_path} -> {output_path}")
-        result = subprocess.run(cmd, check=True, capture_output=True, text=True)
-        logger.debug(f"Conversion successful")
-        return True
-    except subprocess.CalledProcessError as e:
-        logger.error(f"FFmpeg error: {e.stderr}")
-        return False
-    except FileNotFoundError:
-        logger.error("ffmpeg not found! Please install ffmpeg.")
-        return False
+logger = setup_logging(__name__, console_level=logging.ERROR)
 
 
 # ============================================================================

@@ -23,34 +23,15 @@ in this file at all.
 
 from __future__ import annotations
 
-import re
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from appconfig import cfg
+from utils import from_base36, filename_re
 
 # =========================================================================
-
-_BASE36_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-
-def _filename_re() -> re.Pattern:
-    """Built fresh from cfg.FILENAME_PREFIX each call, so a change in
-    appconfig.json takes effect without needing a module reload."""
-    return re.compile(re.escape(cfg.FILENAME_PREFIX) + r"([0-9A-Za-z]{6})\.WAV$", re.IGNORECASE)
-
-
-def from_base36(s: str) -> int:
-    """Reverse of the to_base36() function used to generate filenames."""
-    s = s.upper()
-    value = 0
-    for ch in s:
-        idx = _BASE36_ALPHABET.index(ch)  # raises ValueError on bad char
-        value = value * 36 + idx
-    return value
-
 
 @dataclass
 class Entry:
@@ -63,14 +44,14 @@ class Entry:
 def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
     entries: list[Entry] = []
     skipped: list[Path] = []
-    filename_re = _filename_re()
+    pattern = filename_re()
 
     for wav_path in output_dir.rglob("*"):
         if not wav_path.is_file():
             continue
         if wav_path.suffix.lower() != ".wav":
             continue
-        m = filename_re.match(wav_path.name)
+        m = pattern.match(wav_path.name)
         if not m:
             continue
         try:
