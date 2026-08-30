@@ -68,7 +68,10 @@
     "Shady Character|M": "Shady Character_M",
     "Shady Character|F": "Shady Character_F",
     "Laborer|M": "Laborer_M",
-    "Laborer|F": "Laborer_F"
+    "Laborer|F": "Laborer_F",
+    "Mage|M": "Mage_M",
+    "Mage|F": "Mage_F",
+    "Servant|F": "Servant_F"
   },
   "sysname": {
     "GORALT1": "BG1 Narrator",
@@ -149,6 +152,19 @@
     "RUMORT": "RealNameMissing_RUMORT",
     "THIEFTES": "BG1 Narrator",
     "C#STFF24": "RealNameMissing_C#STFF24",
-    "RILLPUZZ": "BG1 Narrator"
+    "RILLPUZZ": "BG1 Narrator",
+    "LOUTM02": "Mercenary of Riatavin_LOUTM02",
+    "LOUTM01": "Mercenary of Riatavin_LOUTM01",
+    "LOUTM03": "Mercenary of Riatavin_LOUTM03",
+    "BANDCT": "RealNameMissing_BANDCT",
+    "MAGE2": "RealNameMissing_MAGE2",
+    "OHRHMONK": "RealNameMissing_OHRHMONK",
+    "RGRSTA01": "RealNameMissing_RGRSTA01",
+    "RUMAMK": "RealNameMissing_RUMAMK",
+    "RUMORU": "RealNameMissing_RUMORU",
+    "RUMSAR": "RealNameMissing_RUMSAR",
+    "SAHRGR03": "Rebel_SAHRGR03",
+    "SAHRGR01": "Rebel_SAHRGR01",
+    "SAHRGR02": "Rebel_SAHRGR02"
   }
 }
