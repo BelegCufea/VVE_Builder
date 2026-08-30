@@ -10,8 +10,12 @@ import logging
 import re
 import subprocess
 import sys
+import time
+from difflib import SequenceMatcher
 from pathlib import Path
-from typing import Any, Dict, Iterator, Optional, Union
+from typing import Any, Dict, Iterator, Optional, Tuple, Union
+
+import requests
 
 from appconfig import cfg
 
@@ -299,6 +303,35 @@ def get_canonical_key(d: CaseInsensitiveDict, key: str) -> str | None:
 # Audio Processing
 # ============================================================================
 
+def get_audio_duration(audio_path: Union[Path, str]) -> Optional[float]:
+    """
+    Get the duration of an audio file in seconds using ffprobe.
+
+    Args:
+        audio_path: Path to the audio file.
+
+    Returns:
+        Duration in seconds, or None if it could not be determined
+        (missing file, missing ffprobe, unreadable format, etc.).
+    """
+    logger = logging.getLogger(__name__)
+    try:
+        cmd = [
+            'ffprobe',
+            '-v', 'error',
+            '-show_entries', 'format=duration',
+            '-of', 'default=noprint_wrappers=1:nokey=1',
+            str(audio_path)
+        ]
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0 and result.stdout.strip():
+            return float(result.stdout.strip())
+        return None
+    except Exception as e:
+        logger.error(f"Failed to get duration for {audio_path}: {e}")
+        return None
+
+
 def convert_to_ogg(
     input_path: Union[Path, str],
     output_path: Union[Path, str],
@@ -343,8 +376,158 @@ def convert_to_ogg(
 
 
 # ============================================================================
-# Logging Setup
+# Voicebox Transcription & Similarity Scoring
 # ============================================================================
+
+# Display color for each similarity band, keyed by the label returned from
+# score_status(). Shared so every GUI that shows a score colors it the same way.
+SIMILARITY_STATUS_COLORS = {
+    "Excellent": "#2ecc71",
+    "Good": "#c8a900",
+    "Poor": "#e67e22",
+    "Bad": "#e74c3c",
+}
+
+
+def transcribe_via_voicebox(
+    wav_path: Union[Path, str],
+    timeout: Optional[float] = None,
+    retry_count: Optional[int] = None,
+    retry_delay: Optional[float] = None,
+) -> Tuple[str, bool]:
+    """
+    Send a WAV file to the Voicebox /transcribe endpoint, with retries.
+
+    Args:
+        wav_path: Path to the .wav file to transcribe.
+        timeout: Per-attempt request timeout in seconds.
+            Defaults to cfg.SAMPLE_TIMEOUT_SECONDS.
+        retry_count: Number of retries after the first attempt.
+            Defaults to cfg.SAMPLE_RETRY_COUNT.
+        retry_delay: Seconds to wait between retries.
+            Defaults to cfg.SAMPLE_RETRY_DELAY.
+
+    Returns:
+        Tuple of (text, success). On failure, text is a "<ERROR: ...>"
+        placeholder describing the last error and success is False.
+    """
+    logger = logging.getLogger(__name__)
+    wav_path = Path(wav_path)
+    timeout = cfg.SAMPLE_TIMEOUT_SECONDS if timeout is None else timeout
+    retry_count = cfg.SAMPLE_RETRY_COUNT if retry_count is None else retry_count
+    retry_delay = cfg.SAMPLE_RETRY_DELAY if retry_delay is None else retry_delay
+    
+    if retry_count is None:
+        retry_count = 0
+    if retry_delay is None:
+        retry_delay = 0
+
+    url = cfg.BASE_URL.rstrip("/") + "/" + cfg.TRANSCRIBE_ENDPOINT.lstrip("/")
+
+    last_error = ""
+    for attempt in range(retry_count + 1):
+        try:
+            with open(wav_path, "rb") as f:
+                resp = requests.post(
+                    url,
+                    files={"file": (wav_path.name, f, "audio/wav")},
+                    timeout=timeout,
+                )
+            resp.raise_for_status()
+            return resp.json().get("text", ""), True
+        except Exception as ex:
+            last_error = str(ex)
+            logger.debug(f"Transcribe attempt {attempt + 1} failed for {wav_path.name}: {ex}")
+            if attempt < retry_count:
+                time.sleep(retry_delay)
+
+    return f"<ERROR: {last_error}>", False
+
+
+def similarity_score(text_a: str, text_b: str) -> float:
+    """
+    Compute a similarity score (0-100) between two texts.
+
+    Case-insensitive and whitespace-trimmed; uses difflib's SequenceMatcher
+    ratio, matching the scoring approach used across the project's checking
+    tools.
+
+    Args:
+        text_a: First text (order doesn't matter).
+        text_b: Second text.
+
+    Returns:
+        Similarity score from 0.0 to 100.0, rounded to 2 decimal places.
+    """
+    return round(
+        SequenceMatcher(None, text_a.strip().lower(), text_b.strip().lower()).ratio() * 100,
+        2,
+    )
+
+
+def transcribe_and_score(
+    wav_path: Union[Path, str],
+    expected_text: str,
+    timeout: Optional[float] = None,
+    retry_count: Optional[int] = None,
+    retry_delay: Optional[float] = None,
+) -> Dict[str, Any]:
+    """
+    Transcribe a WAV file via Voicebox and score it against expected text.
+
+    Convenience wrapper combining transcribe_via_voicebox() and
+    similarity_score() into the single call most callers need.
+
+    Args:
+        wav_path: Path to the .wav file to transcribe.
+        expected_text: The text the audio is expected to say.
+        timeout, retry_count, retry_delay: Passed through to
+            transcribe_via_voicebox().
+
+    Returns:
+        Dict with keys "transcribed_text" (str), "success" (bool), and
+        "score" (float, 0-100). Note: a score is still computed on failure,
+        comparing expected_text against the "<ERROR: ...>" placeholder,
+        so callers can rely on "score" always being a number.
+    """
+    transcribed_text, success = transcribe_via_voicebox(
+        wav_path, timeout=timeout, retry_count=retry_count, retry_delay=retry_delay
+    )
+    score = similarity_score(expected_text, transcribed_text)
+    return {
+        "transcribed_text": transcribed_text,
+        "success": success,
+        "score": score,
+    }
+
+
+def score_status(score: Optional[float]) -> Tuple[str, str]:
+    """
+    Classify a similarity score into a label and display color.
+
+    Bands are read from cfg.SIMILARITY_EXCELLENT / SIMILARITY_GOOD /
+    SIMILARITY_POOR (anything below SIMILARITY_POOR is "Bad").
+
+    Args:
+        score: Similarity score (0-100), or None if not yet available.
+
+    Returns:
+        Tuple of (label, hex_color). Returns ("In progress", "#888888")
+        when score is None or not numeric.
+    """
+    if score is None or not isinstance(score, (int, float)):
+        return "In progress", "#888888"
+    if score >= cfg.SIMILARITY_EXCELLENT:
+        label = "Excellent"
+    elif score >= cfg.SIMILARITY_GOOD:
+        label = "Good"
+    elif score >= cfg.SIMILARITY_POOR:
+        label = "Poor"
+    else:
+        label = "Bad"
+    return label, SIMILARITY_STATUS_COLORS[label]
+
+
 # ============================================================================
 # Logging Setup
 # ============================================================================

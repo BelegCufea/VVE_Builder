@@ -28,11 +28,9 @@ import sys
 import threading
 import time
 from datetime import datetime, timedelta
-from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-import requests
 from PySide6.QtCore import (
     Qt, QObject, QThread, QTimer, Signal,
 )
@@ -47,7 +45,7 @@ from PySide6.QtWidgets import (
 from appconfig import cfg
 from utils import (
     from_base36, filename_re, load_patcher_config, preprocess_text,
-    setup_logging,
+    score_status, setup_logging, transcribe_and_score,
 )
 
 logger = setup_logging("check_gui", console_level=logging.ERROR)
@@ -128,52 +126,15 @@ def transcribe_sample(
         Dict containing NPC, StrRef, AudioFile, CSVText, TranscribedText,
         and SimilarityScore.
     """
-    url = (
-        cfg.BASE_URL.rstrip("/")
-        + "/"
-        + cfg.TRANSCRIBE_ENDPOINT.lstrip("/")
-    )
-
-    transcribed_text = ""
-    success = False
-    last_error = ""
-
-    for attempt in range(cfg.SAMPLE_RETRY_COUNT + 1):
-        try:
-            with open(wav_path, "rb") as f:
-                resp = requests.post(
-                    url,
-                    files={"file": (wav_path.name, f, "audio/wav")},
-                    timeout=cfg.SAMPLE_TIMEOUT_SECONDS,
-                )
-            resp.raise_for_status()
-            transcribed_text = resp.json().get("text", "")
-            success = True
-            break
-        except Exception as ex:
-            last_error = str(ex)
-            if attempt < cfg.SAMPLE_RETRY_COUNT:
-                time.sleep(cfg.SAMPLE_RETRY_DELAY)
-
-    if not success:
-        transcribed_text = f"<ERROR: {last_error}>"
-
-    score = round(
-        SequenceMatcher(
-            None,
-            text_for_scoring.strip().lower(),
-            transcribed_text.strip().lower(),
-        ).ratio() * 100,
-        2,
-    )
+    result = transcribe_and_score(wav_path, text_for_scoring)
 
     return {
         "NPC": npc_name,
         "StrRef": strref,
         "AudioFile": wav_path.name,
         "CSVText": text_for_scoring,
-        "TranscribedText": transcribed_text,
-        "SimilarityScore": score,
+        "TranscribedText": result["transcribed_text"],
+        "SimilarityScore": result["score"],
     }
 
 
@@ -908,21 +869,10 @@ class CheckWindow(QMainWindow):
         return None
 
     def _apply_status_color(self, item: QTableWidgetItem, worst: Optional[float]) -> None:
-        if worst is None:
-            item.setText("In progress")
-            return
-        if worst >= cfg.SIMILARITY_EXCELLENT:
-            item.setText("Excellent")
-            item.setForeground(QColor("#2ecc71"))
-        elif worst >= cfg.SIMILARITY_GOOD:
-            item.setText("Good")
-            item.setForeground(QColor("#c8a900"))
-        elif worst >= cfg.SIMILARITY_POOR:
-            item.setText("Poor")
-            item.setForeground(QColor("#e67e22"))
-        else:
-            item.setText("Bad")
-            item.setForeground(QColor("#e74c3c"))
+        label, color = score_status(worst)
+        item.setText(label)
+        if worst is not None:
+            item.setForeground(QColor(color))
 
     def _update_stats_label(self) -> None:
         all_scores = [
@@ -1014,14 +964,8 @@ class CheckWindow(QMainWindow):
     def _apply_score_color(self, item: QTableWidgetItem, score: float) -> None:
         if not isinstance(score, (int, float)):
             return
-        if score >= cfg.SIMILARITY_EXCELLENT:
-            item.setForeground(QColor("#2ecc71"))
-        elif score >= cfg.SIMILARITY_GOOD:
-            item.setForeground(QColor("#c8a900"))
-        elif score >= cfg.SIMILARITY_POOR:
-            item.setForeground(QColor("#e67e22"))
-        else:
-            item.setForeground(QColor("#e74c3c"))
+        _, color = score_status(score)
+        item.setForeground(QColor(color))
 
     def _on_detail_double_click(self, item: QTableWidgetItem) -> None:
         if self._selected_npc is None:

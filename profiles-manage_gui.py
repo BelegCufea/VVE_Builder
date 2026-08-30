@@ -19,7 +19,6 @@ import json
 import time
 import re
 import shutil
-import subprocess
 import logging
 import requests
 import tempfile
@@ -27,7 +26,10 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from appconfig import cfg
-from utils import setup_logging, convert_to_ogg
+from utils import (
+    convert_to_ogg, get_audio_duration, score_status, setup_logging,
+    transcribe_and_score,
+)
 
 import pandas as pd
 from PySide6.QtCore import Qt, QUrl, QTimer
@@ -80,6 +82,8 @@ class VoiceProfileEditor(QDialog):
         self.resize(800, 600)
         self._current_sample = None
         self._sample_data = []
+        self._last_check_sample = None
+        self._last_check_result = None
         
         # Audio player
         self.audio_output = QAudioOutput()
@@ -109,11 +113,24 @@ class VoiceProfileEditor(QDialog):
         details_group = QGroupBox("Sample Details")
         details_layout = QVBoxLayout(details_group)
         
-        # Audio player
+        # Audio player + similarity check
+        sample_btn_layout = QHBoxLayout()
         self.play_btn = QPushButton("▶️ Play")
         self.play_btn.clicked.connect(self._play_selected_sample)
         self.play_btn.setEnabled(False)
-        details_layout.addWidget(self.play_btn)
+        sample_btn_layout.addWidget(self.play_btn)
+
+        self.check_btn = QPushButton("🧪 Check Similarity")
+        self.check_btn.setToolTip(
+            "Transcribe this sample's audio via Voicebox and score it "
+            "against the text below."
+        )
+        self.check_btn.clicked.connect(self._on_check_similarity_clicked)
+        self.check_btn.setEnabled(False)
+        sample_btn_layout.addWidget(self.check_btn)
+
+        sample_btn_layout.addStretch()
+        details_layout.addLayout(sample_btn_layout)
         
         # Text editor
         details_layout.addWidget(QLabel("Text:"))
@@ -122,6 +139,28 @@ class VoiceProfileEditor(QDialog):
         self.text_edit.textChanged.connect(self._on_text_changed)
         self.text_edit.setEnabled(False)
         details_layout.addWidget(self.text_edit)
+
+        # Similarity check results
+        check_result_layout = QHBoxLayout()
+        check_result_layout.addWidget(QLabel("Similarity:"))
+        self.check_status_label = QLabel("")
+        check_result_layout.addWidget(self.check_status_label)
+        check_result_layout.addStretch()
+        details_layout.addLayout(check_result_layout)
+
+        details_layout.addWidget(QLabel("Transcribed Text (from Voicebox):"))
+        self.transcribed_text_edit = QTextEdit()
+        self.transcribed_text_edit.setMaximumHeight(100)
+        self.transcribed_text_edit.setReadOnly(True)
+        details_layout.addWidget(self.transcribed_text_edit)
+
+        self.use_transcribed_btn = QPushButton("📋 Use This Text")
+        self.use_transcribed_btn.setToolTip(
+            "Replace the sample's text above with the transcribed text."
+        )
+        self.use_transcribed_btn.clicked.connect(self._on_use_transcribed_text)
+        self.use_transcribed_btn.setEnabled(False)
+        details_layout.addWidget(self.use_transcribed_btn)
         
         layout.addWidget(details_group)
         
@@ -220,7 +259,7 @@ class VoiceProfileEditor(QDialog):
                     pass
             
             # Get audio duration
-            duration = self._get_audio_duration(wav_path)
+            duration = get_audio_duration(wav_path)
             
             self._sample_data.append({
                 'stem': stem,
@@ -265,9 +304,11 @@ class VoiceProfileEditor(QDialog):
         """Handle sample selection from the list."""
         if current is None:
             self.play_btn.setEnabled(False)
+            self.check_btn.setEnabled(False)
             self.text_edit.setEnabled(False)
             self.delete_btn.setEnabled(False)
             self._current_sample = None
+            self._clear_check_ui()
             return
         
         stem = current.data(Qt.ItemDataRole.UserRole)
@@ -276,6 +317,7 @@ class VoiceProfileEditor(QDialog):
         if sample:
             self._current_sample = sample
             self.play_btn.setEnabled(True)
+            self.check_btn.setEnabled(True)
             self.text_edit.setEnabled(True)
             self.delete_btn.setEnabled(True)
             
@@ -283,6 +325,13 @@ class VoiceProfileEditor(QDialog):
             self.text_edit.blockSignals(True)
             self.text_edit.setPlainText(sample['text'])
             self.text_edit.blockSignals(False)
+
+            # Check results belong to whichever sample produced them - clear
+            # them out unless we're re-selecting the sample we just checked.
+            if self._last_check_sample and self._last_check_sample['stem'] == stem:
+                self._show_check_result(self._last_check_result)
+            else:
+                self._clear_check_ui()
     
     def _play_selected_sample(self):
         """Play the selected sample using Qt Multimedia."""
@@ -306,6 +355,91 @@ class VoiceProfileEditor(QDialog):
         self.media_player.play()
         self.status_label.setText(f"🔊 Playing: {wav_path.name}")
 
+    def _clear_check_ui(self):
+        """Clear the similarity-check result area (no check run yet for this sample)."""
+        self.check_status_label.setText("")
+        self.check_status_label.setStyleSheet("")
+        self.transcribed_text_edit.clear()
+        self.use_transcribed_btn.setEnabled(False)
+
+    def _show_check_result(self, result: Optional[dict]):
+        """Redisplay a previously-computed check result (e.g. on reselection)."""
+        if not result:
+            self._clear_check_ui()
+            return
+        label, color = score_status(result["score"])
+        if not result["success"]:
+            label = "Error"
+        self.check_status_label.setText(f"{label}: {result['score']:.1f}%")
+        self.check_status_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+        self.transcribed_text_edit.setPlainText(result["transcribed_text"])
+        self.use_transcribed_btn.setEnabled(result["success"])
+
+    def _on_check_similarity_clicked(self):
+        """Manually check similarity for the currently selected sample."""
+        if not self._current_sample:
+            return
+        self._run_similarity_check(self._current_sample)
+
+    def _run_similarity_check(self, sample: dict):
+        """
+        Transcribe a sample's audio via Voicebox and score it against its
+        current text. Used both by the manual "Check Similarity" button and
+        automatically after a Fish Audio import.
+        """
+        wav_path = sample['wav_path']
+        if not wav_path.exists():
+            self.check_status_label.setText(f"⚠️ Audio file not found: {wav_path.name}")
+            self.check_status_label.setStyleSheet("")
+            return
+
+        self.check_status_label.setText("🔍 Checking similarity...")
+        self.check_status_label.setStyleSheet("")
+        self.transcribed_text_edit.clear()
+        self.use_transcribed_btn.setEnabled(False)
+        self.status_label.setText(f"🔍 Checking similarity for {sample['stem']}...")
+        QApplication.processEvents()
+
+        result = transcribe_and_score(wav_path, sample['text'])
+        self._last_check_sample = sample
+        self._last_check_result = result
+
+        # Only paint the result if the user hasn't switched samples meanwhile
+        if self._current_sample and self._current_sample['stem'] == sample['stem']:
+            self._show_check_result(result)
+
+        label, _ = score_status(result["score"]) if result["success"] else ("Error", None)
+        self.status_label.setText(
+            f"🧪 {sample['stem']}: {label} ({result['score']:.1f}%)"
+        )
+        logger.info(
+            f"Similarity check for {sample['stem']}: {result['score']:.1f}% ({label})"
+        )
+
+    def _on_use_transcribed_text(self):
+        """Replace the current sample's text with the transcribed text, after confirmation."""
+        if not self._current_sample or not self._last_check_result or not self._last_check_sample:
+            return
+        if self._last_check_sample['stem'] != self._current_sample['stem']:
+            return
+
+        reply = QMessageBox.warning(
+            self,
+            "Replace Sample Text",
+            "This will replace the current sample text with the text "
+            "Voicebox transcribed from the audio.\n\n"
+            "Continue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+
+        new_text = self._last_check_result["transcribed_text"]
+        self.text_edit.setPlainText(new_text)  # triggers _on_text_changed -> auto-saves
+        self.status_label.setText(f"📋 Replaced text for {self._current_sample['stem']} with transcribed text")
+        logger.info(f"Replaced text for {self._current_sample['stem']} with transcribed text")
+
     def _on_text_changed(self):
         """Auto-save text when it changes."""
         if not self._current_sample:
@@ -324,30 +458,12 @@ class VoiceProfileEditor(QDialog):
                 self.status_label.setText(f"❌ Error saving text: {e}")
                 logger.error(f"Error saving text for {sample['stem']}: {e}")
 
-    def _get_audio_duration(self, audio_path: Path) -> Optional[float]:
-        """Get duration of audio file using ffprobe."""
-        try:
-            cmd = [
-                'ffprobe', 
-                '-v', 'error',
-                '-show_entries', 'format=duration',
-                '-of', 'default=noprint_wrappers=1:nokey=1',
-                str(audio_path)
-            ]
-            result = subprocess.run(cmd, capture_output=True, text=True)
-            if result.returncode == 0 and result.stdout.strip():
-                return float(result.stdout.strip())
-            return None
-        except Exception as e:
-            logger.error(f"Failed to get duration for {audio_path}: {e}")
-            return None
-
     def _import_audio_file(self, input_path: Path):
         """Import a local audio file (from disk) as a new sample."""
         logger.info(f"Importing sample from: {input_path}")
         
         # Check duration and warn
-        duration = self._get_audio_duration(input_path)
+        duration = get_audio_duration(input_path)
         if duration and duration > cfg.MAX_DURATION:
             logger.warning(f"Audio too long: {duration:.1f}s (max: {cfg.MAX_DURATION}s)")
             reply = QMessageBox.warning(
@@ -398,7 +514,7 @@ class VoiceProfileEditor(QDialog):
             pass
         
         # Get duration of the converted file
-        duration = self._get_audio_duration(output_wav)
+        duration = get_audio_duration(output_wav)
         
         # Add to sample data
         self._sample_data.append({
@@ -624,8 +740,12 @@ class VoiceProfileEditor(QDialog):
                     self.text_edit.blockSignals(True)
                     self.text_edit.setPlainText(sample_text)
                     self.text_edit.blockSignals(False)
-                self.status_label.setText(f"✅ Imported audio with sample text")
                 logger.info(f"Successfully imported from Fish Audio: {url}")
+
+                # Fish Audio's text is authoritative but unverified - run the
+                # same similarity check the manual button triggers so a bad
+                # transcription/audio mismatch shows up immediately.
+                self._run_similarity_check(latest_sample)
             except Exception as e:
                 logger.error(f"Failed to save sample text: {e}")
                 self.status_label.setText(f"⚠️ Audio imported but text failed: {e}")
