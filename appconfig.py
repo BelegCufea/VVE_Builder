@@ -110,7 +110,7 @@ DEFAULTS: dict = {
     # =======================================================================    
 
     # Voicebox API Configuration
-    "BASE_URL": "http://10.0.50.5:17600",  # http://localhost:17493 for local server, or remote URL for remote server
+    "BASE_URL": "http://localhost:17493",  # http://localhost:17493 for local server, or remote URL for remote server
     "ENGINE": "qwen",
     "MODEL_SIZE": "1.7B",
 
@@ -200,6 +200,9 @@ DEFAULTS: dict = {
     # Transcription check settings
     # ============================================================================
 
+    # Transcription language
+    "SAMLPES_LANGUAGE": "english",
+
     # How many wav files to sample per NPC directory for transcription checking
     "SAMPLES_PER_NPC": 5,
 
@@ -212,9 +215,9 @@ DEFAULTS: dict = {
 
     # Similarity score thresholds (0-100) for color-coding results.
     # Used to classify the WORST (minimum) score per NPC in the NPC table.
-    "SIMILARITY_EXCELLENT": 95.0,
-    "SIMILARITY_GOOD": 85.0,
-    "SIMILARITY_POOR": 70.0,
+    "SIMILARITY_EXCELLENT": 90.0,
+    "SIMILARITY_GOOD": 65.0,
+    "SIMILARITY_POOR": 20.0,
 }
 
 # ============================================================================

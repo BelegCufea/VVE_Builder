@@ -22,6 +22,7 @@ import shutil
 import logging
 import requests
 import tempfile
+import threading
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
@@ -32,16 +33,16 @@ from utils import (
 )
 
 import pandas as pd
-from PySide6.QtCore import Qt, QUrl, QTimer
+from PySide6.QtCore import Qt, QUrl, QTimer, QObject, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QFormLayout,
     QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton, QComboBox,
     QScrollArea, QSplitter, QGroupBox, QFrame, QMessageBox, QStatusBar,
     QTextEdit, QDialog, QProgressBar, QFileDialog, QCheckBox, QToolTip,
-    QTableWidget, QTableWidgetItem, QHeaderView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
-from PySide6.QtGui import QColor, QCursor
+from PySide6.QtGui import QColor, QCursor, QFont
 
 # ============================================================================
 # Logging Setup
@@ -1037,6 +1038,455 @@ class URLImportDialog(QDialog):
 
 
 # ============================================================================
+# Check All Samples (bulk similarity check, in-place text correction)
+# ============================================================================
+
+class _NumericTableWidgetItem(QTableWidgetItem):
+    """Table widget item that sorts numerically instead of lexicographically.
+
+    Stores the numeric value in UserRole+1 data and uses it for comparison
+    in __lt__, allowing proper numeric sorting for columns like scores.
+    """
+
+    def __lt__(self, other: QTableWidgetItem) -> bool:
+        self_val = self.data(Qt.ItemDataRole.UserRole + 1)
+        other_val = other.data(Qt.ItemDataRole.UserRole + 1)
+        if isinstance(self_val, (int, float)) and isinstance(other_val, (int, float)):
+            return self_val < other_val
+        return super().__lt__(other)
+
+
+class SampleCheckWorker(QObject):
+    """
+    Background worker that transcribes a list of voice samples via
+    Voicebox and scores each against its own sample text.
+
+    Runs sequentially (one /transcribe call at a time), the same way
+    check_gui.py's CheckWorker does, and emits one signal per completed
+    sample so the dialog can populate its table incrementally.
+
+    Signals:
+        stage: Short status string.
+        progress: Dict with done/total/elapsed/eta_seconds.
+        sample_checked: Dict - the input sample dict merged with
+            transcribed_text/success/score from transcribe_and_score().
+        finished: Dict with total_checked on completion.
+        failed: Error message string on fatal error.
+    """
+
+    stage = Signal(str)
+    progress = Signal(dict)
+    sample_checked = Signal(dict)
+    finished = Signal(dict)
+    failed = Signal(str)
+
+    def __init__(self, samples: List[Dict[str, Any]]) -> None:
+        super().__init__()
+        self._samples = samples
+        self._stop_requested = threading.Event()
+
+    def request_stop(self) -> None:
+        """Request the worker to stop after the current sample."""
+        self._stop_requested.set()
+
+    def run(self) -> None:
+        """Entry point for the worker thread."""
+        try:
+            self._run_impl()
+        except Exception as ex:
+            logger.error(f"Fatal error checking all samples: {ex}")
+            self.failed.emit(str(ex))
+
+    def _run_impl(self) -> None:
+        total = len(self._samples)
+        start_time = time.time()
+        checked = 0
+
+        for sample in self._samples:
+            if self._stop_requested.is_set():
+                break
+
+            self.stage.emit(f"Checking {sample['profile']} - {sample['stem']}...")
+
+            result = transcribe_and_score(sample["wav_path"], sample["text"])
+            row = {**sample, **result}
+            self.sample_checked.emit(row)
+            checked += 1
+
+            elapsed = time.time() - start_time
+            eta = (elapsed / checked) * (total - checked) if checked else 0.0
+            self.progress.emit({
+                "done": checked,
+                "total": total,
+                "elapsed": elapsed,
+                "eta_seconds": eta,
+            })
+
+        self.finished.emit({"total_checked": checked})
+
+
+class AllSamplesDetailDialog(QDialog):
+    """
+    Side-by-side comparison of a sample's text and its transcription,
+    with a button to overwrite the sample text in-place.
+    """
+
+    def __init__(
+        self,
+        row: Dict[str, Any],
+        parent: Optional[QWidget] = None,
+        on_apply: Optional[Callable[[Dict[str, Any]], None]] = None,
+    ):
+        super().__init__(parent)
+        self.row = row
+        self.on_apply = on_apply
+        self.setWindowTitle(f"{row['profile']} - {row['stem']}")
+        self.resize(1000, 600)
+
+        outer = QVBoxLayout(self)
+
+        label, color = score_status(row["score"])
+        if not row["success"]:
+            label = "ERROR"
+        header = QLabel(f"{label.upper()} - {row['score']:.2f}%")
+        header.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 14px;")
+        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        outer.addWidget(header)
+
+        splitter = QSplitter(Qt.Orientation.Horizontal)
+        mono_font = QFont("Consolas", 9)
+
+        text_widget = QWidget()
+        text_layout = QVBoxLayout(text_widget)
+        text_layout.setContentsMargins(0, 0, 0, 0)
+        text_header = QLabel("SAMPLE TEXT")
+        text_header.setStyleSheet("font-weight: bold;")
+        text_layout.addWidget(text_header)
+        self.text_edit = QTextEdit()
+        self.text_edit.setReadOnly(True)
+        self.text_edit.setFont(mono_font)
+        self.text_edit.setPlainText(row["text"])
+        text_layout.addWidget(self.text_edit)
+
+        trans_widget = QWidget()
+        trans_layout = QVBoxLayout(trans_widget)
+        trans_layout.setContentsMargins(0, 0, 0, 0)
+        trans_header = QLabel("TRANSCRIBED")
+        trans_header.setStyleSheet("font-weight: bold;")
+        trans_layout.addWidget(trans_header)
+        self.trans_edit = QTextEdit()
+        self.trans_edit.setReadOnly(True)
+        self.trans_edit.setFont(mono_font)
+        self.trans_edit.setPlainText(row["transcribed_text"])
+        trans_layout.addWidget(self.trans_edit)
+
+        splitter.addWidget(text_widget)
+        splitter.addWidget(trans_widget)
+        splitter.setStretchFactor(0, 1)
+        splitter.setStretchFactor(1, 1)
+        outer.addWidget(splitter, stretch=1)
+
+        btn_row = QHBoxLayout()
+        self.use_btn = QPushButton("📋 Use Transcribed Text")
+        self.use_btn.setEnabled(row["success"])
+        self.use_btn.clicked.connect(self._on_use_transcribed)
+        btn_row.addWidget(self.use_btn)
+        btn_row.addStretch()
+        close_btn = QPushButton("Close")
+        close_btn.setDefault(True)
+        close_btn.clicked.connect(self.accept)
+        btn_row.addWidget(close_btn)
+        outer.addLayout(btn_row)
+
+    def _on_use_transcribed(self):
+        reply = QMessageBox.warning(
+            self,
+            "Replace Sample Text",
+            f"This will replace the text of '{self.row['stem']}' with the "
+            "transcribed text shown on the right.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self.on_apply:
+            self.on_apply(self.row)
+        self.text_edit.setPlainText(self.row["transcribed_text"])
+        self.use_btn.setEnabled(False)
+
+
+class CheckAllSamplesDialog(QDialog):
+    """
+    Checks every voice sample (WAV+txt pair) across every voice profile,
+    the same way check_gui.py checks generated dialogue - transcribe via
+    Voicebox, score against the expected text - but scoped to the
+    reference sample recordings under cfg.VOICES_DIR (and optionally
+    cfg.VOICES_PREP_DIR) rather than generated NPC dialogue lines.
+
+    This covers every sample, including ones for voice profiles that are
+    only ever used implicitly "by name" (an NPC's own name matching a
+    voice profile with no explicit substitution needed) - anything that
+    shows up in the /voices directory gets checked.
+    """
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle("🧪 Check All Samples")
+        self.resize(1100, 650)
+        self._worker: Optional[SampleCheckWorker] = None
+        self._worker_thread: Optional[QThread] = None
+        self._build_ui()
+
+    def _build_ui(self):
+        layout = QVBoxLayout(self)
+
+        top_layout = QHBoxLayout()
+        self.include_prep_cb = QCheckBox(f"Include unapproved samples ({cfg.VOICES_PREP_DIR})")
+        self.include_prep_cb.setChecked(True)
+        top_layout.addWidget(self.include_prep_cb)
+        top_layout.addStretch()
+
+        self.start_btn = QPushButton("▶️ Start Check")
+        self.start_btn.clicked.connect(self._start_check)
+        top_layout.addWidget(self.start_btn)
+
+        self.stop_btn = QPushButton("⏹️ Stop")
+        self.stop_btn.clicked.connect(self._stop_check)
+        self.stop_btn.setEnabled(False)
+        top_layout.addWidget(self.stop_btn)
+        layout.addLayout(top_layout)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        layout.addWidget(self.progress_bar)
+
+        self.stage_label = QLabel("Ready. Click \"Start Check\" to scan and check every sample.")
+        layout.addWidget(self.stage_label)
+
+        self.table = QTableWidget()
+        self.table.setColumnCount(6)
+        self.table.setHorizontalHeaderLabels(
+            ["Profile", "Sample", "Score", "Status", "Sample Text", "Transcribed Text"]
+        )
+        self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
+        self.table.setSortingEnabled(True)
+        self.table.horizontalHeader().setStretchLastSection(True)
+        self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
+        self.table.itemSelectionChanged.connect(self._on_selection_changed)
+        layout.addWidget(self.table, stretch=1)
+
+        btn_layout = QHBoxLayout()
+        self.use_text_btn = QPushButton("📋 Use Transcribed Text for Selected")
+        self.use_text_btn.clicked.connect(self._on_use_transcribed_for_selected)
+        self.use_text_btn.setEnabled(False)
+        btn_layout.addWidget(self.use_text_btn)
+        btn_layout.addStretch()
+        self.close_btn = QPushButton("Close")
+        self.close_btn.clicked.connect(self._on_close)
+        btn_layout.addWidget(self.close_btn)
+        layout.addLayout(btn_layout)
+
+    # ------------------------------------------------------------------
+    # Scanning
+    # ------------------------------------------------------------------
+
+    def _collect_samples(self, include_prep: bool) -> List[Dict[str, Any]]:
+        samples = scan_voice_sample_dir(Path(cfg.VOICES_DIR), "Voices")
+        if include_prep:
+            samples += scan_voice_sample_dir(Path(cfg.VOICES_PREP_DIR), "Prep")
+        return samples
+
+    # ------------------------------------------------------------------
+    # Check lifecycle
+    # ------------------------------------------------------------------
+
+    def _start_check(self):
+        samples = self._collect_samples(self.include_prep_cb.isChecked())
+        if not samples:
+            QMessageBox.information(self, "No Samples", "No voice samples found to check.")
+            return
+
+        self.table.setSortingEnabled(False)
+        self.table.setRowCount(0)
+        self.table.setSortingEnabled(True)
+        self.use_text_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.start_btn.setEnabled(False)
+        self.include_prep_cb.setEnabled(False)
+        self.stop_btn.setEnabled(True)
+
+        self._worker = SampleCheckWorker(samples)
+        self._worker_thread = QThread()
+        self._worker.moveToThread(self._worker_thread)
+        self._worker_thread.started.connect(self._worker.run)
+        self._worker.stage.connect(self.stage_label.setText)
+        self._worker.progress.connect(self._on_progress)
+        self._worker.sample_checked.connect(self._on_sample_checked)
+        self._worker.finished.connect(self._on_finished)
+        self._worker.failed.connect(self._on_failed)
+        self._worker_thread.start()
+
+        logger.info(f"Started 'Check All Samples' on {len(samples)} sample(s)")
+
+    def _stop_check(self):
+        if self._worker:
+            self._worker.request_stop()
+            self.stage_label.setText("Stopping after the current sample...")
+            self.stop_btn.setEnabled(False)
+
+    def _cleanup_thread(self):
+        if self._worker:
+            self._worker.request_stop()
+        if self._worker_thread is not None and self._worker_thread.isRunning():
+            self._worker_thread.quit()
+            self._worker_thread.wait(2000)
+        self._worker = None
+        self._worker_thread = None
+
+    def _on_progress(self, info: dict):
+        total = info["total"]
+        done = info["done"]
+        pct = int(100 * done / total) if total else 0
+        self.progress_bar.setValue(pct)
+
+    def _on_sample_checked(self, row: Dict[str, Any]):
+        self._add_row(row)
+
+    def _on_finished(self, info: dict):
+        self.stage_label.setText(f"Done. Checked {info.get('total_checked', 0)} sample(s).")
+        self._cleanup_thread()
+        self.start_btn.setEnabled(True)
+        self.include_prep_cb.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+        logger.info(f"'Check All Samples' finished: {info.get('total_checked', 0)} checked")
+
+    def _on_failed(self, message: str):
+        QMessageBox.critical(self, "Check Failed", message)
+        self.stage_label.setText(f"❌ Failed: {message}")
+        self._cleanup_thread()
+        self.start_btn.setEnabled(True)
+        self.include_prep_cb.setEnabled(True)
+        self.stop_btn.setEnabled(False)
+
+    # ------------------------------------------------------------------
+    # Table population
+    # ------------------------------------------------------------------
+
+    def _add_row(self, row: Dict[str, Any]):
+        self.table.setSortingEnabled(False)
+        r = self.table.rowCount()
+        self.table.insertRow(r)
+
+        profile_item = QTableWidgetItem(row["profile"])
+        # Stash the full row dict here so selection/double-click can get it
+        # back regardless of how the table has been sorted since.
+        profile_item.setData(Qt.ItemDataRole.UserRole, row)
+        self.table.setItem(r, 0, profile_item)
+
+        sample_label = f"{row['stem']} [{row['source']}]"
+        self.table.setItem(r, 1, QTableWidgetItem(sample_label))
+
+        score = row["score"]
+        score_item = _NumericTableWidgetItem(f"{score:.1f}")
+        score_item.setData(Qt.ItemDataRole.UserRole + 1, score)
+        score_item.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.table.setItem(r, 2, score_item)
+
+        label, color = score_status(score)
+        if not row["success"]:
+            label = "Error"
+        status_item = QTableWidgetItem(label)
+        status_item.setForeground(QColor(color))
+        self.table.setItem(r, 3, status_item)
+
+        text = row["text"]
+        self.table.setItem(r, 4, QTableWidgetItem(
+            text[:120] + "..." if len(text) > 120 else text))
+
+        trans_text = row["transcribed_text"]
+        self.table.setItem(r, 5, QTableWidgetItem(
+            trans_text[:120] + "..." if len(trans_text) > 120 else trans_text))
+
+        self.table.setSortingEnabled(True)
+
+    def _selected_row_data(self) -> Optional[Dict[str, Any]]:
+        selected = self.table.selectedItems()
+        if not selected:
+            return None
+        row_idx = selected[0].row()
+        item = self.table.item(row_idx, 0)
+        return item.data(Qt.ItemDataRole.UserRole) if item else None
+
+    def _on_selection_changed(self):
+        row = self._selected_row_data()
+        self.use_text_btn.setEnabled(bool(row) and row.get("success", False))
+
+    def _on_row_double_clicked(self, item: QTableWidgetItem):
+        row_idx = item.row()
+        data_item = self.table.item(row_idx, 0)
+        row = data_item.data(Qt.ItemDataRole.UserRole) if data_item else None
+        if not row:
+            return
+        dlg = AllSamplesDetailDialog(row, self, on_apply=self._apply_transcribed_text)
+        dlg.exec()
+        # Refresh this row's "Sample Text" cell in case it was just replaced
+        text_item = self.table.item(row_idx, 4)
+        if text_item:
+            text_item.setText(
+                row["text"][:120] + "..." if len(row["text"]) > 120 else row["text"]
+            )
+
+    # ------------------------------------------------------------------
+    # Applying corrections
+    # ------------------------------------------------------------------
+
+    def _on_use_transcribed_for_selected(self):
+        row = self._selected_row_data()
+        if not row or not row.get("success", False):
+            return
+        reply = QMessageBox.warning(
+            self,
+            "Replace Sample Text",
+            f"This will replace the text of '{row['stem']}' with the "
+            "transcribed text.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self._apply_transcribed_text(row)
+
+        selected = self.table.selectedItems()
+        if selected:
+            row_idx = selected[0].row()
+            new_text = row["text"]
+            item = self.table.item(row_idx, 4)
+            if item:
+                item.setText(
+                    new_text[:120] + "..." if len(new_text) > 120 else new_text)
+
+    def _apply_transcribed_text(self, row: Dict[str, Any]):
+        """Write a sample's transcribed text to its .txt file in-place."""
+        try:
+            row["txt_path"].write_text(row["transcribed_text"], encoding="utf-8")
+            row["text"] = row["transcribed_text"]
+            self.stage_label.setText(f"📋 Updated text for {row['stem']}")
+            logger.info(f"Updated sample text in-place for {row['stem']} via Check All Samples")
+        except Exception as e:
+            logger.error(f"Failed to update text for {row['stem']}: {e}")
+            QMessageBox.warning(self, "Save Failed", f"Could not save text file:\n{e}")
+
+    def _on_close(self):
+        self._cleanup_thread()
+        self.accept()
+
+    def closeEvent(self, event):
+        self._cleanup_thread()
+        super().closeEvent(event)
+
+
+# ============================================================================
 # CSV Viewer
 # ============================================================================
 class CSVLinesViewer(QDialog):
@@ -1402,6 +1852,53 @@ def get_prep_npc_names() -> Set[str]:
     return names
 
 
+def scan_voice_sample_dir(directory: Path, source_label: str) -> List[Dict[str, Any]]:
+    """
+    Scan a voice-sample directory (cfg.VOICES_DIR or cfg.VOICES_PREP_DIR)
+    for every WAV+txt sample pair, regardless of which voice profile it
+    belongs to.
+
+    Unlike get_available_voice_profiles() (which only returns unique
+    profile *names*), this returns one entry per individual sample file,
+    which is what similarity checking needs.
+
+    Args:
+        directory: Directory to scan (e.g. Path(cfg.VOICES_DIR)).
+        source_label: Human-readable label for where these came from
+            (e.g. "Voices" or "Prep"), stored on each result for display.
+
+    Returns:
+        List of dicts with keys: profile, stem, wav_path, txt_path, text,
+        source. Sorted by profile, then stem.
+    """
+    results: List[Dict[str, Any]] = []
+    if not directory.exists():
+        return results
+
+    unique_files = set(directory.glob("*.wav")) | set(directory.glob("*.WAV"))
+    for wav_path in unique_files:
+        stem = wav_path.stem
+        profile = re.sub(r'\s+\d+$', '', stem)
+        txt_path = wav_path.with_suffix('.txt')
+        text = ""
+        if txt_path.exists():
+            try:
+                text = txt_path.read_text(encoding='utf-8')
+            except Exception:
+                pass
+        results.append({
+            "profile": profile,
+            "stem": stem,
+            "wav_path": wav_path,
+            "txt_path": txt_path,
+            "text": text,
+            "source": source_label,
+        })
+
+    results.sort(key=lambda s: (s["profile"].lower(), s["stem"].lower()))
+    return results
+
+
 def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict,
                              gender_substitutions: Dict, sys_substitutions: Dict,
                              existing_voices: Set[str], prep_npcs: Optional[Set[str]] = None) -> Dict:
@@ -1744,6 +2241,15 @@ class VoiceProfileManager(QMainWindow):
         stats_layout.addRow("Lines with voice assigned:", self.stats_lines_covered_label)
         stats_layout.addRow("Coverage:", self.coverage_progress)
         left_layout.addWidget(stats_box)
+
+        self.check_all_btn = QPushButton("🧪 Check All Samples")
+        self.check_all_btn.setToolTip(
+            "Transcribe every voice sample via Voicebox and score it "
+            "against its own text - covers every profile, including ones "
+            "used implicitly by NPC name."
+        )
+        self.check_all_btn.clicked.connect(self._open_check_all_samples)
+        left_layout.addWidget(self.check_all_btn)
 
         left_layout.addWidget(QLabel("📋 NPC List"))
 
@@ -2363,6 +2869,11 @@ class VoiceProfileManager(QMainWindow):
         """Copy NPC name to clipboard."""
         QApplication.clipboard().setText(npc_name)
         self.statusBar().showMessage(f"Copied '{npc_name}' to clipboard!", 3000)
+
+    def _open_check_all_samples(self):
+        """Open the bulk similarity-check dialog for every voice sample."""
+        dlg = CheckAllSamplesDialog(self)
+        dlg.exec()
 
     # ------------------------------------------------------------------
     # Change Handlers

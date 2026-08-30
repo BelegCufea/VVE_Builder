@@ -413,24 +413,24 @@ def transcribe_via_voicebox(
     """
     logger = logging.getLogger(__name__)
     wav_path = Path(wav_path)
-    timeout = cfg.SAMPLE_TIMEOUT_SECONDS if timeout is None else timeout
-    retry_count = cfg.SAMPLE_RETRY_COUNT if retry_count is None else retry_count
-    retry_delay = cfg.SAMPLE_RETRY_DELAY if retry_delay is None else retry_delay
-    
-    if retry_count is None:
-        retry_count = 0
-    if retry_delay is None:
-        retry_delay = 0
+    timeout = timeout if timeout is not None else cfg.SAMPLE_TIMEOUT_SECONDS
+    retry_count_val: int = retry_count if retry_count is not None else cfg.SAMPLE_RETRY_COUNT
+    retry_delay = retry_delay if retry_delay is not None else cfg.SAMPLE_RETRY_DELAY
 
     url = cfg.BASE_URL.rstrip("/") + "/" + cfg.TRANSCRIBE_ENDPOINT.lstrip("/")
 
     last_error = ""
-    for attempt in range(retry_count + 1):
+    for attempt in range(retry_count_val + 1):
         try:
             with open(wav_path, "rb") as f:
                 resp = requests.post(
                     url,
-                    files={"file": (wav_path.name, f, "audio/wav")},
+                    files={
+                        "file": (wav_path.name, f, "audio/wav"),
+                    },
+                    data={
+                        "language": cfg.SAMLPES_LANGUAGE,
+                    },
                     timeout=timeout,
                 )
             resp.raise_for_status()
@@ -438,8 +438,8 @@ def transcribe_via_voicebox(
         except Exception as ex:
             last_error = str(ex)
             logger.debug(f"Transcribe attempt {attempt + 1} failed for {wav_path.name}: {ex}")
-            if attempt < retry_count:
-                time.sleep(retry_delay)
+            if attempt < retry_count_val:
+                time.sleep(retry_delay or 0.0)
 
     return f"<ERROR: {last_error}>", False
 

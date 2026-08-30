@@ -459,21 +459,8 @@ class SampleDetailDialog(QDialog):
         outer = QVBoxLayout(self)
 
         score = row["SimilarityScore"]
-        excellent = cfg.SIMILARITY_EXCELLENT
-        good = cfg.SIMILARITY_GOOD
-        poor = cfg.SIMILARITY_POOR
-        if score >= excellent:
-            score_color = "#2ecc71"
-            score_label = f"EXCELLENT - {score:.2f}%"
-        elif score >= good:
-            score_color = "#c8a900"
-            score_label = f"GOOD - {score:.2f}%"
-        elif score >= poor:
-            score_color = "#e67e22"
-            score_label = f"POOR - {score:.2f}%"
-        else:
-            score_color = "#e74c3c"
-            score_label = f"BAD - {score:.2f}%"
+        label, score_color = score_status(score)
+        score_label = f"{label.upper()} - {score:.2f}%"
 
         score_label_widget = QLabel(score_label)
         score_label_widget.setStyleSheet(

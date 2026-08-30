@@ -8,7 +8,8 @@
     "Karenina": "Iltheia",
     "Scroll of Retribution": "BG1 Narrator",
     "William \"Bill\" Williamson": "William Bill Williamson",
-    "Globe Machine": "BG1 Narrator"
+    "Globe Machine": "BG1 Narrator",
+    "Dace Apparition": "Dace Sontan"
   },
   "gender": {
     "Imp|F": "Imp_F",
@@ -61,7 +62,13 @@
     "Customer|F": "Customer_F",
     "Zyntris|F": "Zyntris_F",
     "Beggar Child|F": "Beggar Child_F",
-    "Beggar Child|M": "Beggar Child_M"
+    "Beggar Child|M": "Beggar Child_M",
+    "Cook|F": "Cook_F",
+    "Cook|M": "Cook_M",
+    "Shady Character|M": "Shady Character_M",
+    "Shady Character|F": "Shady Character_F",
+    "Laborer|M": "Laborer_M",
+    "Laborer|F": "Laborer_F"
   },
   "sysname": {
     "GORALT1": "BG1 Narrator",
@@ -135,6 +142,11 @@
     "ARNMAN10": "Trainee_ARNMAN10",
     "ARNTRA04": "Trainee_ARNTRA04",
     "OHHSTONE": "RealNameMissing_OHHSTONE",
-    "OHBMHSM": "BG1 Narrator"
+    "OHBMHSM": "BG1 Narrator",
+    "BDPOOL01": "RealNameMissing_BDPOOL01",
+    "BLUSHC": "RealNameMissing_BLUSHC",
+    "ELELEV01": "BG1 Narrator",
+    "RUMORT": "RealNameMissing_RUMORT",
+    "THIEFTES": "BG1 Narrator"
   }
 }
