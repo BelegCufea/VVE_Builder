@@ -11,6 +11,7 @@ import re
 import subprocess
 import sys
 import time
+from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple, Union
@@ -376,6 +377,62 @@ def convert_to_ogg(
 
 
 # ============================================================================
+# Time / Progress Formatting
+# ============================================================================
+
+def format_time(seconds: float) -> str:
+    """
+    Convert a duration in seconds to a human-readable string.
+
+    Converts seconds to a compact format with appropriate units:
+    - Under 60 seconds: "Xs" (e.g., "45.5s")
+    - 1-59 minutes: "XmYs" (e.g., "5m30s")
+    - 1-23 hours: "XhYm" (e.g., "2h15m")
+    - 24+ hours: "XdYh" (e.g., "3d5h")
+
+    Args:
+        seconds: Duration in seconds.
+
+    Returns:
+        A formatted string representing the duration.
+    """
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes < 60:
+        return f"{minutes}m{secs}s"
+    hours = int(minutes // 60)
+    mins = int(minutes % 60)
+    if hours < 24:
+        return f"{hours}h{mins}m"
+    days = int(hours // 24)
+    hrs = int(hours % 24)
+    return f"{days}d{hrs}h"
+
+
+def format_finish_time(eta_seconds: float) -> str:
+    """
+    Return the expected finish time as a formatted time string.
+
+    If the estimated time is today, returns time in "HH:MM:SS" format.
+    Otherwise, includes the date in locale-appropriate format.
+
+    Args:
+        eta_seconds: Estimated seconds until completion.
+
+    Returns:
+        Formatted finish time string, or "..." if eta_seconds <= 0.
+    """
+    if eta_seconds > 0:
+        finish = datetime.now() + timedelta(seconds=eta_seconds)
+        if finish.date() == datetime.now().date():
+            return finish.strftime("%H:%M:%S")
+        return finish.strftime("%x %X")
+    return "..."
+
+
+# ============================================================================
 # Voicebox Transcription & Similarity Scoring
 # ============================================================================
 
@@ -429,7 +486,7 @@ def transcribe_via_voicebox(
                         "file": (wav_path.name, f, "audio/wav"),
                     },
                     data={
-                        "language": cfg.SAMLPES_LANGUAGE,
+                        "language": cfg.TRANSCRIPTION_LANGUAGE,
                     },
                     timeout=timeout,
                 )

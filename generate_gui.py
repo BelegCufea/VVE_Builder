@@ -16,7 +16,6 @@ import csv
 import json
 import os
 import re
-import subprocess
 import sys
 import threading
 import time
@@ -29,7 +28,7 @@ import logging
 from appconfig import cfg, set_many as _appconfig_set_many
 from collections import defaultdict
 from runstats import Regression
-from datetime import datetime, timedelta
+from datetime import datetime
 from pathlib import Path
 
 from utils import (
@@ -39,6 +38,8 @@ from utils import (
     load_patcher_config,
     preprocess_text,
     convert_to_ogg,
+    format_time,
+    format_finish_time
 )
 
 from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt, Slot, QMetaObject
@@ -613,60 +614,6 @@ logger: logging.Logger = logging.getLogger()
 # ============================================================================
 # Utility Functions
 # ============================================================================
-
-def format_time(seconds: float) -> str:
-    """
-    Convert a time duration in seconds to a human-readable string.
-
-    Automatically selects the most appropriate time unit based on the duration.
-
-    Examples:
-        45.6 seconds -> "45.6s"
-        125 seconds -> "2m5s"
-        3720 seconds -> "1h2m"
-        172800 seconds -> "2d0h"
-
-    Args:
-        seconds: Time duration in seconds.
-
-    Returns:
-        Human-readable time string with appropriate units (s, m, h, or d).
-    """
-    if seconds < 60:
-        return f"{seconds:.1f}s"
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    if minutes < 60:
-        return f"{minutes}m{secs}s"
-    hours = int(minutes // 60)
-    mins = int(minutes % 60)
-    if hours < 24:
-        return f"{hours}h{mins}m"
-    days = int(hours // 24)
-    hrs = int(hours % 24)
-    return f"{days}d{hrs}h"
-
-
-def format_finish_time(eta_seconds: float) -> str:
-    """
-    Format an ETA as an absolute expected finish time.
-
-    Args:
-        eta_seconds: Estimated time remaining in seconds.
-
-    Returns:
-        Formatted finish time string.
-            - Same day: Shows time only (e.g., "14:30:45")
-            - Future day: Shows date and time using locale settings
-            - If eta_seconds <= 0: Returns "..."
-    """
-    if eta_seconds > 0:
-        finish_time = datetime.now() + timedelta(seconds=eta_seconds)
-        if finish_time.date() == datetime.now().date():
-            return finish_time.strftime("%H:%M:%S")
-        return finish_time.strftime("%x %X")
-    return "..."
-
 
 def sanitize_filename(name: str) -> str:
     r"""

@@ -23,13 +23,14 @@ import logging
 import requests
 import tempfile
 import threading
+import csv
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from appconfig import cfg
 from utils import (
-    convert_to_ogg, get_audio_duration, score_status, setup_logging,
-    transcribe_and_score,
+    convert_to_ogg, format_finish_time, format_time, get_audio_duration,
+    score_status, setup_logging, similarity_score, transcribe_and_score,
 )
 
 import pandas as pd
@@ -1125,96 +1126,6 @@ class SampleCheckWorker(QObject):
         self.finished.emit({"total_checked": checked})
 
 
-class AllSamplesDetailDialog(QDialog):
-    """
-    Side-by-side comparison of a sample's text and its transcription,
-    with a button to overwrite the sample text in-place.
-    """
-
-    def __init__(
-        self,
-        row: Dict[str, Any],
-        parent: Optional[QWidget] = None,
-        on_apply: Optional[Callable[[Dict[str, Any]], None]] = None,
-    ):
-        super().__init__(parent)
-        self.row = row
-        self.on_apply = on_apply
-        self.setWindowTitle(f"{row['profile']} - {row['stem']}")
-        self.resize(1000, 600)
-
-        outer = QVBoxLayout(self)
-
-        label, color = score_status(row["score"])
-        if not row["success"]:
-            label = "ERROR"
-        header = QLabel(f"{label.upper()} - {row['score']:.2f}%")
-        header.setStyleSheet(f"color: {color}; font-weight: bold; font-size: 14px;")
-        header.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        outer.addWidget(header)
-
-        splitter = QSplitter(Qt.Orientation.Horizontal)
-        mono_font = QFont("Consolas", 9)
-
-        text_widget = QWidget()
-        text_layout = QVBoxLayout(text_widget)
-        text_layout.setContentsMargins(0, 0, 0, 0)
-        text_header = QLabel("SAMPLE TEXT")
-        text_header.setStyleSheet("font-weight: bold;")
-        text_layout.addWidget(text_header)
-        self.text_edit = QTextEdit()
-        self.text_edit.setReadOnly(True)
-        self.text_edit.setFont(mono_font)
-        self.text_edit.setPlainText(row["text"])
-        text_layout.addWidget(self.text_edit)
-
-        trans_widget = QWidget()
-        trans_layout = QVBoxLayout(trans_widget)
-        trans_layout.setContentsMargins(0, 0, 0, 0)
-        trans_header = QLabel("TRANSCRIBED")
-        trans_header.setStyleSheet("font-weight: bold;")
-        trans_layout.addWidget(trans_header)
-        self.trans_edit = QTextEdit()
-        self.trans_edit.setReadOnly(True)
-        self.trans_edit.setFont(mono_font)
-        self.trans_edit.setPlainText(row["transcribed_text"])
-        trans_layout.addWidget(self.trans_edit)
-
-        splitter.addWidget(text_widget)
-        splitter.addWidget(trans_widget)
-        splitter.setStretchFactor(0, 1)
-        splitter.setStretchFactor(1, 1)
-        outer.addWidget(splitter, stretch=1)
-
-        btn_row = QHBoxLayout()
-        self.use_btn = QPushButton("📋 Use Transcribed Text")
-        self.use_btn.setEnabled(row["success"])
-        self.use_btn.clicked.connect(self._on_use_transcribed)
-        btn_row.addWidget(self.use_btn)
-        btn_row.addStretch()
-        close_btn = QPushButton("Close")
-        close_btn.setDefault(True)
-        close_btn.clicked.connect(self.accept)
-        btn_row.addWidget(close_btn)
-        outer.addLayout(btn_row)
-
-    def _on_use_transcribed(self):
-        reply = QMessageBox.warning(
-            self,
-            "Replace Sample Text",
-            f"This will replace the text of '{self.row['stem']}' with the "
-            "transcribed text shown on the right.\n\nContinue?",
-            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-            QMessageBox.StandardButton.No
-        )
-        if reply != QMessageBox.StandardButton.Yes:
-            return
-        if self.on_apply:
-            self.on_apply(self.row)
-        self.text_edit.setPlainText(self.row["transcribed_text"])
-        self.use_btn.setEnabled(False)
-
-
 class CheckAllSamplesDialog(QDialog):
     """
     Checks every voice sample (WAV+txt pair) across every voice profile,
@@ -1232,9 +1143,11 @@ class CheckAllSamplesDialog(QDialog):
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("🧪 Check All Samples")
-        self.resize(1100, 650)
+        self.resize(1100, 800)
         self._worker: Optional[SampleCheckWorker] = None
         self._worker_thread: Optional[QThread] = None
+        self._rows: List[Dict[str, Any]] = []
+        self._current_detail_row: Optional[Dict[str, Any]] = None
         self._build_ui()
 
     def _build_ui(self):
@@ -1242,7 +1155,7 @@ class CheckAllSamplesDialog(QDialog):
 
         top_layout = QHBoxLayout()
         self.include_prep_cb = QCheckBox(f"Include unapproved samples ({cfg.VOICES_PREP_DIR})")
-        self.include_prep_cb.setChecked(True)
+        self.include_prep_cb.setChecked(False)
         top_layout.addWidget(self.include_prep_cb)
         top_layout.addStretch()
 
@@ -1263,6 +1176,9 @@ class CheckAllSamplesDialog(QDialog):
         self.stage_label = QLabel("Ready. Click \"Start Check\" to scan and check every sample.")
         layout.addWidget(self.stage_label)
 
+        self.progress_label = QLabel("")
+        layout.addWidget(self.progress_label)
+
         self.table = QTableWidget()
         self.table.setColumnCount(6)
         self.table.setHorizontalHeaderLabels(
@@ -1271,16 +1187,86 @@ class CheckAllSamplesDialog(QDialog):
         self.table.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
         self.table.setSelectionBehavior(QAbstractItemView.SelectionBehavior.SelectRows)
         self.table.setSortingEnabled(True)
-        self.table.horizontalHeader().setStretchLastSection(True)
-        self.table.itemDoubleClicked.connect(self._on_row_double_clicked)
+        header = self.table.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
+        # Sample Text and Transcribed Text share the remaining space equally.
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Stretch)
         self.table.itemSelectionChanged.connect(self._on_selection_changed)
-        layout.addWidget(self.table, stretch=1)
+        layout.addWidget(self.table, stretch=2)
+
+        # Detail panel: full, editable text for whichever sample is selected.
+        detail_box = QGroupBox("Sample Details")
+        detail_layout = QVBoxLayout(detail_box)
+
+        self.detail_header_label = QLabel("Select a sample above to see the full text.")
+        self.detail_header_label.setStyleSheet("font-weight: bold;")
+        detail_layout.addWidget(self.detail_header_label)
+
+        detail_splitter = QSplitter(Qt.Orientation.Horizontal)
+        mono_font = QFont("Consolas", 9)
+
+        sample_widget = QWidget()
+        sample_layout = QVBoxLayout(sample_widget)
+        sample_layout.setContentsMargins(0, 0, 0, 0)
+        sample_header = QLabel("SAMPLE TEXT (editable)")
+        sample_header.setStyleSheet("font-weight: bold;")
+        sample_layout.addWidget(sample_header)
+        self.detail_sample_edit = QTextEdit()
+        self.detail_sample_edit.setFont(mono_font)
+        sample_layout.addWidget(self.detail_sample_edit)
+        detail_splitter.addWidget(sample_widget)
+
+        trans_widget = QWidget()
+        trans_layout = QVBoxLayout(trans_widget)
+        trans_layout.setContentsMargins(0, 0, 0, 0)
+        trans_header = QLabel("TRANSCRIBED")
+        trans_header.setStyleSheet("font-weight: bold;")
+        trans_layout.addWidget(trans_header)
+        self.detail_trans_edit = QTextEdit()
+        self.detail_trans_edit.setReadOnly(True)
+        self.detail_trans_edit.setFont(mono_font)
+        trans_layout.addWidget(self.detail_trans_edit)
+        detail_splitter.addWidget(trans_widget)
+
+        detail_splitter.setStretchFactor(0, 1)
+        detail_splitter.setStretchFactor(1, 1)
+        detail_layout.addWidget(detail_splitter, stretch=1)
+
+        detail_btn_row = QHBoxLayout()
+        self.detail_use_btn = QPushButton("📋 Use Transcribed Text")
+        self.detail_use_btn.setToolTip(
+            "Replace this sample's text with the transcribed text and save it."
+        )
+        self.detail_use_btn.clicked.connect(self._on_use_transcribed_for_selected)
+        self.detail_use_btn.setEnabled(False)
+        detail_btn_row.addWidget(self.detail_use_btn)
+
+        self.detail_save_btn = QPushButton("💾 Save")
+        self.detail_save_btn.setToolTip(
+            "Save the edited sample text and re-check its similarity score."
+        )
+        self.detail_save_btn.clicked.connect(self._on_save_detail_text)
+        self.detail_save_btn.setEnabled(False)
+        detail_btn_row.addWidget(self.detail_save_btn)
+
+        detail_btn_row.addStretch()
+        detail_layout.addLayout(detail_btn_row)
+
+        layout.addWidget(detail_box, stretch=1)
 
         btn_layout = QHBoxLayout()
-        self.use_text_btn = QPushButton("📋 Use Transcribed Text for Selected")
-        self.use_text_btn.clicked.connect(self._on_use_transcribed_for_selected)
-        self.use_text_btn.setEnabled(False)
-        btn_layout.addWidget(self.use_text_btn)
+        self.save_results_btn = QPushButton("💾 Save Results...")
+        self.save_results_btn.setToolTip(
+            "Save all checked samples to a CSV file, sorted worst score first."
+        )
+        self.save_results_btn.clicked.connect(self._on_save_results)
+        self.save_results_btn.setEnabled(False)
+        btn_layout.addWidget(self.save_results_btn)
+
         btn_layout.addStretch()
         self.close_btn = QPushButton("Close")
         self.close_btn.clicked.connect(self._on_close)
@@ -1310,8 +1296,11 @@ class CheckAllSamplesDialog(QDialog):
         self.table.setSortingEnabled(False)
         self.table.setRowCount(0)
         self.table.setSortingEnabled(True)
-        self.use_text_btn.setEnabled(False)
+        self._rows = []
+        self._clear_detail_panel()
+        self.save_results_btn.setEnabled(False)
         self.progress_bar.setValue(0)
+        self.progress_label.setText("")
         self.start_btn.setEnabled(False)
         self.include_prep_cb.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -1350,11 +1339,24 @@ class CheckAllSamplesDialog(QDialog):
         pct = int(100 * done / total) if total else 0
         self.progress_bar.setValue(pct)
 
+        elapsed = info.get("elapsed", 0.0)
+        eta_seconds = info.get("eta_seconds", 0.0)
+        remaining = max(total - done, 0)
+        self.progress_label.setText(
+            f"{done}/{total} checked  |  "
+            f"Elapsed: {format_time(elapsed)}  |  "
+            f"ETA: {format_time(eta_seconds)} ({remaining} left)  |  "
+            f"Finish: ~{format_finish_time(eta_seconds)}"
+        )
+
     def _on_sample_checked(self, row: Dict[str, Any]):
+        self._rows.append(row)
         self._add_row(row)
+        self.save_results_btn.setEnabled(True)
 
     def _on_finished(self, info: dict):
         self.stage_label.setText(f"Done. Checked {info.get('total_checked', 0)} sample(s).")
+        self.progress_label.setText("")
         self._cleanup_thread()
         self.start_btn.setEnabled(True)
         self.include_prep_cb.setEnabled(True)
@@ -1384,7 +1386,9 @@ class CheckAllSamplesDialog(QDialog):
         profile_item.setData(Qt.ItemDataRole.UserRole, row)
         self.table.setItem(r, 0, profile_item)
 
-        sample_label = f"{row['stem']} [{row['source']}]"
+        sample_label = row['stem']
+        if row['source'] == "Prep":
+            sample_label += f" [{row['source']}]" 
         self.table.setItem(r, 1, QTableWidgetItem(sample_label))
 
         score = row["score"]
@@ -1418,64 +1422,165 @@ class CheckAllSamplesDialog(QDialog):
         item = self.table.item(row_idx, 0)
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
+    def _selected_row_index(self) -> Optional[int]:
+        selected = self.table.selectedItems()
+        return selected[0].row() if selected else None
+
+    def _clear_detail_panel(self):
+        self._current_detail_row = None
+        self.detail_header_label.setText("Select a sample above to see the full text.")
+        self.detail_header_label.setStyleSheet("font-weight: bold;")
+        self.detail_sample_edit.blockSignals(True)
+        self.detail_sample_edit.clear()
+        self.detail_sample_edit.blockSignals(False)
+        self.detail_trans_edit.clear()
+        self.detail_use_btn.setEnabled(False)
+        self.detail_save_btn.setEnabled(False)
+
+    def _update_detail_header(self, row: Dict[str, Any]):
+        label, color = score_status(row["score"])
+        if not row["success"]:
+            label = "Error"
+        self.detail_header_label.setText(
+            f"{row['profile']} - {row['stem']} [{row['source']}]  -  {label}: {row['score']:.1f}%"
+        )
+        self.detail_header_label.setStyleSheet(f"color: {color}; font-weight: bold;")
+
     def _on_selection_changed(self):
         row = self._selected_row_data()
-        self.use_text_btn.setEnabled(bool(row) and row.get("success", False))
-
-    def _on_row_double_clicked(self, item: QTableWidgetItem):
-        row_idx = item.row()
-        data_item = self.table.item(row_idx, 0)
-        row = data_item.data(Qt.ItemDataRole.UserRole) if data_item else None
+        self._current_detail_row = row
         if not row:
+            self._clear_detail_panel()
             return
-        dlg = AllSamplesDetailDialog(row, self, on_apply=self._apply_transcribed_text)
-        dlg.exec()
-        # Refresh this row's "Sample Text" cell in case it was just replaced
-        text_item = self.table.item(row_idx, 4)
-        if text_item:
-            text_item.setText(
-                row["text"][:120] + "..." if len(row["text"]) > 120 else row["text"]
-            )
+
+        self._update_detail_header(row)
+        self.detail_sample_edit.blockSignals(True)
+        self.detail_sample_edit.setPlainText(row["text"])
+        self.detail_sample_edit.blockSignals(False)
+        self.detail_trans_edit.setPlainText(row["transcribed_text"])
+        self.detail_use_btn.setEnabled(row.get("success", False))
+        self.detail_save_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # Applying corrections
     # ------------------------------------------------------------------
 
+    def _refresh_grid_row(self, row_idx: int, row: Dict[str, Any]):
+        """Update a row's Score/Status/Sample Text cells after a rescoring."""
+        self.table.setSortingEnabled(False)
+
+        score = row["score"]
+        score_item = self.table.item(row_idx, 2)
+        if score_item:
+            score_item.setText(f"{score:.1f}")
+            score_item.setData(Qt.ItemDataRole.UserRole + 1, score)
+
+        label, color = score_status(score)
+        if not row["success"]:
+            label = "Error"
+        status_item = self.table.item(row_idx, 3)
+        if status_item:
+            status_item.setText(label)
+            status_item.setForeground(QColor(color))
+
+        text = row["text"]
+        text_item = self.table.item(row_idx, 4)
+        if text_item:
+            text_item.setText(text[:120] + "..." if len(text) > 120 else text)
+
+        # The row dict is stashed on column 0 for later lookups - keep it fresh.
+        profile_item = self.table.item(row_idx, 0)
+        if profile_item:
+            profile_item.setData(Qt.ItemDataRole.UserRole, row)
+
+        self.table.setSortingEnabled(True)
+
     def _on_use_transcribed_for_selected(self):
-        row = self._selected_row_data()
+        """Replace the selected sample's text with its transcription, then save."""
+        row = self._current_detail_row
         if not row or not row.get("success", False):
             return
         reply = QMessageBox.warning(
             self,
             "Replace Sample Text",
             f"This will replace the text of '{row['stem']}' with the "
-            "transcribed text.\n\nContinue?",
+            "transcribed text and save it.\n\nContinue?",
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
         if reply != QMessageBox.StandardButton.Yes:
             return
-        self._apply_transcribed_text(row)
+        self.detail_sample_edit.setPlainText(row["transcribed_text"])
+        self._on_save_detail_text()
 
-        selected = self.table.selectedItems()
-        if selected:
-            row_idx = selected[0].row()
-            new_text = row["text"]
-            item = self.table.item(row_idx, 4)
-            if item:
-                item.setText(
-                    new_text[:120] + "..." if len(new_text) > 120 else new_text)
+    def _on_save_detail_text(self):
+        """Save the (possibly hand-edited) sample text and re-check its score."""
+        row = self._current_detail_row
+        if not row:
+            return
+        row_idx = self._selected_row_index()
+        if row_idx is None:
+            return
 
-    def _apply_transcribed_text(self, row: Dict[str, Any]):
-        """Write a sample's transcribed text to its .txt file in-place."""
+        new_text = self.detail_sample_edit.toPlainText()
         try:
-            row["txt_path"].write_text(row["transcribed_text"], encoding="utf-8")
-            row["text"] = row["transcribed_text"]
-            self.stage_label.setText(f"📋 Updated text for {row['stem']}")
-            logger.info(f"Updated sample text in-place for {row['stem']} via Check All Samples")
+            row["txt_path"].write_text(new_text, encoding="utf-8")
         except Exception as e:
-            logger.error(f"Failed to update text for {row['stem']}: {e}")
+            logger.error(f"Failed to save text for {row['stem']}: {e}")
             QMessageBox.warning(self, "Save Failed", f"Could not save text file:\n{e}")
+            return
+
+        row["text"] = new_text
+        row["score"] = similarity_score(new_text, row["transcribed_text"])
+
+        self._refresh_grid_row(row_idx, row)
+        self._update_detail_header(row)
+        self.stage_label.setText(f"💾 Saved text for {row['stem']} (rescored: {row['score']:.1f}%)")
+        logger.info(
+            f"Saved sample text for {row['stem']} via Check All Samples "
+            f"(new score: {row['score']:.1f}%)"
+        )
+
+    def _on_save_results(self):
+        """Save all checked samples to a CSV file, sorted worst score first."""
+        if not self._rows:
+            QMessageBox.information(self, "No Results", "No checked samples to save yet.")
+            return
+
+        default_name = "sample_check_results.csv"
+        file_path, _ = QFileDialog.getSaveFileName(
+            self, "Save Check Results", default_name, "CSV Files (*.csv)"
+        )
+        if not file_path:
+            return
+
+        rows_sorted = sorted(self._rows, key=lambda r: r["score"])
+
+        try:
+            with open(file_path, "w", newline="", encoding="utf-8") as f:
+                writer = csv.writer(f)
+                writer.writerow([
+                    "Profile", "Sample", "Source", "Score", "Status",
+                    "SampleText", "TranscribedText",
+                ])
+                for row in rows_sorted:
+                    label, _ = score_status(row["score"])
+                    if not row["success"]:
+                        label = "Error"
+                    writer.writerow([
+                        row["profile"],
+                        row["stem"],
+                        row["source"],
+                        f"{row['score']:.2f}",
+                        label,
+                        row["text"],
+                        row["transcribed_text"],
+                    ])
+            self.stage_label.setText(f"💾 Saved {len(rows_sorted)} result(s) to {file_path}")
+            logger.info(f"Saved {len(rows_sorted)} check results to {file_path}")
+        except Exception as e:
+            logger.error(f"Failed to save check results: {e}")
+            QMessageBox.warning(self, "Save Failed", f"Could not save results:\n{e}")
 
     def _on_close(self):
         self._cleanup_thread()

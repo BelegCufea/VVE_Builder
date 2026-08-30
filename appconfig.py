@@ -201,7 +201,7 @@ DEFAULTS: dict = {
     # ============================================================================
 
     # Transcription language
-    "SAMLPES_LANGUAGE": "english",
+    "TRANSCRIPTION_LANGUAGE": "english",
 
     # How many wav files to sample per NPC directory for transcription checking
     "SAMPLES_PER_NPC": 5,

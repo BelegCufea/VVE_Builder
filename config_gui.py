@@ -7,7 +7,7 @@ import sys
 from pathlib import Path
 
 from appconfig import cfg, set_many
-from PySide6.QtCore import Qt
+from PySide6.QtCore import Qt, QLocale
 from PySide6.QtWidgets import (
     QApplication,
     QComboBox,
@@ -46,7 +46,11 @@ class ConfigWindow(QMainWindow):
 
         self.language_combo = QComboBox()
         self.language_combo.setToolTip("Languages found in the game's lang directory")
-        self.language_combo.currentTextChanged.connect(self.validate)
+        self.language_combo.currentTextChanged.connect(self.on_language_changed)
+
+        self.transcription_language_edit = QLineEdit(str(cfg.TRANSCRIPTION_LANGUAGE))
+        self.transcription_language_edit.setPlaceholderText("For example: English")
+        self.transcription_language_edit.textChanged.connect(self.validate)        
 
         self.encoding_edit = QLineEdit(str(cfg.TEXT_ENCODING))
         self.encoding_edit.setPlaceholderText("For example: utf-8")
@@ -56,6 +60,7 @@ class ConfigWindow(QMainWindow):
         form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
         form.addRow("Game directory", directory_row)
         form.addRow("Language", self.language_combo)
+        form.addRow("Transcription language", self.transcription_language_edit)
         form.addRow("Text encoding", self.encoding_edit)
 
         settings_group = QGroupBox("Game data")
@@ -108,6 +113,14 @@ class ConfigWindow(QMainWindow):
             key=str.casefold,
         )
 
+    def on_language_changed(self, locale_name: str) -> None:
+        if locale_name:
+            loc = QLocale(locale_name)
+            if loc.language() != QLocale.Language.C:
+                english_name = QLocale.languageToString(loc.language())
+                self.transcription_language_edit.setText(english_name.lower())
+        self.validate()    
+
     def refresh_languages(self) -> None:
         previous = self.language_combo.currentText() or str(cfg.LANGUAGE)
         languages = self.available_languages()
@@ -124,6 +137,7 @@ class ConfigWindow(QMainWindow):
     def validation_errors(self) -> list[str]:
         game_directory = Path(self.game_directory_edit.text()).expanduser()
         languages = self.available_languages()
+        transcription_lang = self.transcription_language_edit.text().strip()
         encoding = self.encoding_edit.text().strip()
         errors: list[str] = []
 
@@ -136,6 +150,9 @@ class ConfigWindow(QMainWindow):
             errors.append("No language directories were found in the game's lang directory.")
         elif self.language_combo.currentText() not in languages:
             errors.append("Select one of the languages found in the lang directory.")
+
+        if not transcription_lang:
+            errors.append("Transcription language cannot be empty.")            
 
         if not encoding:
             errors.append("Text encoding cannot be empty.")
@@ -168,6 +185,7 @@ class ConfigWindow(QMainWindow):
             {
                 "GAME_DIRECTORY": str(Path(self.game_directory_edit.text()).expanduser()),
                 "LANGUAGE": self.language_combo.currentText(),
+                "TRANSCRIPTION_LANGUAGE": self.transcription_language_edit.text().strip(),                
                 "TEXT_ENCODING": self.encoding_edit.text().strip(),
             }
         )
