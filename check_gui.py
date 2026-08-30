@@ -38,7 +38,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox,
     QStatusBar, QTableWidget, QTableWidgetItem,
-    QDialog, QSplitter, QAbstractItemView,
+    QDialog, QSplitter, QAbstractItemView, QSpinBox, QFileDialog
 )
 
 from appconfig import cfg
@@ -169,12 +169,26 @@ class CheckWorker(QObject):
         for npc_dir in npc_dirs:
             if self._stop_requested.is_set():
                 break
-            wav_files = list(npc_dir.glob("*.wav")) + list(npc_dir.glob("*.WAV"))
+            # A single case-insensitive glob, deduplicated by resolved path.
+            # Using two globs ("*.wav" + "*.WAV") double-counts every file
+            # on case-insensitive filesystems (Windows, default macOS),
+            # since both patterns match the same files there.
+            wav_files = sorted(
+                {
+                    p.resolve()
+                    for p in npc_dir.iterdir()
+                    if p.is_file() and p.suffix.lower() == ".wav"
+                }
+            )
             if not wav_files:
                 continue
-            sample_files = random.sample(
-                wav_files, min(cfg.SAMPLES_PER_NPC, len(wav_files))
-            )
+            if cfg.SAMPLES_PER_NPC <= 0:
+                # 0 means "check every available audio file" for this NPC.
+                sample_files = wav_files
+            else:
+                sample_files = random.sample(
+                    wav_files, min(cfg.SAMPLES_PER_NPC, len(wav_files))
+                )
             batch = []
             for wav_file in sample_files:
                 match = pattern.match(wav_file.name)
@@ -527,6 +541,7 @@ class CheckWindow(QMainWindow):
         self._all_npc_data: Dict[str, dict] = {}
         self._selected_npc: Optional[str] = None
         self._npc_row_index: Dict[str, int] = {}
+        self._detail_samples: List[dict] = []
 
         self._build_ui()
         logger.info("Transcription Check ready.")
@@ -551,14 +566,29 @@ class CheckWindow(QMainWindow):
         self.export_btn = QPushButton("Export CSV")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_csv)
+
+        samples_label = QLabel("Samples/NPC:")
+        self.samples_spin = QSpinBox()
+        self.samples_spin.setMinimum(0)
+        self.samples_spin.setMaximum(100_000)
+        self.samples_spin.setSpecialValueText("All")
+        self.samples_spin.setValue(cfg.SAMPLES_PER_NPC)
+        self.samples_spin.setToolTip(
+            "Number of random samples to check per NPC. 0 = check every "
+            "available audio file."
+        )
+        self.samples_spin.valueChanged.connect(self._on_samples_per_npc_changed)
+
         self.stats_label = QLabel(
-            f"NPCs: -  Samples: -  Avg: -%  "
-            f"(config: {cfg.SAMPLES_PER_NPC} samples/NPC, sequential)"
+            f"NPCs: -  Samples: -  Avg: -%  (sequential)"
         )
         self.stats_label.setStyleSheet("color: gray; font-size: 11px;")
         toolbar.addWidget(self.start_btn)
         toolbar.addWidget(self.stop_btn)
         toolbar.addWidget(self.export_btn)
+        toolbar.addSpacing(16)
+        toolbar.addWidget(samples_label)
+        toolbar.addWidget(self.samples_spin)
         toolbar.addStretch()
         toolbar.addWidget(self.stats_label)
         layout.addLayout(toolbar)
@@ -609,14 +639,18 @@ class CheckWindow(QMainWindow):
         self.detail_table.setColumnCount(5)
         self.detail_table.setHorizontalHeaderLabels([
             "StrRef", "Audio File", "Score %",
-            "CSV Text (truncated)", "Transcribed Text (truncated)"
+            "CSV Text", "Transcribed Text"
         ])
         self.detail_table.horizontalHeader().setStretchLastSection(True)
         self.detail_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
+        self.detail_table.setSelectionMode(
+            QAbstractItemView.SelectionMode.SingleSelection)
         self.detail_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.detail_table.itemDoubleClicked.connect(self._on_detail_double_click)
+        self.detail_table.itemSelectionChanged.connect(
+            self._on_detail_sample_selected)
         self.detail_table.verticalHeader().setVisible(False)
         self.detail_table.setColumnWidth(0, 80)
         self.detail_table.setColumnWidth(1, 180)
@@ -626,6 +660,48 @@ class CheckWindow(QMainWindow):
         self.detail_table.hide()
         dl.addWidget(self.detail_table)
         layout.addWidget(dg, stretch=3)
+
+        # Full-text panel for whichever sample row is selected above - the
+        # grid cells are single-line and elided, this shows both texts in
+        # full so nothing is cut off.
+        fg = QGroupBox("Full Text (selected sample)")
+        fl = QVBoxLayout(fg)
+        self.fulltext_header_label = QLabel(
+            "Select a sample above to see its full text.")
+        self.fulltext_header_label.setStyleSheet("color: gray;")
+        fl.addWidget(self.fulltext_header_label)
+
+        fulltext_splitter = QSplitter(Qt.Orientation.Horizontal)
+        mono_font = QFont("Consolas", 9)
+
+        csv_widget = QWidget()
+        csv_layout = QVBoxLayout(csv_widget)
+        csv_layout.setContentsMargins(0, 0, 0, 0)
+        csv_header = QLabel("CSV TEXT")
+        csv_header.setStyleSheet("font-weight: bold;")
+        csv_layout.addWidget(csv_header)
+        self.detail_csv_edit = QTextEdit()
+        self.detail_csv_edit.setReadOnly(True)
+        self.detail_csv_edit.setFont(mono_font)
+        csv_layout.addWidget(self.detail_csv_edit)
+        fulltext_splitter.addWidget(csv_widget)
+
+        trans_widget = QWidget()
+        trans_layout = QVBoxLayout(trans_widget)
+        trans_layout.setContentsMargins(0, 0, 0, 0)
+        trans_header = QLabel("TRANSCRIBED TEXT")
+        trans_header.setStyleSheet("font-weight: bold;")
+        trans_layout.addWidget(trans_header)
+        self.detail_trans_edit = QTextEdit()
+        self.detail_trans_edit.setReadOnly(True)
+        self.detail_trans_edit.setFont(mono_font)
+        trans_layout.addWidget(self.detail_trans_edit)
+        fulltext_splitter.addWidget(trans_widget)
+
+        fulltext_splitter.setStretchFactor(0, 1)
+        fulltext_splitter.setStretchFactor(1, 1)
+        fl.addWidget(fulltext_splitter, stretch=1)
+        layout.addWidget(fg, stretch=2)
 
         self.setStatusBar(QStatusBar())
         self.statusBar().showMessage("Ready", 3000)
@@ -658,6 +734,7 @@ class CheckWindow(QMainWindow):
         self.export_btn.setEnabled(False)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
+        self.samples_spin.setEnabled(False)
 
         self._worker_thread = QThread()
         self._worker = CheckWorker()
@@ -685,6 +762,16 @@ class CheckWindow(QMainWindow):
     def _on_thread_finished(self) -> None:
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
+        self.samples_spin.setEnabled(True)
+
+    def _on_samples_per_npc_changed(self, value: int) -> None:
+        """Update cfg.SAMPLES_PER_NPC live from the spin box.
+
+        0 means "check every available audio file" for each NPC.
+        """
+        cfg.SAMPLES_PER_NPC = value
+        label = "all available" if value <= 0 else str(value)
+        logger.info(f"Samples per NPC set to {label}.")
 
     # ------------------------------------------------------------------
     # Worker signal handlers
@@ -836,6 +923,7 @@ class CheckWindow(QMainWindow):
             self._selected_npc = None
             self.detail_table.hide()
             self.detail_placeholder.show()
+            self._clear_fulltext_panel()
             return
         row_idx = rows[0].row()
         name_item = self.npc_table.item(row_idx, 0)
@@ -854,17 +942,22 @@ class CheckWindow(QMainWindow):
             self.detail_placeholder.setText(
                 f"NPC '{npc_name}': no samples collected yet.")
             self.detail_placeholder.show()
+            self._detail_samples = []
+            self._clear_fulltext_panel()
             return
 
         self.detail_placeholder.hide()
         self.detail_table.show()
-        # Sort by score, lowest first (errors float to the end)
+        # Sort by score, lowest first (errors float to the end). Stashed so
+        # row index -> sample lookups (double-click, selection) stay in
+        # sync with what's actually displayed.
         samples = sorted(
             samples,
             key=lambda s: s["SimilarityScore"]
             if isinstance(s["SimilarityScore"], (int, float))
             else float("inf"),
         )
+        self._detail_samples = samples
         self.detail_table.setRowCount(len(samples))
 
         for row, sample in enumerate(samples):
@@ -888,15 +981,22 @@ class CheckWindow(QMainWindow):
             self._apply_score_color(ci, score)
             self.detail_table.setItem(row, 2, ci)
 
+            # Full text in the cell - Qt elides it to "..." to fit the
+            # current column width automatically, and the tooltip plus the
+            # full-text panel below cover seeing the whole thing.
             csv_t = sample["CSVText"]
-            self.detail_table.setItem(row, 3, QTableWidgetItem(
-                csv_t[:120] + "..." if len(csv_t) > 120 else csv_t))
+            csv_item = QTableWidgetItem(csv_t)
+            csv_item.setToolTip(csv_t)
+            self.detail_table.setItem(row, 3, csv_item)
 
             tr_t = sample["TranscribedText"]
-            self.detail_table.setItem(row, 4, QTableWidgetItem(
-                tr_t[:120] + "..." if len(tr_t) > 120 else tr_t))
+            tr_item = QTableWidgetItem(tr_t)
+            tr_item.setToolTip(tr_t)
+            self.detail_table.setItem(row, 4, tr_item)
 
-        self.detail_table.resizeRowsToContents()
+        self.detail_table.setWordWrap(False)
+        self.detail_table.setCurrentCell(0, 0)
+        self._on_detail_sample_selected()
 
     def _apply_score_color(self, item: QTableWidgetItem, score: float) -> None:
         if not isinstance(score, (int, float)):
@@ -905,42 +1005,80 @@ class CheckWindow(QMainWindow):
         item.setForeground(QColor(color))
 
     def _on_detail_double_click(self, item: QTableWidgetItem) -> None:
-        if self._selected_npc is None:
-            return
-        npc_data = self._all_npc_data.get(self._selected_npc)
-        if not npc_data:
-            return
-        samples = npc_data.get("samples", [])
         row_idx = item.row()
-        if row_idx >= len(samples):
+        if row_idx >= len(self._detail_samples):
             return
-        dlg = SampleDetailDialog(samples[row_idx], self)
+        dlg = SampleDetailDialog(self._detail_samples[row_idx], self)
         dlg.exec()
+
+    def _on_detail_sample_selected(self) -> None:
+        rows = self.detail_table.selectedItems()
+        if not rows:
+            self._clear_fulltext_panel()
+            return
+        row_idx = rows[0].row()
+        if row_idx >= len(self._detail_samples):
+            self._clear_fulltext_panel()
+            return
+        sample = self._detail_samples[row_idx]
+        self.fulltext_header_label.setText(
+            f"StrRef {sample['StrRef']}  |  {sample['AudioFile']}  |  "
+            f"Score: {sample['SimilarityScore']}"
+            if not isinstance(sample["SimilarityScore"], (int, float))
+            else f"StrRef {sample['StrRef']}  |  {sample['AudioFile']}  |  "
+                 f"Score: {sample['SimilarityScore']:.1f}%"
+        )
+        self.fulltext_header_label.setStyleSheet("font-weight: bold;")
+        self.detail_csv_edit.setPlainText(sample["CSVText"])
+        self.detail_trans_edit.setPlainText(sample["TranscribedText"])
+
+    def _clear_fulltext_panel(self) -> None:
+        self.fulltext_header_label.setText(
+            "Select a sample above to see its full text.")
+        self.fulltext_header_label.setStyleSheet("color: gray;")
+        self.detail_csv_edit.clear()
+        self.detail_trans_edit.clear()
 
     # ------------------------------------------------------------------
     # Export CSV
     # ------------------------------------------------------------------
 
     def _export_csv(self) -> None:
-        output_file = "transcription_samples.csv"
+        output_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save Transcription Samples",
+            "transcription_samples.csv",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+
+        if not output_file:
+            return  # User cancelled
+
         rows = [
             row
             for data in self._all_npc_data.values()
             for row in data.get("samples", [])
         ]
+
         if not rows:
             self.statusBar().showMessage("Nothing to export.", 3000)
             return
+
         with open(output_file, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(f, fieldnames=[
-                "NPC", "StrRef", "AudioFile",
-                "SimilarityScore", "CSVText", "TranscribedText",
-            ])
+            writer = csv.DictWriter(
+                f,
+                fieldnames=[
+                    "NPC", "StrRef", "AudioFile",
+                    "SimilarityScore", "CSVText", "TranscribedText",
+                ],
+            )
             writer.writeheader()
             writer.writerows(rows)
+
         logger.info(f"Exported {len(rows)} rows to {output_file}")
         self.statusBar().showMessage(
-            f"Exported {len(rows)} rows to {output_file}", 5000)
+            f"Exported {len(rows)} rows to {output_file}", 5000
+        )
 
     # ------------------------------------------------------------------
     # Cleanup
