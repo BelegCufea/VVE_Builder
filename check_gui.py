@@ -21,6 +21,7 @@ Usage:
     python check_gui.py
 """
 
+import os
 import csv
 import logging
 import random
@@ -31,7 +32,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 from PySide6.QtCore import (
-    Qt, QObject, QThread, QTimer, Signal,
+    Qt, QUrl, QObject, QThread, QTimer, Signal,
 )
 from PySide6.QtGui import QFont, QColor
 from PySide6.QtWidgets import (
@@ -40,6 +41,7 @@ from PySide6.QtWidgets import (
     QStatusBar, QTableWidget, QTableWidgetItem,
     QDialog, QSplitter, QAbstractItemView, QSpinBox, QFileDialog
 )
+from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
 from appconfig import cfg
 from utils import (
@@ -82,6 +84,7 @@ def transcribe_sample(
         "NPC": npc_name,
         "StrRef": strref,
         "AudioFile": wav_path.name,
+        "AudioPath": wav_path.resolve(),
         "CSVText": text_for_scoring,
         "TranscribedText": result["transcribed_text"],
         "SimilarityScore": result["score"],
@@ -543,6 +546,10 @@ class CheckWindow(QMainWindow):
         self._npc_row_index: Dict[str, int] = {}
         self._detail_samples: List[dict] = []
 
+        self.audio_output = QAudioOutput()
+        self.media_player = QMediaPlayer()
+        self.media_player.setAudioOutput(self.audio_output)
+
         self._build_ui()
         logger.info("Transcription Check ready.")
 
@@ -669,7 +676,17 @@ class CheckWindow(QMainWindow):
         self.fulltext_header_label = QLabel(
             "Select a sample above to see its full text.")
         self.fulltext_header_label.setStyleSheet("color: gray;")
-        fl.addWidget(self.fulltext_header_label)
+        fulltext_info_row = QHBoxLayout()
+        fulltext_info_row.addWidget(self.fulltext_header_label)
+        fulltext_info_row.addStretch()
+        self.detail_play_btn = QPushButton("🔊 Play Sample")
+        self.detail_play_btn.setToolTip(
+            "Play the audio recording for the selected sample."
+        )
+        self.detail_play_btn.clicked.connect(self._play_selected_detail_sample)
+        self.detail_play_btn.setEnabled(False)
+        fulltext_info_row.addWidget(self.detail_play_btn)
+        fl.addLayout(fulltext_info_row)
 
         fulltext_splitter = QSplitter(Qt.Orientation.Horizontal)
         mono_font = QFont("Consolas", 9)
@@ -1031,6 +1048,7 @@ class CheckWindow(QMainWindow):
         self.fulltext_header_label.setStyleSheet("font-weight: bold;")
         self.detail_csv_edit.setPlainText(sample["CSVText"])
         self.detail_trans_edit.setPlainText(sample["TranscribedText"])
+        self.detail_play_btn.setEnabled(True)
 
     def _clear_fulltext_panel(self) -> None:
         self.fulltext_header_label.setText(
@@ -1038,6 +1056,31 @@ class CheckWindow(QMainWindow):
         self.fulltext_header_label.setStyleSheet("color: gray;")
         self.detail_csv_edit.clear()
         self.detail_trans_edit.clear()
+        self.detail_play_btn.setEnabled(False)
+
+    def _play_selected_detail_sample(self) -> None:
+        """Play the WAV file for the selected detail-table sample."""
+        rows = self.detail_table.selectedItems()
+        if not rows:
+            return
+        row_idx = rows[0].row()
+        if row_idx >= len(self._detail_samples):
+            return
+
+        wav_path = self._detail_samples[row_idx].get("AudioPath")
+        if not wav_path or not wav_path.exists():
+            self.media_player.stop()
+            self.statusBar().showMessage("⚠️ Audio file not found", 5000)
+            return
+
+        self.media_player.stop()
+        self.media_player.setSource(QUrl())
+        QApplication.processEvents()
+
+        self.audio_output.setVolume(0.7)
+        self.media_player.setSource(QUrl.fromLocalFile(str(wav_path)))
+        self.media_player.play()
+        self.statusBar().showMessage(f"🔊 Playing: {wav_path.name}", 3000)
 
     # ------------------------------------------------------------------
     # Export CSV
@@ -1101,6 +1144,8 @@ class CheckWindow(QMainWindow):
 # ============================================================================
 
 def main() -> None:
+    os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.multimedia.*=false"
+
     app = QApplication(sys.argv)
     window = CheckWindow()
     window.show()

@@ -1148,6 +1148,12 @@ class CheckAllSamplesDialog(QDialog):
         self._worker_thread: Optional[QThread] = None
         self._rows: List[Dict[str, Any]] = []
         self._current_detail_row: Optional[Dict[str, Any]] = None
+
+        # Keep playback owned by this dialog so it remains available while
+        # reviewing full sample/transcription text side by side.
+        self.detail_audio_output = QAudioOutput()
+        self.detail_media_player = QMediaPlayer()
+        self.detail_media_player.setAudioOutput(self.detail_audio_output)
         self._build_ui()
 
     def _build_ui(self):
@@ -1237,6 +1243,14 @@ class CheckAllSamplesDialog(QDialog):
         detail_layout.addWidget(detail_splitter, stretch=1)
 
         detail_btn_row = QHBoxLayout()
+        self.detail_play_btn = QPushButton("🔊 Play Sample")
+        self.detail_play_btn.setToolTip(
+            "Play the audio recording for the selected sample."
+        )
+        self.detail_play_btn.clicked.connect(self._play_selected_detail_sample)
+        self.detail_play_btn.setEnabled(False)
+        detail_btn_row.addWidget(self.detail_play_btn)
+
         self.detail_use_btn = QPushButton("📋 Use Transcribed Text")
         self.detail_use_btn.setToolTip(
             "Replace this sample's text with the transcribed text and save it."
@@ -1434,6 +1448,7 @@ class CheckAllSamplesDialog(QDialog):
         self.detail_sample_edit.clear()
         self.detail_sample_edit.blockSignals(False)
         self.detail_trans_edit.clear()
+        self.detail_play_btn.setEnabled(False)
         self.detail_use_btn.setEnabled(False)
         self.detail_save_btn.setEnabled(False)
 
@@ -1458,8 +1473,32 @@ class CheckAllSamplesDialog(QDialog):
         self.detail_sample_edit.setPlainText(row["text"])
         self.detail_sample_edit.blockSignals(False)
         self.detail_trans_edit.setPlainText(row["transcribed_text"])
+        self.detail_play_btn.setEnabled(True)
         self.detail_use_btn.setEnabled(row.get("success", False))
         self.detail_save_btn.setEnabled(True)
+
+    def _play_selected_detail_sample(self):
+        """Play the audio recording for the currently selected check result."""
+        row = self._current_detail_row
+        if not row:
+            return
+
+        wav_path = row["wav_path"]
+        if not wav_path.exists():
+            self.detail_media_player.stop()
+            self.stage_label.setText(f"⚠️ Audio file not found: {wav_path.name}")
+            return
+
+        # Reset the player before changing source, matching profile-editor playback.
+        self.detail_media_player.stop()
+        self.detail_media_player.setSource(QUrl())
+        QApplication.processEvents()
+
+        self.detail_audio_output.setVolume(0.7)
+        url = QUrl.fromLocalFile(str(wav_path.absolute()))
+        self.detail_media_player.setSource(url)
+        self.detail_media_player.play()
+        self.stage_label.setText(f"🔊 Playing: {wav_path.name}")
 
     # ------------------------------------------------------------------
     # Applying corrections
