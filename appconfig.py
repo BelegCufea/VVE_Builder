@@ -152,9 +152,9 @@ DEFAULTS: dict = {
 
     # Voice Fallback Configuration
     "USE_VOICE_FALLBACK": False,
-    "FALLBACK_VOICE_MALE": "BG1 Narrator",
-    "FALLBACK_VOICE_FEMALE": "BG3 Narrator",
-    "FALLBACK_VOICE_NEUTRAL": "Description Narrator",
+    "FALLBACK_VOICE_MALE": "Default Male",
+    "FALLBACK_VOICE_FEMALE": "Default Female",
+    "FALLBACK_VOICE_NEUTRAL": "Default Neutral",
 
     # Filename Generation
     "FORCE_GENERATED_FILENAMES": False,

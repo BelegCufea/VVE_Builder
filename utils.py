@@ -12,6 +12,7 @@ import subprocess
 import sys
 import time
 from datetime import datetime, timedelta
+import jiwer
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple, Union
@@ -501,25 +502,48 @@ def transcribe_via_voicebox(
     return f"<ERROR: {last_error}>", False
 
 
-def similarity_score(text_a: str, text_b: str) -> float:
-    """
-    Compute a similarity score (0-100) between two texts.
+_jiwer_transform = jiwer.Compose([
+    jiwer.ToLowerCase(),
+    jiwer.RemovePunctuation(),
+    jiwer.RemoveMultipleSpaces(),
+    jiwer.Strip(),
+    jiwer.ReduceToListOfListOfWords(),
+])
 
-    Case-insensitive and whitespace-trimmed; uses difflib's SequenceMatcher
-    ratio, matching the scoring approach used across the project's checking
-    tools.
+
+def similarity_score(reference: str, hypothesis: str) -> float:
+    """
+    Compute a similarity score (0-100) between expected and actual text.
+
+    Case-insensitive and whitespace-trimmed; combines difflib's SequenceMatcher
+    ratio (character-level accuracy) with a jiwer-based completeness penalty,
+    so a hypothesis that's an incomplete/truncated version of the reference
+    scores meaningfully lower than raw character overlap alone would suggest.
 
     Args:
-        text_a: First text (order doesn't matter).
-        text_b: Second text.
+        reference: The expected/correct text.
+        hypothesis: The text being evaluated against the reference.
 
     Returns:
         Similarity score from 0.0 to 100.0, rounded to 2 decimal places.
     """
-    return round(
-        SequenceMatcher(None, text_a.strip().lower(), text_b.strip().lower()).ratio() * 100,
-        2,
+    a = reference.strip().lower()
+    b = hypothesis.strip().lower()
+
+    base = SequenceMatcher(None, a, b, autojunk=False).ratio() * 100
+
+    if not a or not b:
+        return round(base, 2)
+
+    out = jiwer.process_words(
+        reference, hypothesis,
+        reference_transform=_jiwer_transform,
+        hypothesis_transform=_jiwer_transform,
     )
+    ref_word_count = out.hits + out.substitutions + out.deletions
+    completeness = 1.0 if ref_word_count == 0 else 1 - (out.deletions / ref_word_count)
+
+    return round(base * completeness, 2)
 
 
 def transcribe_and_score(
