@@ -76,7 +76,7 @@ def transcribe_sample(
 
     Returns:
         Dict containing NPC, StrRef, AudioFile, CSVText, TranscribedText,
-        and SimilarityScore.
+        SimilarityScore, and Duration.
     """
     result = transcribe_and_score(wav_path, text_for_scoring)
 
@@ -88,6 +88,7 @@ def transcribe_sample(
         "CSVText": text_for_scoring,
         "TranscribedText": result["transcribed_text"],
         "SimilarityScore": result["score"],
+        "Duration": result.get("duration", 0.0),
     }
 
 
@@ -253,11 +254,16 @@ class CheckWorker(QObject):
                     s["SimilarityScore"] for s in npc_samples
                     if isinstance(s["SimilarityScore"], (int, float))
                 ]
+                durations = [
+                    s["Duration"] for s in npc_samples
+                    if isinstance(s["Duration"], (int, float))
+                ]                
                 self.npc_completed.emit({
                     "npc": npc_name,
                     "samples": list(npc_samples),
                     "worst_score": min(scores) if scores else None,
                     "avg_score": (sum(scores) / len(scores)) if scores else None,
+                    "sum_duration": (sum(durations)) if durations else None,
                     "done": False,
                 })
 
@@ -276,13 +282,19 @@ class CheckWorker(QObject):
                 s["SimilarityScore"] for s in npc_samples
                 if isinstance(s["SimilarityScore"], (int, float))
             ]
+            durations = [
+                s["Duration"] for s in npc_samples
+                if isinstance(s["Duration"], (int, float))
+            ]
             worst = min(scores) if scores else None
             avg = (sum(scores) / len(scores)) if scores else None
+            sum_duration = (sum(durations)) if durations else None
             self.npc_completed.emit({
                 "npc": npc_name,
                 "samples": npc_samples,
                 "worst_score": worst,
                 "avg_score": avg,
+                "sum_duration": sum_duration,
                 "done": True,
             })
 
@@ -407,6 +419,7 @@ class SampleDetailDialog(QDialog):
 
     Features:
       - Color-coded similarity score header (Excellent/Good/Poor/Bad)
+      - Audio duration display
       - Two read-only text panes with monospace font
       - Copy-to-clipboard buttons with "Copied!" feedback
     """
@@ -416,7 +429,7 @@ class SampleDetailDialog(QDialog):
 
         Args:
             row: Dict containing sample data (StrRef, AudioFile, CSVText,
-                 TranscribedText, SimilarityScore).
+                 TranscribedText, SimilarityScore, Duration).
             parent: Optional parent widget.
         """
         super().__init__(parent)
@@ -426,8 +439,9 @@ class SampleDetailDialog(QDialog):
         outer = QVBoxLayout(self)
 
         score = row["SimilarityScore"]
+        duration = row.get("Duration", 0.0)
         label, score_color = score_status(score)
-        score_label = f"{label.upper()} - {score:.2f}%"
+        score_label = f"{label.upper()} - {score:.2f}%  |  Duration: {duration:.2f}s"
 
         score_label_widget = QLabel(score_label)
         score_label_widget.setStyleSheet(
@@ -615,9 +629,9 @@ class CheckWindow(QMainWindow):
         tg = QGroupBox("NPC Results")
         tg_layout = QVBoxLayout(tg)
         self.npc_table = QTableWidget()
-        self.npc_table.setColumnCount(5)
+        self.npc_table.setColumnCount(6)
         self.npc_table.setHorizontalHeaderLabels(
-            ["NPC Name", "Worst %", "Avg %", "Samples", "Status"]
+            ["NPC Name", "Worst %", "Avg %", "Samples", "Σ Duration (s)", "Status"]
         )
         self.npc_table.horizontalHeader().setStretchLastSection(True)
         self.npc_table.setSelectionBehavior(
@@ -627,6 +641,7 @@ class CheckWindow(QMainWindow):
         self.npc_table.setColumnWidth(1, 80)
         self.npc_table.setColumnWidth(2, 80)
         self.npc_table.setColumnWidth(3, 80)
+        self.npc_table.setColumnWidth(4, 100)
         self.npc_table.itemSelectionChanged.connect(self._on_npc_selected)
         self.npc_table.setSortingEnabled(True)
         tg_layout.addWidget(self.npc_table)
@@ -643,10 +658,10 @@ class CheckWindow(QMainWindow):
             "color: gray; font-style: italic; padding: 20px;")
         dl.addWidget(self.detail_placeholder)
         self.detail_table = QTableWidget()
-        self.detail_table.setColumnCount(5)
+        self.detail_table.setColumnCount(6)
         self.detail_table.setHorizontalHeaderLabels([
             "StrRef", "Audio File", "Score %",
-            "CSV Text", "Transcribed Text"
+            "Duration (s)", "CSV Text", "Transcribed Text"
         ])
         self.detail_table.horizontalHeader().setStretchLastSection(True)
         self.detail_table.setSelectionBehavior(
@@ -662,8 +677,9 @@ class CheckWindow(QMainWindow):
         self.detail_table.setColumnWidth(0, 80)
         self.detail_table.setColumnWidth(1, 180)
         self.detail_table.setColumnWidth(2, 80)
-        self.detail_table.setColumnWidth(3, 300)
+        self.detail_table.setColumnWidth(3, 90)
         self.detail_table.setColumnWidth(4, 300)
+        self.detail_table.setColumnWidth(5, 300)
         self.detail_table.hide()
         dl.addWidget(self.detail_table)
         layout.addWidget(dg, stretch=3)
@@ -864,6 +880,7 @@ class CheckWindow(QMainWindow):
         samples = npc_data.get("samples", [])
         worst = npc_data.get("worst_score")
         avg = npc_data.get("avg_score")
+        sum_duration = npc_data.get("sum_duration")
 
         self.npc_table.setItem(row, 0, QTableWidgetItem(npc_name))
 
@@ -888,9 +905,18 @@ class CheckWindow(QMainWindow):
         ci.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.npc_table.setItem(row, 3, ci)
 
+        # Average duration
+        if sum_duration is not None:
+            di = _NumericTableWidgetItem(f"{sum_duration:.2f}")
+            di.setData(Qt.ItemDataRole.UserRole + 1, sum_duration)
+        else:
+            di = QTableWidgetItem("-")
+        di.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.npc_table.setItem(row, 4, di)
+
         si = QTableWidgetItem()
         self._apply_status_color(si, worst)
-        self.npc_table.setItem(row, 4, si)
+        self.npc_table.setItem(row, 5, si)
 
     def _find_npc_row(self, npc_name: str) -> Optional[int]:
         # O(1) lookup via cache instead of scanning the table. This matters
@@ -979,6 +1005,7 @@ class CheckWindow(QMainWindow):
 
         for row, sample in enumerate(samples):
             score = sample["SimilarityScore"]
+            duration = sample.get("Duration", 0.0)
 
             si = _NumericTableWidgetItem(str(sample["StrRef"]))
             si.setData(Qt.ItemDataRole.UserRole + 1, sample["StrRef"])
@@ -998,18 +1025,25 @@ class CheckWindow(QMainWindow):
             self._apply_score_color(ci, score)
             self.detail_table.setItem(row, 2, ci)
 
+            # Duration column
+            di = _NumericTableWidgetItem(f"{duration:.2f}" if duration else "0.00")
+            di.setData(Qt.ItemDataRole.UserRole + 1, duration)
+            di.setTextAlignment(
+                Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            self.detail_table.setItem(row, 3, di)
+
             # Full text in the cell - Qt elides it to "..." to fit the
             # current column width automatically, and the tooltip plus the
             # full-text panel below cover seeing the whole thing.
             csv_t = sample["CSVText"]
             csv_item = QTableWidgetItem(csv_t)
             csv_item.setToolTip(csv_t)
-            self.detail_table.setItem(row, 3, csv_item)
+            self.detail_table.setItem(row, 4, csv_item)
 
             tr_t = sample["TranscribedText"]
             tr_item = QTableWidgetItem(tr_t)
             tr_item.setToolTip(tr_t)
-            self.detail_table.setItem(row, 4, tr_item)
+            self.detail_table.setItem(row, 5, tr_item)
 
         self.detail_table.setWordWrap(False)
         self.detail_table.setCurrentCell(0, 0)
@@ -1038,12 +1072,13 @@ class CheckWindow(QMainWindow):
             self._clear_fulltext_panel()
             return
         sample = self._detail_samples[row_idx]
+        duration = sample.get("Duration", 0.0)
+        score_str = (f"{sample['SimilarityScore']:.1f}%" 
+                    if isinstance(sample["SimilarityScore"], (int, float)) 
+                    else str(sample["SimilarityScore"]))
         self.fulltext_header_label.setText(
             f"StrRef {sample['StrRef']}  |  {sample['AudioFile']}  |  "
-            f"Score: {sample['SimilarityScore']}"
-            if not isinstance(sample["SimilarityScore"], (int, float))
-            else f"StrRef {sample['StrRef']}  |  {sample['AudioFile']}  |  "
-                 f"Score: {sample['SimilarityScore']:.1f}%"
+            f"Score: {score_str}  |  Duration: {duration:.2f}s"
         )
         self.fulltext_header_label.setStyleSheet("font-weight: bold;")
         self.detail_csv_edit.setPlainText(sample["CSVText"])

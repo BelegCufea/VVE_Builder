@@ -452,7 +452,7 @@ def transcribe_via_voicebox(
     timeout: Optional[float] = None,
     retry_count: Optional[int] = None,
     retry_delay: Optional[float] = None,
-) -> Tuple[str, bool]:
+) -> Tuple[str, bool, float]:
     """
     Send a WAV file to the Voicebox /transcribe endpoint, with retries.
 
@@ -466,8 +466,8 @@ def transcribe_via_voicebox(
             Defaults to cfg.SAMPLE_RETRY_DELAY.
 
     Returns:
-        Tuple of (text, success). On failure, text is a "<ERROR: ...>"
-        placeholder describing the last error and success is False.
+        Tuple of (text, success, duration). On failure, text is a "<ERROR: ...>"
+        placeholder describing the last error, success is False, and duration is 0.0.
     """
     logger = logging.getLogger(__name__)
     wav_path = Path(wav_path)
@@ -492,14 +492,15 @@ def transcribe_via_voicebox(
                     timeout=timeout,
                 )
             resp.raise_for_status()
-            return resp.json().get("text", ""), True
+            data = resp.json()
+            return data.get("text", ""), True, data.get("duration", 0.0)
         except Exception as ex:
             last_error = str(ex)
             logger.debug(f"Transcribe attempt {attempt + 1} failed for {wav_path.name}: {ex}")
             if attempt < retry_count_val:
                 time.sleep(retry_delay or 0.0)
 
-    return f"<ERROR: {last_error}>", False
+    return f"<ERROR: {last_error}>", False, 0.0
 
 
 _jiwer_transform = jiwer.Compose([
@@ -566,12 +567,13 @@ def transcribe_and_score(
             transcribe_via_voicebox().
 
     Returns:
-        Dict with keys "transcribed_text" (str), "success" (bool), and
-        "score" (float, 0-100). Note: a score is still computed on failure,
-        comparing expected_text against the "<ERROR: ...>" placeholder,
-        so callers can rely on "score" always being a number.
+        Dict with keys "transcribed_text" (str), "success" (bool),
+        "score" (float, 0-100), and "duration" (float, seconds).
+        Note: a score is still computed on failure, comparing expected_text
+        against the "<ERROR: ...>" placeholder, so callers can rely on
+        "score" always being a number.
     """
-    transcribed_text, success = transcribe_via_voicebox(
+    transcribed_text, success, duration = transcribe_via_voicebox(
         wav_path, timeout=timeout, retry_count=retry_count, retry_delay=retry_delay
     )
     score = similarity_score(expected_text, transcribed_text)
@@ -579,6 +581,7 @@ def transcribe_and_score(
         "transcribed_text": transcribed_text,
         "success": success,
         "score": score,
+        "duration": duration,
     }
 
 
