@@ -1130,7 +1130,17 @@ def sync_profiles(substitutions: Optional[Dict[str, str]] = None,
                 f"and {len(unfixable_zero)} zero-sample profile(s) cannot be rebuilt."
             )
 
-    rebuildable = sorted(zero_sample_targets, key=str.lower)
+    renew_targets: List[str] = []
+    if cfg.PROFILE_SYNC_RENEW:
+        renew_targets = [name for name in already_up_to_date if name in available]
+        if renew_targets:
+            already_up_to_date = [name for name in already_up_to_date if name not in renew_targets]
+            logger.info(
+                f"🔁 PROFILE_SYNC_RENEW is on: forcing delete+rebuild of "
+                f"{len(renew_targets)} already-valid profile(s)."
+            )
+
+    rebuildable = sorted(set(zero_sample_targets) | set(renew_targets), key=str.lower)
     composable = sorted(missing_targets, key=str.lower)
 
     if not rebuildable and not composable:
@@ -1140,10 +1150,13 @@ def sync_profiles(substitutions: Optional[Dict[str, str]] = None,
     imported, reimported, failed = [], [], []
 
     if rebuildable:
-        logger.info(f"♻️ Rebuilding {len(rebuildable)} zero-sample profile(s) from {cfg.VOICES_DIR}/...")
+        logger.info(f"♻️ Rebuilding {len(rebuildable)} zero-sample/renewed profile(s) from {cfg.VOICES_DIR}/...")
         for voice_name in rebuildable:
-            profile_id = zero_sample_profiles[voice_name]
+            profile_id = zero_sample_profiles.get(voice_name, profile_map.get(voice_name))
             canonical_name = get_canonical_key(available, voice_name)
+            if not profile_id:
+                failed.append(voice_name)
+                continue
             logger.info(f"  Deleting zero-sample profile: {voice_name} (ID: {profile_id})...")
             success, message = delete_profile(profile_id)
             if not success:
@@ -1213,7 +1226,7 @@ def sync_profiles(substitutions: Optional[Dict[str, str]] = None,
     if sync_all:
         logger.info(f"  Total local voices in {cfg.VOICES_DIR}/: {len(available)}")
     logger.info(f"  New profiles created:             {len(imported)}")
-    logger.info(f"  Zero-sample profiles repaired:    {len(reimported)}")
+    logger.info(f"  Zero-sample/renewed profiles fixed: {len(reimported)}")
     logger.info(f"  Already up to date:               {len(already_up_to_date)}")
     if failed:
         logger.warning(f"  Failed:                           {len(failed)} ({', '.join(failed)})")
@@ -2906,7 +2919,8 @@ class ConfigDialog(QDialog):
                           job limit, and the button that opens
                           NPCTargetsDialog (which owns TARGET_VOICES and
                           SKIP_ALREADY_GENERATED)
-        Voice Fallback  - enable/refresh + male/female/neutral combos
+        Voices          - fallback enable/refresh + male/female/neutral
+                          combos, plus the forced profile-renewal toggle
 
     The dialog owns the widgets; GenerateWindow reaches them via
     ``self.config_dialog.<widget_name>`` rather than this class exposing
@@ -2927,7 +2941,7 @@ class ConfigDialog(QDialog):
 
         tabs.addTab(self._build_connection_tab(), "🔌 Connection")
         tabs.addTab(self._build_generation_tab(), "⚙️ Generation")
-        tabs.addTab(self._build_fallback_tab(), "🗣️ Voice Fallback")
+        tabs.addTab(self._build_fallback_tab(), "🗣️ Voices")
 
         button_row = QHBoxLayout()
         button_row.addStretch()
@@ -3091,6 +3105,29 @@ class ConfigDialog(QDialog):
             combo.setEditable(True)
             combo.addItem(current)
             form.addRow(label, combo)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.Shape.HLine)
+        form.addRow(sep)
+
+        self.profile_sync_renew_check = QCheckBox("Force delete + rebuild before generating")
+        self.profile_sync_renew_check.setChecked(cfg.PROFILE_SYNC_RENEW)
+        self.profile_sync_renew_check.setToolTip(
+            "When enabled, needed/all voice profiles that already exist on "
+            "Voicebox are deleted and re-imported from scratch during sync, "
+            "instead of being left alone. A profile is only ever deleted if "
+            f"its WAV+TXT samples are still present in {cfg.VOICES_DIR}/, so "
+            "nothing unrebuildable is ever lost."
+        )
+        form.addRow("<b>Profile renewal:</b>", self.profile_sync_renew_check)
+        renew_hint = QLabel(
+            "Useful after re-training/tweaking a voice: forces existing "
+            "profiles to be rebuilt from the current samples instead of "
+            "being skipped as already up to date."
+        )
+        renew_hint.setWordWrap(True)
+        renew_hint.setStyleSheet("font-size: 10px; color: gray;")
+        form.addRow("", renew_hint)
 
         layout.addLayout(form)
         layout.addStretch()
@@ -3499,6 +3536,8 @@ class GenerateWindow(QMainWindow):
         ]
         if d.fallback_enable_check.isChecked():
             bits.append("fallback on")
+        if d.profile_sync_renew_check.isChecked():
+            bits.append("profile renew on")
         self.config_summary_label.setText("  •  ".join(bits))
 
     def _save_config_edits(self) -> None:
@@ -3520,6 +3559,7 @@ class GenerateWindow(QMainWindow):
             "FALLBACK_VOICE_MALE": d.fallback_male_combo.currentText().strip(),
             "FALLBACK_VOICE_FEMALE": d.fallback_female_combo.currentText().strip(),
             "FALLBACK_VOICE_NEUTRAL": d.fallback_neutral_combo.currentText().strip(),
+            "PROFILE_SYNC_RENEW": d.profile_sync_renew_check.isChecked(),
         })
 
         logger.info("Configuration updated from UI.")

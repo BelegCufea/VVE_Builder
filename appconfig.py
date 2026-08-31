@@ -176,6 +176,7 @@ DEFAULTS: dict = {
     "PROFILE_PACKAGES_DIR": r"profiles",
     "PROFILE_SYNC_MAX_ATTEMPTS": 10,
     "PROFILE_SYNC_RETRY_DELAY": 3.0,
+    "PROFILE_SYNC_RENEW": False,
 
     # Voice Profile Manager
     "REALNAME_NOT_FOUND": "RealNameMissing",
