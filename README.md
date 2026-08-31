@@ -12,7 +12,8 @@ The project consists of several Python scripts that semi-automate the process, a
 2. **Profile Preparation**: Extract and assemble suitable source samples for NPCs already voiced in the game.
 3. **Profile Management**: Audit extracted voice samples, create new ones and assign them to NPCs.
 4. **Audio Generation**: Execute batch text-to-speech generation via **VoiceBox**, utilizing cache and memory management to prevent redundant audio processing.
-5. **Compile Mod**: Build the WeiDU package with bundled generated audio assets for seamless in-game installation.
+5. **Quality Verification**: Scan generated NPC audio samples, run speech-to-text via **VoiceBox**, and score transcriptions against source dialog to identify problematic audio.
+6. **Compile Mod**: Build the WeiDU package with bundled generated audio assets for seamless in-game installation.
 
 ## Requirements
 
@@ -21,6 +22,7 @@ Install the project dependencies listed in [requirements.txt](requirements.txt):
 
 - requests
 - runstats
+- jiwer
 - pandas>=2.0
 - PySide6>=6.5
 
@@ -42,7 +44,7 @@ winget install Gyan.Dev.FFmpeg
 ## Script-to-Step Mapping
 
 ### MUST RUN FIRST
-- [config_gui.py](config_gui.py) — configure the game directory, language, and text encoding before anything else. This is the required setup step for the entire pipeline.
+- [config_gui.py](config_gui.py) — configure game settings (directory, language, text encoding) and Voicebox API defaults (URL, health check endpoint, engine, model size, and transcription language) before anything else. This is the required setup step for the entire pipeline.
 
 ### 1) Dialog processing
 - [dialog-report-prepare.py](dialog-report-prepare.py) — extracts DLG/CRE data, parses dialog TLK files, and builds the main CSV report used downstream.
@@ -56,7 +58,10 @@ winget install Gyan.Dev.FFmpeg
 ### 4) Audio generation
 - [generate_gui.py](generate_gui.py) — runs the main VoiceBox generation workflow, including batch TTS generation and progress reporting.
 
-### 5) Compile mod
+### 5) Quality verification
+- [check_gui.py](check_gui.py) — scans generated NPC audio, runs Voicebox speech-to-text transcription, and scores results against expected CSV dialog to flag low-quality or incorrect audio.
+
+### 6) Compile mod
 - [build_mod.py](build_mod.py) — scans generated WAV files, creates the WeiDU mapping table, and stages the final mod package.
 
 ### Troubleshooting / recovery only
@@ -66,6 +71,6 @@ winget install Gyan.Dev.FFmpeg
 ### Shared / support scripts
 - [appconfig.py](appconfig.py) — central configuration store used by the entire toolchain.
 
-> The main end-to-end flow is: [config_gui.py](config_gui.py) → [dialog-report-prepare.py](dialog-report-prepare.py) → [profiles-prepare.py](profiles-prepare.py) → [profiles-manage_gui.py](profiles-manage_gui.py) → [generate_gui.py](generate_gui.py) → [build_mod.py](build_mod.py).
+> The main end-to-end flow is: [config_gui.py](config_gui.py) → [dialog-report-prepare.py](dialog-report-prepare.py) → [profiles-prepare.py](profiles-prepare.py) → [profiles-manage_gui.py](profiles-manage_gui.py) → [generate_gui.py](generate_gui.py) → [check_gui.py](check_gui.py) → [build_mod.py](build_mod.py).
 >
 > [generation-memory-regenerate.py](generation-memory-regenerate.py) and [generation-memory-merge.py](generation-memory-merge.py) are only for recovery/debugging and are not part of the normal pipeline.
