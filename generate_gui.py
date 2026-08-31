@@ -2576,6 +2576,10 @@ class NPCTargetsDialog(QDialog):
         self.npc_status_filter.addItems(["All", "✅ On Voicebox", "📁 Importable", "❌ Missing"])
         self.npc_status_filter.currentTextChanged.connect(self._filter_npc_table)
 
+        self.npc_only_selected_check = QCheckBox("Only selected")
+        self.npc_only_selected_check.setToolTip("Show only NPCs that are currently checked")
+        self.npc_only_selected_check.toggled.connect(self._filter_npc_table)
+
         sort_label = QLabel("Sort:")
         self.npc_sort_combo = QComboBox()
         self.npc_sort_combo.addItems(["Name (A-Z)", "Lines (High-Low)", "Lines (Low-High)"])
@@ -2586,6 +2590,7 @@ class NPCTargetsDialog(QDialog):
         filter_layout.addWidget(clear_search_btn)
         filter_layout.addWidget(status_label)
         filter_layout.addWidget(self.npc_status_filter)
+        filter_layout.addWidget(self.npc_only_selected_check)
         filter_layout.addWidget(sort_label)
         filter_layout.addWidget(self.npc_sort_combo)
 
@@ -2653,7 +2658,7 @@ class NPCTargetsDialog(QDialog):
         for widget in (
             self.select_all_btn, self.select_none_btn, self.select_profiles_btn,
             self.clear_targets_btn, self.save_npc_btn, self.npc_search_edit,
-            self.npc_status_filter, self.npc_sort_combo,
+            self.npc_status_filter, self.npc_sort_combo, self.npc_only_selected_check,
         ):
             widget.setEnabled(enabled)
 
@@ -2718,7 +2723,7 @@ class NPCTargetsDialog(QDialog):
         selected_lines = sum(d["lines_count"] for d in npc_data.values() if d["in_target_voices"])
 
         self.npc_status_label.setText(
-            f"{selected_count} selected, {selected_lines:,} lines total"
+            f"{selected_count} of {len(npc_data)} selected, {selected_lines:,} lines total"
         )
         self.npc_status_label.setStyleSheet("color: green;")
 
@@ -2753,6 +2758,7 @@ class NPCTargetsDialog(QDialog):
             for row, (npc_name, data) in enumerate(npc_data.items()):
                 checkbox = QCheckBox()
                 checkbox.setChecked(data["in_target_voices"])
+                checkbox.toggled.connect(self._on_npc_checkbox_toggled)
                 checkbox_widget = QWidget()
                 checkbox_layout = QHBoxLayout(checkbox_widget)
                 checkbox_layout.addWidget(checkbox)
@@ -2781,13 +2787,22 @@ class NPCTargetsDialog(QDialog):
             table.setUpdatesEnabled(True)
 
     # ------------------------------------------------------------------
+    def _on_npc_checkbox_toggled(self, _checked: bool) -> None:
+        """Handle a per-row checkbox being toggled by the user."""
+        if self.npc_only_selected_check.isChecked():
+            self._filter_npc_table()
+        else:
+            self._update_npc_status_label()
+
+    # ------------------------------------------------------------------
     def _filter_npc_table(self) -> None:
-        """Apply search and status filters to NPC table."""
+        """Apply search, status, and selected-only filters to NPC table."""
         if not self._npc_data_loaded:
             return
 
         search_text = self.npc_search_edit.text().lower()
         status_filter = self.npc_status_filter.currentText()
+        only_selected = self.npc_only_selected_check.isChecked()
 
         for row in range(self.npc_targets_table.rowCount()):
             show = True
@@ -2801,6 +2816,12 @@ class NPCTargetsDialog(QDialog):
                 status_item = self.npc_targets_table.item(row, 2)
                 status_text = status_item.text() if status_item is not None else ""
                 if status_filter not in status_text:
+                    show = False
+
+            if only_selected and show:
+                checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
+                checkbox = checkbox_widget.findChild(QCheckBox) if checkbox_widget else None
+                if not (checkbox and checkbox.isChecked()):
                     show = False
 
             self.npc_targets_table.setRowHidden(row, not show)
@@ -2836,7 +2857,7 @@ class NPCTargetsDialog(QDialog):
                     if checkbox:
                         checkbox.setChecked(checked)
 
-        self._update_npc_status_label()
+        self._filter_npc_table()
 
     # ------------------------------------------------------------------
     def _select_npcs_with_profiles(self) -> None:
@@ -2856,7 +2877,7 @@ class NPCTargetsDialog(QDialog):
                     if checkbox:
                         checkbox.setChecked(has_profile)
 
-        self._update_npc_status_label()
+        self._filter_npc_table()
 
     # ------------------------------------------------------------------
     def _clear_all_targets(self) -> None:
@@ -2873,8 +2894,9 @@ class NPCTargetsDialog(QDialog):
 
         selected_count = 0
         selected_lines = 0
+        total_count = self.npc_targets_table.rowCount()
 
-        for row in range(self.npc_targets_table.rowCount()):
+        for row in range(total_count):
             checkbox_widget = self.npc_targets_table.cellWidget(row, 0)
             if checkbox_widget:
                 checkbox = checkbox_widget.findChild(QCheckBox)
@@ -2885,7 +2907,7 @@ class NPCTargetsDialog(QDialog):
                     selected_lines += int(lines_text)
 
         self.npc_status_label.setText(
-            f"{selected_count} selected, {selected_lines:,} lines total"
+            f"{selected_count} of {total_count} selected, {selected_lines:,} lines total"
         )
 
     # ------------------------------------------------------------------
