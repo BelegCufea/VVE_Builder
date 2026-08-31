@@ -49,7 +49,7 @@ from PySide6.QtGui import QColor, QCursor, QFont
 # Logging Setup
 # ============================================================================
 
-logger = setup_logging(__name__, console_level=logging.ERROR)
+logger = setup_logging( Path(__file__).stem, console_level=logging.ERROR)
 
 
 # ============================================================================

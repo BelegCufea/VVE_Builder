@@ -25,7 +25,7 @@ if sys.platform == 'win32':
     sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding='utf-8')
 
 # Setup logging
-logger = setup_logging(__name__)
+logger = setup_logging(Path(__file__).stem)
 
 
 @dataclass
