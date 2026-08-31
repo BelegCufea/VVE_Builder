@@ -42,6 +42,17 @@ from utils import (
     format_finish_time
 )
 
+from tts_voicebox import (
+    submit_generation as tts_submit_generation,
+    wait_for_completion as tts_wait_for_completion,
+    cancel_generation as tts_cancel_generation,
+    download_generated_audio as tts_download_generated_audio,
+    delete_voice_profile as tts_delete_voice_profile,
+    list_profiles as tts_list_profiles,
+    check_health as tts_check_health,
+    import_profile as tts_import_profile,
+)
+
 from PySide6.QtCore import QObject, QThread, Signal, QTimer, Qt, Slot, QMetaObject
 from PySide6.QtGui import QFont, QTextCursor, QColor
 from PySide6.QtWidgets import (
@@ -801,7 +812,7 @@ def get_voice_profile_name(npc_name: Optional[str], gender: Optional[str] = None
     return None
 
 
-def delete_profile(profile_id: Union[str, int]) -> Tuple[bool, str]:
+def delete_profile(profile_id: str) -> Tuple[bool, str]:
     """
     Delete a voice profile from the Voicebox server.
 
@@ -814,11 +825,7 @@ def delete_profile(profile_id: Union[str, int]) -> Tuple[bool, str]:
             - message: Status message describing the result.
     """
     try:
-        delete_url = f"{cfg.BASE_URL}{cfg.PROFILES_ENDPOINT}/{profile_id}"
-        resp = requests.delete(delete_url)
-        if resp.status_code == 200:
-            return True, "Profile deleted successfully"
-        return False, f"Deletion returned: {resp.status_code}"
+        return tts_delete_voice_profile(profile_id)
     except Exception as e:
         return False, f"Deletion error: {e}"
 
@@ -838,14 +845,13 @@ def get_all_profiles() -> Tuple[CaseInsensitiveDict, CaseInsensitiveDict]:
     Raises:
         requests.exceptions.RequestException: If the API request fails.
     """
-    resp = requests.get(f"{cfg.BASE_URL}{cfg.PROFILES_ENDPOINT}")
-    resp.raise_for_status()
+    resp_json = tts_list_profiles()
 
     profile_map = CaseInsensitiveDict()
     zero_sample_profiles = CaseInsensitiveDict()
     total_profiles = 0
 
-    for p in resp.json():
+    for p in resp_json:
         total_profiles += 1
         profile_id = p.get("id")
         profile_name = p.get("name")
@@ -1067,11 +1073,10 @@ def import_profile_zip(zip_path: Path) -> Optional[dict]:
         Parsed JSON response on success, None on failure.
     """
     try:
-        with open(zip_path, "rb") as f:
-            files = {"file": (zip_path.name, f, "application/zip")}
-            resp = requests.post(f"{cfg.BASE_URL}{cfg.PROFILES_IMPORT_ENDPOINT}", files=files)
-            resp.raise_for_status()
-            return resp.json()
+        result = tts_import_profile(zip_path)
+        if result is None:
+            logger.error(f"❌ Error importing {zip_path.name}: import returned None")
+        return result
     except requests.exceptions.RequestException as e:
         logger.error(f"❌ Error importing {zip_path.name}: {e}")
         return None
@@ -1362,7 +1367,7 @@ def mark_as_generated(memory: dict, npc_name: str, strref: str) -> None:
 # TTS API Client
 # ============================================================================
 
-def submit_generation(profile_id: int, text: str, engine: str, model_size: str) -> str:
+def submit_generation(profile_id: str, text: str) -> str:
     """
     Submit a text-to-speech generation request to the Voicebox API.
 
@@ -1379,17 +1384,8 @@ def submit_generation(profile_id: int, text: str, engine: str, model_size: str) 
         requests.exceptions.RequestException: If the API request fails.
         RuntimeError: If the response does not contain an "id" field.
     """
-    payload = {
-        "text": text, "profile_id": profile_id, "language": "en",
-        "engine": engine, "model_size": model_size,
-    }
-    resp = requests.post(f"{cfg.BASE_URL}{cfg.GENERATE_ENDPOINT}", json=payload)
-    resp.raise_for_status()
-    data = resp.json()
-    gen_id = data.get("id")
-    if not gen_id:
-        raise RuntimeError(f"Response missing 'id': {data}")
-    return gen_id
+    # tts_voicebox.submit_generation uses cfg.ENGINE and cfg.MODEL_SIZE from config
+    return tts_submit_generation(text, profile_id)
 
 
 def wait_for_completion(gen_id: str) -> Optional[dict]:
@@ -1410,26 +1406,7 @@ def wait_for_completion(gen_id: str) -> Optional[dict]:
     Raises:
         requests.exceptions.RequestException: If the SSE connection fails.
     """
-    url = f"{cfg.BASE_URL}{cfg.GENERATE_STATUS_ENDPOINT.format(gen_id=gen_id)}"
-    headers = {"Accept": "text/event-stream"}
-    final_event = None
-
-    with requests.get(url, headers=headers, stream=True) as response:
-        response.raise_for_status()
-        for line in response.iter_lines(decode_unicode=True):
-            if isinstance(line, bytes):
-                line = line.decode("utf-8")
-            if not line or not line.startswith("data: "):
-                continue
-            try:
-                event = json.loads(line[6:])
-            except json.JSONDecodeError:
-                continue
-            if event.get("status") in ("completed", "failed"):
-                final_event = event
-                break
-
-    return final_event
+    return tts_wait_for_completion(gen_id)
 
 
 def cancel_generation(gen_id: str) -> Tuple[bool, str]:
@@ -1447,11 +1424,7 @@ def cancel_generation(gen_id: str) -> Tuple[bool, str]:
             - message: Status message describing the result.
     """
     try:
-        cancel_url = f"{cfg.BASE_URL}{cfg.GENERATE_CANCEL_ENDPOINT.format(gen_id=gen_id)}"
-        resp = requests.post(cancel_url)
-        if resp.status_code == 200:
-            return True, "Cancellation successful"
-        return False, f"Cancellation returned: {resp.status_code}"
+        return tts_cancel_generation(gen_id)
     except Exception as e:
         return False, f"Cancellation error: {e}"
 
@@ -1471,11 +1444,7 @@ def download_audio(gen_id: str, output_path: str) -> None:
         requests.exceptions.RequestException: If the download request fails.
         OSError: If the output file cannot be written.
     """
-    url = f"{cfg.BASE_URL}{cfg.AUDIO_ENDPOINT.format(gen_id=gen_id)}"
-    resp = requests.get(url)
-    resp.raise_for_status()
-    with open(output_path, "wb") as f:
-        f.write(resp.content)
+    tts_download_generated_audio(gen_id, output_path)
 
 
 # ============================================================================
@@ -1524,7 +1493,6 @@ def scan_csv_for_npc_targets() -> dict:
             chars_count: int
             in_target_voices: bool
     """
-    csv_path = cfg.CSV_PATH
     skip_already_generated = cfg.SKIP_ALREADY_GENERATED
     memory_path = cfg.GENERATION_MEMORY_PATH
     patcher_config_path = cfg.PATCHER_CONFIG_PATH
@@ -1848,12 +1816,8 @@ class HealthCheckWorker(QObject):
 
     def check_now(self) -> None:
         """Perform a single health check immediately."""
-        try:
-            resp = requests.get(f"{cfg.BASE_URL}/health", timeout=5)
-            resp.raise_for_status()
-            self.health_checked.emit(True, resp.json())
-        except Exception as e:
-            self.health_checked.emit(False, {"error": str(e)})
+        success, payload = tts_check_health()
+        self.health_checked.emit(success, payload)
 
 
 # ============================================================================
@@ -2114,7 +2078,7 @@ class GenerationWorker(QObject):
 
     def process_generation_job(self, idx: int, total_jobs: int, strref: str,
                                npc_name: str, voice_name: str, filename: str, text: str,
-                               profile_id: int, regressor: Regression,
+                               profile_id: str, regressor: Regression,
                                generation_memory: dict, retry_count: int = 0,
                                retry_delay: float = 0.0) -> Tuple[bool, float, float, int, int]:
         """
@@ -2204,7 +2168,7 @@ class GenerationWorker(QObject):
             monitor_thread = None
 
             try:
-                gen_id = submit_generation(profile_id, text, cfg.ENGINE, cfg.MODEL_SIZE)
+                gen_id = submit_generation(profile_id, text)
                 self._current_gen_id = gen_id
 
                 if timeout_sec is not None:

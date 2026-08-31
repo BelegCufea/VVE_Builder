@@ -10,14 +10,11 @@ import logging
 import re
 import subprocess
 import sys
-import time
 from datetime import datetime, timedelta
 import jiwer
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple, Union
-
-import requests
 
 from appconfig import cfg
 
@@ -471,36 +468,28 @@ def transcribe_via_voicebox(
     """
     logger = logging.getLogger(__name__)
     wav_path = Path(wav_path)
-    timeout = timeout if timeout is not None else cfg.SAMPLE_TIMEOUT_SECONDS
-    retry_count_val: int = retry_count if retry_count is not None else cfg.SAMPLE_RETRY_COUNT
-    retry_delay = retry_delay if retry_delay is not None else cfg.SAMPLE_RETRY_DELAY
-
-    url = cfg.BASE_URL.rstrip("/") + "/" + cfg.TRANSCRIBE_ENDPOINT.lstrip("/")
-
-    last_error = ""
-    for attempt in range(retry_count_val + 1):
-        try:
-            with open(wav_path, "rb") as f:
-                resp = requests.post(
-                    url,
-                    files={
-                        "file": (wav_path.name, f, "audio/wav"),
-                    },
-                    data={
-                        "language": cfg.TRANSCRIPTION_LANGUAGE,
-                    },
-                    timeout=timeout,
-                )
-            resp.raise_for_status()
-            data = resp.json()
-            return data.get("text", ""), True, data.get("duration", 0.0)
-        except Exception as ex:
-            last_error = str(ex)
-            logger.debug(f"Transcribe attempt {attempt + 1} failed for {wav_path.name}: {ex}")
-            if attempt < retry_count_val:
-                time.sleep(retry_delay or 0.0)
-
-    return f"<ERROR: {last_error}>", False, 0.0
+    
+    # Use the new tts_voicebox library which handles retries internally
+    from tts_voicebox import transcribe_wav
+    
+    logger.debug(f"Transcribing {wav_path.name} via Voicebox API")
+    try:
+        result = transcribe_wav(
+            wav_path,
+            timeout=timeout,
+            retry_count=retry_count,
+            retry_delay=retry_delay,
+        )
+        
+        if result[1]:  # success
+            logger.info(f"Successfully transcribed {wav_path.name}")
+        else:
+            logger.error(f"Transcription failed for {wav_path.name}: {result[0]}")
+            
+        return result
+    except Exception as ex:
+        logger.error(f"Unexpected error transcribing {wav_path.name}: {ex}")
+        return f"<ERROR: {ex}>", False, 0.0
 
 
 _jiwer_transform = jiwer.Compose([
