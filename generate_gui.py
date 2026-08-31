@@ -912,7 +912,9 @@ def scan_csv_needed_voice_names(substitutions: Optional[Dict[str, str]] = None,
     Scan the dialog CSV and collect the set of voice profile names it needs.
 
     Shares row filtering with load_and_filter_csv() via iter_filtered_csv_rows()
-    so the "needed" set matches what would actually be generated.
+    so the "needed" set matches what would actually be generated. If fallback
+    mode is enabled (cfg.USE_VOICE_FALLBACK), configured fallback profiles are
+    also included to ensure pre-flight sync and repair.
 
     Args:
         substitutions: NPC name -> voice profile mappings.
@@ -920,7 +922,8 @@ def scan_csv_needed_voice_names(substitutions: Optional[Dict[str, str]] = None,
         substitutions_sysname: sysname -> voice profile mappings.
 
     Returns:
-        Voice profile names referenced by the filtered CSV rows.
+        Voice profile names referenced by the filtered CSV rows, along with
+        any configured fallback voices if fallback mode is active.
     """
     needed = set()
 
@@ -930,6 +933,10 @@ def scan_csv_needed_voice_names(substitutions: Optional[Dict[str, str]] = None,
         )
         if candidate:
             needed.add(candidate)
+
+    if cfg.USE_VOICE_FALLBACK:
+            fallbacks = {cfg.FALLBACK_VOICE_MALE, cfg.FALLBACK_VOICE_FEMALE, cfg.FALLBACK_VOICE_NEUTRAL}
+            needed.update({fb for fb in fallbacks if fb})            
 
     return needed
 
