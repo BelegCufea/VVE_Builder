@@ -67,16 +67,19 @@ import json
 import re
 import threading
 from pathlib import Path
-from typing import Any
+from typing import Any, Dict, List, Optional, Tuple, Callable, TypeVar, Union
 
 _LOCK = threading.RLock()
 _CONFIG_PATH = Path(__file__).resolve().parent / "appconfig.json"
 _MISSING = object()
 
+Codec = Tuple[type, Callable[[Any], Any], Callable[[Any], Any]]
+
+
 # ============================================================================
 # Shared defaults - the single source of truth for every script.
 # ============================================================================
-DEFAULTS: dict = {
+DEFAULTS: Dict[str, Any] = {
     # =======================================================================
     # Game location, language and encoding
     # =======================================================================
@@ -232,17 +235,24 @@ DEFAULTS: dict = {
 # get()/set() apply it automatically based on that key's DEFAULTS
 # value - no per-key wiring needed anywhere else.
 # ============================================================================
-_CODECS = [
+_CODECS: List[Codec] = [
     (Path, lambda v: str(v), lambda v: Path(v)),
     (re.Pattern, lambda v: v.pattern, lambda v: re.compile(v)),
 ]
 
-_overrides: dict = {}
-_loaded = False
+_overrides: Dict[str, Any] = {}
+_loaded: bool = False
 
 
 def _ensure_loaded() -> None:
-    """Lazily load overrides from disk on first use (once per process)."""
+    """
+    Lazily load overrides from disk on first use (once per process).
+
+    This function is idempotent and thread-safe. It loads the JSON
+    configuration file only once, merging any stored overrides into
+    the _overrides dictionary. If the file is missing or corrupted,
+    falls back to defaults without raising an exception.
+    """
     global _loaded
     if _loaded:
         return
@@ -262,8 +272,17 @@ def _ensure_loaded() -> None:
         _loaded = True
 
 
-def _codec_for(key: str):
-    """The (base_type, encode, decode) codec that applies to key's default, if any."""
+def _codec_for(key: str) -> Optional[Codec]:
+    """
+    Retrieve the codec that applies to a given key's default value.
+
+    Args:
+        key: Configuration key to look up.
+
+    Returns:
+        The (base_type, encode_fn, decode_fn) codec tuple if one applies,
+        None if the key doesn't exist in DEFAULTS or has a JSON-native type.
+    """
     if key not in DEFAULTS:
         return None
     default_value = DEFAULTS[key]
@@ -274,7 +293,16 @@ def _codec_for(key: str):
 
 
 def _decode(key: str, raw_value: Any) -> Any:
-    """Convert a JSON-native stored value back into its real type, if a codec applies."""
+    """
+    Convert a JSON-native stored value back into its real type.
+
+    Args:
+        key: Configuration key to decode for.
+        raw_value: JSON-native value from storage.
+
+    Returns:
+        Decoded value in its native type, or the raw value if no codec applies.
+    """
     codec = _codec_for(key)
     if codec is not None:
         base_type, _, decode_fn = codec
@@ -284,7 +312,17 @@ def _decode(key: str, raw_value: Any) -> Any:
 
 
 def _encode(key: str, value: Any) -> Any:
-    """Convert a real value into its JSON-native form for storage, if a codec applies."""
+    """
+    Convert a real value into its JSON-native form for storage.
+
+    Args:
+        key: Configuration key to encode for.
+        value: Native type value to encode.
+
+    Returns:
+        JSON-native representation of the value, or the value unchanged
+        if no codec applies.
+    """
     codec = _codec_for(key)
     if codec is not None:
         base_type, encode_fn, _ = codec
@@ -294,7 +332,19 @@ def _encode(key: str, value: Any) -> Any:
 
 
 def get(key: str, fallback: Any = None) -> Any:
-    """Return the current effective value for key: override, else DEFAULTS, else fallback."""
+    """
+    Return the current effective value for a configuration key.
+
+    Checks overrides first, then DEFAULTS, then the provided fallback.
+    Values are automatically decoded from JSON-native form if a codec applies.
+
+    Args:
+        key: Configuration key to look up.
+        fallback: Value to return if the key is not found in DEFAULTS.
+
+    Returns:
+        The effective configuration value, or fallback if not found.
+    """
     _ensure_loaded()
     with _LOCK:
         if key in _overrides:
@@ -306,11 +356,16 @@ def get(key: str, fallback: Any = None) -> Any:
 
 def set(key: str, value: Any, persist: bool = True) -> None:
     """
-    Record an override for key and persist to disk immediately (unless persist=False).
+    Record an override for a configuration key and persist to disk.
 
-    If value equals the key's default (after encoding), any existing
-    override is removed instead, so appconfig.json never carries a
-    redundant "override" that just restates the default.
+    If the new value equals the key's default (after encoding), any existing
+    override is removed instead, so appconfig.json never carries a redundant
+    "override" that just restates the default.
+
+    Args:
+        key: Configuration key to set.
+        value: New value for the key.
+        persist: If True (default), immediately writes to disk.
     """
     _ensure_loaded()
     with _LOCK:
@@ -319,8 +374,17 @@ def set(key: str, value: Any, persist: bool = True) -> None:
             _save_locked()
 
 
-def set_many(values: dict, persist: bool = True) -> None:
-    """Set several overrides at once, writing to disk only once."""
+def set_many(values: Dict[str, Any], persist: bool = True) -> None:
+    """
+    Set several overrides at once, writing to disk only once.
+
+    This is more efficient than calling set() multiple times when updating
+    multiple configuration values.
+
+    Args:
+        values: Dictionary of key-value pairs to set.
+        persist: If True (default), writes to disk after all updates.
+    """
     _ensure_loaded()
     with _LOCK:
         for key, value in values.items():
@@ -330,7 +394,16 @@ def set_many(values: dict, persist: bool = True) -> None:
 
 
 def _set_locked(key: str, value: Any) -> None:
-    """Apply one override in memory. Caller must hold _LOCK."""
+    """
+    Apply one override in memory.
+
+    Caller must hold _LOCK. If the value equals the default, removes
+    any existing override rather than storing it.
+
+    Args:
+        key: Configuration key to set.
+        value: New value for the key.
+    """
     encoded = _encode(key, value)
     if key in DEFAULTS and encoded == _encode(key, DEFAULTS[key]):
         _overrides.pop(key, None)
@@ -339,7 +412,13 @@ def _set_locked(key: str, value: Any) -> None:
 
 
 def reset(key: str, persist: bool = True) -> None:
-    """Remove an override for key, reverting it to its DEFAULTS value."""
+    """
+    Remove an override for a key, reverting it to its DEFAULTS value.
+
+    Args:
+        key: Configuration key to reset.
+        persist: If True (default), immediately writes to disk.
+    """
     _ensure_loaded()
     with _LOCK:
         _overrides.pop(key, None)
@@ -348,14 +427,29 @@ def reset(key: str, persist: bool = True) -> None:
 
 
 def save() -> None:
-    """Force a write of current overrides to disk (set()/set_many() already do this)."""
+    """
+    Force a write of current overrides to disk.
+
+    Note: set() and set_many() already persist automatically, so this
+    is typically only needed when manually modifying _overrides.
+    """
     _ensure_loaded()
     with _LOCK:
         _save_locked()
 
 
-def all_values() -> dict:
-    """Return a merged dict of DEFAULTS + overrides (overrides win, decoded) - handy for a config UI."""
+def all_values() -> Dict[str, Any]:
+    """
+    Return a merged dictionary of DEFAULTS + overrides.
+
+    Overrides take precedence, and all values are decoded to their
+    native types. This is useful for configuration UIs that need to
+    display all current settings.
+
+    Returns:
+        Dictionary containing all configuration keys with their
+        current effective values.
+    """
     _ensure_loaded()
     with _LOCK:
         merged = dict(DEFAULTS)
@@ -364,13 +458,16 @@ def all_values() -> dict:
         return merged
 
 
-def unknown_keys() -> list:
+def unknown_keys() -> List[str]:
     """
-    Keys present in appconfig.json's overrides that no longer match any
-    DEFAULTS entry - typically left behind after a key was renamed or
-    removed in code. Not used anywhere yet; intended for a future
-    general settings/maintenance script to surface and let the user
-    clean up.
+    Return keys in overrides that no longer exist in DEFAULTS.
+
+    These are typically left behind after a key was renamed or removed
+    from the code. Not used anywhere currently; intended for a future
+    maintenance script to surface and allow cleanup.
+
+    Returns:
+        List of unknown key names in the overrides.
     """
     _ensure_loaded()
     with _LOCK:
@@ -378,7 +475,12 @@ def unknown_keys() -> list:
 
 
 def _save_locked() -> None:
-    """Write _overrides to disk atomically. Caller must hold _LOCK."""
+    """
+    Write _overrides to disk atomically.
+
+    Writes to a temporary file first, then replaces the target atomically.
+    Caller must hold _LOCK.
+    """
     tmp_path = _CONFIG_PATH.with_suffix(".json.tmp")
     with tmp_path.open("w", encoding="utf-8") as f:
         json.dump(_overrides, f, indent=2, sort_keys=True, ensure_ascii=False)
@@ -387,21 +489,45 @@ def _save_locked() -> None:
 
 class _ConfigProxy:
     """
-    Attribute-style live view onto get()/set(), e.g. ``cfg.BASE_URL``.
+    Attribute-style live view onto get()/set().
 
     Every attribute read calls get() fresh - nothing is cached on this
     object - so if the value changes anywhere (this process or, after a
     restart, another script), the next ``cfg.KEY`` read reflects it.
     Every attribute write calls set() (and therefore persists to disk,
     or clears the override if the new value matches the default).
+
+    Example:
+        >>> from appconfig import cfg
+        >>> url = cfg.BASE_URL          # Reads current value
+        >>> cfg.RETRY_COUNT = 5         # Sets and persists immediately
     """
 
     def __getattr__(self, name: str) -> Any:
+        """
+        Get a configuration value using attribute syntax.
+
+        Args:
+            name: Configuration key name.
+
+        Returns:
+            The current effective value for the key.
+
+        Raises:
+            AttributeError: If the key name starts with an underscore.
+        """
         if name.startswith("_"):
             raise AttributeError(name)
         return get(name)
 
     def __setattr__(self, name: str, value: Any) -> None:
+        """
+        Set a configuration value using attribute syntax.
+
+        Args:
+            name: Configuration key name.
+            value: New value to set.
+        """
         set(name, value)
 
 
