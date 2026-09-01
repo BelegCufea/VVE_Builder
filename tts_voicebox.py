@@ -137,6 +137,7 @@ def transcribe_wav(
     timeout: Optional[float] = None,
     retry_count: Optional[int] = None,
     retry_delay: Optional[float] = None,
+    language: Optional[str] = None,
 ) -> Tuple[str, bool, float]:
     """
     Transcribe a WAV file using the VoiceBox /transcribe endpoint.
@@ -153,6 +154,8 @@ def transcribe_wav(
             Defaults to cfg.SAMPLE_RETRY_COUNT.
         retry_delay: Seconds to wait between retries.
             Defaults to cfg.SAMPLE_RETRY_DELAY.
+        language: Language to transcribe to (english, german etc.).
+            Defaults to cfg.TRANSCRIPTION_LANGUAGE.
 
     Returns:
         A tuple of (transcribed_text, success, duration).
@@ -169,6 +172,7 @@ def transcribe_wav(
     timeout = timeout if timeout is not None else cfg.SAMPLE_TIMEOUT_SECONDS
     retry_count_val = retry_count if retry_count is not None else cfg.SAMPLE_RETRY_COUNT
     retry_delay = retry_delay if retry_delay is not None else cfg.SAMPLE_RETRY_DELAY
+    language = language if language is not None else cfg.TRANSCRIPTION_LANGUAGE
 
     wav_path = Path(wav_path)
     last_error = ""
@@ -179,7 +183,7 @@ def transcribe_wav(
                 resp = requests.post(
                     url,
                     files={"file": (wav_path.name, f, "audio/wav")},
-                    data={"language": cfg.TRANSCRIPTION_LANGUAGE},
+                    data={"language": language},
                     timeout=timeout,
                 )
             resp.raise_for_status()
