@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple, Any, Union
 
 from PySide6.QtCore import (
     Qt, QUrl, QObject, QThread, QTimer, Signal,
@@ -61,8 +61,9 @@ def transcribe_sample(
     strref: int,
     npc_name: str,
     text_for_scoring: str,
-) -> dict:
-    """Transcribe a single .wav file via the Voicebox /transcribe endpoint.
+) -> Dict[str, Any]:
+    """
+    Transcribe a single .wav file via the Voicebox /transcribe endpoint.
 
     Posts the audio file with retry logic, computes a similarity score
     between the expected and transcribed text, and returns the result row.
@@ -94,7 +95,8 @@ def transcribe_sample(
 
 
 class CheckWorker(QObject):
-    """Background worker that orchestrates NPC scanning and transcription.
+    """
+    Background worker that orchestrates NPC scanning and transcription.
 
     This worker discovers NPC directories, loads the text lookup from CSV,
     transcribes samples sequentially (one /transcribe call at a time - the
@@ -120,7 +122,7 @@ class CheckWorker(QObject):
     failed = Signal(str)
 
     def __init__(self) -> None:
-        """Initialize the worker."""
+        """Initialize the worker with empty state."""
         super().__init__()
         self._stop_requested = threading.Event()
         self._total_samples_done = 0
@@ -130,7 +132,8 @@ class CheckWorker(QObject):
         self._stop_requested.set()
 
     def run(self) -> None:
-        """Entry point for the worker thread.
+        """
+        Entry point for the worker thread.
 
         Runs the full scan-transcribe-finalize pipeline and emits signals
         for UI updates. Catches all exceptions to emit them via the
@@ -235,7 +238,7 @@ class CheckWorker(QObject):
                 "done": False,
             })
 
-            npc_samples: List[dict] = []
+            npc_samples: List[Dict[str, Any]] = []
             for wav_path, strref, text_for_scoring in batch:
                 if self._stop_requested.is_set():
                     break
@@ -322,7 +325,8 @@ class CheckWorker(QObject):
         })
 
     def _load_text_lookup(self, csv_path: Path) -> Dict[int, str]:
-        """Load the StrRef to text mapping from a CSV file.
+        """
+        Load the StrRef to text mapping from a CSV file.
 
         Args:
             csv_path: Path to the CSV file containing StrRef and Text columns.
@@ -347,7 +351,13 @@ class CheckWorker(QObject):
         return lookup
 
     def _emit_overall_progress(self, total_samples: int, elapsed: float) -> None:
-        """Emit an overall_progress dict for the GUI progress bar."""
+        """
+        Emit an overall_progress dict for the GUI progress bar.
+
+        Args:
+            total_samples: Total number of samples to process.
+            elapsed: Elapsed time in seconds since start.
+        """
         samples_done = self._total_samples_done
 
         if samples_done == 0 or elapsed == 0:
@@ -375,12 +385,9 @@ class CheckWorker(QObject):
         })
 
 
-# ============================================================================
-# Numeric table widget item (numeric sort for ratio columns)
-# ============================================================================
-
 class _NumericTableWidgetItem(QTableWidgetItem):
-    """Table widget item that sorts numerically instead of lexicographically.
+    """
+    Table widget item that sorts numerically instead of lexicographically.
 
     Stores the numeric value in UserRole+1 data and uses it for comparison
     in __lt__, allowing proper numeric sorting for columns like scores
@@ -388,7 +395,8 @@ class _NumericTableWidgetItem(QTableWidgetItem):
     """
 
     def __lt__(self, other: QTableWidgetItem) -> bool:
-        """Compare numeric values for sorting.
+        """
+        Compare numeric values for sorting.
 
         Args:
             other: The item to compare against.
@@ -406,10 +414,6 @@ class _NumericTableWidgetItem(QTableWidgetItem):
         return super().__lt__(other)
 
 
-# ============================================================================
-# SampleDetailDialog - side-by-side text comparison with copy buttons
-# ============================================================================
-
 class SampleDetailDialog(QDialog):
     """
     Dialog showing side-by-side comparison of CSV text and transcribed text.
@@ -425,8 +429,9 @@ class SampleDetailDialog(QDialog):
       - Copy-to-clipboard buttons with "Copied!" feedback
     """
 
-    def __init__(self, row: dict, parent: Optional[QWidget] = None) -> None:
-        """Initialize the detail dialog.
+    def __init__(self, row: Dict[str, Any], parent: Optional[QWidget] = None) -> None:
+        """
+        Initialize the detail dialog.
 
         Args:
             row: Dict containing sample data (StrRef, AudioFile, CSVText,
@@ -505,7 +510,8 @@ class SampleDetailDialog(QDialog):
         outer.addLayout(btn_row)
 
     def _copy_to_clipboard(self, text: str, btn: QPushButton) -> None:
-        """Copy text to clipboard and show temporary "Copied!" feedback.
+        """
+        Copy text to clipboard and show temporary "Copied!" feedback.
 
         Args:
             text: The text to copy to clipboard.
@@ -519,7 +525,8 @@ class SampleDetailDialog(QDialog):
         QTimer.singleShot(1500, lambda: self._restore_button(btn, orig))
 
     def _restore_button(self, btn: QPushButton, original_text: str) -> None:
-        """Restore button text and enabled state after clipboard copy.
+        """
+        Restore button text and enabled state after clipboard copy.
 
         Args:
             btn: The button to restore.
@@ -528,10 +535,6 @@ class SampleDetailDialog(QDialog):
         btn.setText(original_text)
         btn.setEnabled(True)
 
-
-# ============================================================================
-# Main Window
-# ============================================================================
 
 class CheckWindow(QMainWindow):
     """
@@ -556,10 +559,10 @@ class CheckWindow(QMainWindow):
 
         self._worker_thread: Optional[QThread] = None
         self._worker: Optional[CheckWorker] = None
-        self._all_npc_data: Dict[str, dict] = {}
+        self._all_npc_data: Dict[str, Dict[str, Any]] = {}
         self._selected_npc: Optional[str] = None
         self._npc_row_index: Dict[str, int] = {}
-        self._detail_samples: List[dict] = []
+        self._detail_samples: List[Dict[str, Any]] = []
 
         self.audio_output = QAudioOutput()
         self.media_player = QMediaPlayer()
@@ -748,7 +751,8 @@ class CheckWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _start(self) -> None:
-        """Start the check on a background thread.
+        """
+        Start the check on a background thread.
 
         Initializes state, creates the worker and its thread, connects
         signals, and begins processing.
@@ -798,15 +802,20 @@ class CheckWindow(QMainWindow):
             self.statusBar().showMessage("Stopping after current samples...", 5000)
 
     def _on_thread_finished(self) -> None:
+        """Clean up after the worker thread finishes."""
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.samples_spin.setEnabled(True)
         self.import_btn.setEnabled(True)
 
     def _on_samples_per_npc_changed(self, value: int) -> None:
-        """Update cfg.SAMPLES_PER_NPC live from the spin box.
+        """
+        Update cfg.SAMPLES_PER_NPC live from the spin box.
 
         0 means "check every available audio file" for each NPC.
+
+        Args:
+            value: New samples per NPC value.
         """
         cfg.SAMPLES_PER_NPC = value
         label = "all available" if value <= 0 else str(value)
@@ -817,9 +826,11 @@ class CheckWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_stage(self, text: str) -> None:
+        """Handle stage update from worker."""
         self.statusBar().showMessage(text, 5000)
 
-    def _on_overall_progress(self, data: dict) -> None:
+    def _on_overall_progress(self, data: Dict[str, Any]) -> None:
+        """Handle overall progress update from worker."""
         self.overall_bar.setValue(int(data["percent"] * 100))
         if not data.get("ready"):
             self.overall_label.setText(
@@ -836,8 +847,13 @@ class CheckWindow(QMainWindow):
             f"({rate:.1f} samples/sec)"
         )
 
-    def _on_npc_completed(self, npc_data: dict) -> None:
-        """Insert or update one row in the NPC table from worker data."""
+    def _on_npc_completed(self, npc_data: Dict[str, Any]) -> None:
+        """
+        Insert or update one row in the NPC table from worker data.
+
+        Args:
+            npc_data: Dictionary containing NPC data from worker.
+        """
         npc_name = npc_data["npc"]
         self._all_npc_data[npc_name] = npc_data
 
@@ -852,7 +868,8 @@ class CheckWindow(QMainWindow):
 
         self._update_stats_label()
 
-    def _on_finished(self, stats: dict) -> None:
+    def _on_finished(self, stats: Dict[str, Any]) -> None:
+        """Handle completion signal from worker."""
         self.overall_bar.setValue(10_000)
         self.overall_label.setText(
             f"Done! {stats['total_npcs']} NPCs, {stats['total_samples']} samples."
@@ -866,6 +883,7 @@ class CheckWindow(QMainWindow):
         self.npc_table.sortItems(1, Qt.SortOrder.AscendingOrder)
 
     def _on_failed(self, message: str) -> None:
+        """Handle failure signal from worker."""
         self.statusBar().showMessage(f"Failed: {message}", 8000)
         self.overall_label.setText(f"Failed: {message}")
         self.npc_table.setSortingEnabled(True)
@@ -875,14 +893,30 @@ class CheckWindow(QMainWindow):
     # NPC table helpers
     # ------------------------------------------------------------------
 
-    def _append_npc_row(self, npc_data: dict) -> int:
+    def _append_npc_row(self, npc_data: Dict[str, Any]) -> int:
+        """
+        Append a new row to the NPC table.
+
+        Args:
+            npc_data: Dictionary containing NPC data.
+
+        Returns:
+            The row index where the NPC was inserted.
+        """
         row = self.npc_table.rowCount()
         self.npc_table.insertRow(row)
         self._npc_row_index[npc_data["npc"]] = row
         self._populate_npc_row(row, npc_data)
         return row
 
-    def _populate_npc_row(self, row: int, npc_data: dict) -> None:
+    def _populate_npc_row(self, row: int, npc_data: Dict[str, Any]) -> None:
+        """
+        Populate a row in the NPC table with data.
+
+        Args:
+            row: Row index to populate.
+            npc_data: Dictionary containing NPC data.
+        """
         npc_name = npc_data["npc"]
         samples = npc_data.get("samples", [])
         worst = npc_data.get("worst_score")
@@ -926,6 +960,17 @@ class CheckWindow(QMainWindow):
         self.npc_table.setItem(row, 5, si)
 
     def _find_npc_row(self, npc_name: str) -> Optional[int]:
+        """
+        Find the row index for an NPC by name.
+
+        Uses O(1) cache lookup, falling back to linear scan if cache is stale.
+
+        Args:
+            npc_name: Name of the NPC to find.
+
+        Returns:
+            Row index if found, None otherwise.
+        """
         # O(1) lookup via cache instead of scanning the table. This matters
         # once there are hundreds/thousands of NPC rows (see cfg batch size).
         row = self._npc_row_index.get(npc_name)
@@ -943,12 +988,20 @@ class CheckWindow(QMainWindow):
         return None
 
     def _apply_status_color(self, item: QTableWidgetItem, worst: Optional[float]) -> None:
+        """
+        Apply status text and color to a table item based on score.
+
+        Args:
+            item: Table item to modify.
+            worst: Worst score for the NPC.
+        """
         label, color = score_status(worst)
         item.setText(label)
         if worst is not None:
             item.setForeground(QColor(color))
 
     def _update_stats_label(self) -> None:
+        """Update the statistics label with current totals."""
         all_samples = [
             s for data in self._all_npc_data.values()
             for s in data.get("samples", [])
@@ -976,6 +1029,7 @@ class CheckWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _on_npc_selected(self) -> None:
+        """Handle selection change in the NPC table."""
         rows = self.npc_table.selectedItems()
         if not rows:
             self._selected_npc = None
@@ -991,6 +1045,12 @@ class CheckWindow(QMainWindow):
         self._populate_detail_panel(self._selected_npc)
 
     def _populate_detail_panel(self, npc_name: str) -> None:
+        """
+        Populate the detail panel with samples for the selected NPC.
+
+        Args:
+            npc_name: Name of the NPC to display samples for.
+        """
         npc_data = self._all_npc_data.get(npc_name)
         if not npc_data:
             return
@@ -1065,12 +1125,25 @@ class CheckWindow(QMainWindow):
         self._on_detail_sample_selected()
 
     def _apply_score_color(self, item: QTableWidgetItem, score: float) -> None:
+        """
+        Apply color to a score item based on its value.
+
+        Args:
+            item: Table item to color.
+            score: Score value to evaluate.
+        """
         if not isinstance(score, (int, float)):
             return
         _, color = score_status(score)
         item.setForeground(QColor(color))
 
     def _on_detail_double_click(self, item: QTableWidgetItem) -> None:
+        """
+        Handle double-click on a detail sample row.
+
+        Args:
+            item: The item that was double-clicked.
+        """
         row_idx = item.row()
         if row_idx >= len(self._detail_samples):
             return
@@ -1078,6 +1151,7 @@ class CheckWindow(QMainWindow):
         dlg.exec()
 
     def _on_detail_sample_selected(self) -> None:
+        """Handle selection change in the detail table."""
         rows = self.detail_table.selectedItems()
         if not rows:
             self._clear_fulltext_panel()
@@ -1101,6 +1175,7 @@ class CheckWindow(QMainWindow):
         self.detail_play_btn.setEnabled(True)
 
     def _clear_fulltext_panel(self) -> None:
+        """Clear the full text display panel."""
         self.fulltext_header_label.setText(
             "Select a sample above to see its full text.")
         self.fulltext_header_label.setStyleSheet("color: gray;")
@@ -1137,6 +1212,7 @@ class CheckWindow(QMainWindow):
     # ------------------------------------------------------------------
 
     def _export_csv(self) -> None:
+        """Export the current transcription data to a CSV file."""
         output_file, _ = QFileDialog.getSaveFileName(
             self,
             "Save Transcription Samples",
@@ -1193,8 +1269,16 @@ class CheckWindow(QMainWindow):
             logger.error(f"Failed to export CSV: {ex}")
             self.statusBar().showMessage(f"Failed to export CSV: {ex}", 5000)
 
-    def _parse_imported_sample(self, row: dict) -> Tuple[str, dict]:
-        """Parse and normalize a single CSV row into a sample dictionary."""
+    def _parse_imported_sample(self, row: Dict[str, Any]) -> Tuple[str, Dict[str, Any]]:
+        """
+        Parse and normalize a single CSV row into a sample dictionary.
+
+        Args:
+            row: Raw CSV row as dict.
+
+        Returns:
+            Tuple of (npc_name, sample_dict).
+        """
         npc_name = (
             row.get("NPC") or row.get("npc") or row.get("NPC Name") or "UNKNOWN"
         ).strip()
@@ -1303,6 +1387,7 @@ class CheckWindow(QMainWindow):
         return npc_name, sample
 
     def _import_csv(self) -> None:
+        """Import transcription data from a CSV file."""
         input_file, _ = QFileDialog.getOpenFileName(
             self,
             "Import Transcription Samples",
@@ -1326,7 +1411,7 @@ class CheckWindow(QMainWindow):
             self.statusBar().showMessage("No data found in imported CSV.", 5000)
             return
 
-        npc_groups: Dict[str, List[dict]] = {}
+        npc_groups: Dict[str, List[Dict[str, Any]]] = {}
         for row in raw_rows:
             npc_name, sample = self._parse_imported_sample(row)
             npc_groups.setdefault(npc_name, []).append(sample)
@@ -1392,7 +1477,13 @@ class CheckWindow(QMainWindow):
     # Cleanup
     # ------------------------------------------------------------------
 
-    def closeEvent(self, event) -> None:
+    def closeEvent(self, event: Any) -> None:
+        """
+        Handle window close event with proper cleanup.
+
+        Args:
+            event: Close event.
+        """
         if self._worker:
             self._worker.request_stop()
         if (
@@ -1404,11 +1495,8 @@ class CheckWindow(QMainWindow):
         super().closeEvent(event)
 
 
-# ============================================================================
-# Application entry point
-# ============================================================================
-
 def main() -> None:
+    """Application entry point."""
     os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.multimedia.*=false"
 
     app = QApplication(sys.argv)
