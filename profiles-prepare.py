@@ -2,6 +2,13 @@
 """
 Voice Sample Preparation Tool for Infinity Engine Games
 Processes dialog-report.csv and extracts audio samples for voice generation
+
+This tool scans the dialog report CSV, identifies characters that need TTS
+voice generation, extracts existing audio samples from the game files,
+and prepares them in the voices_prep directory for review and approval.
+
+The tool prioritizes samples based on SoundResRef type and text content,
+ensuring the best quality samples are selected for each character.
 """
 
 import csv
@@ -9,7 +16,7 @@ import subprocess
 import sys
 import io
 from pathlib import Path
-from typing import Dict, List, Tuple, Optional, Set
+from typing import Dict, List, Tuple, Optional, Set, Any
 from dataclasses import dataclass
 from collections import defaultdict
 import shutil
@@ -30,7 +37,19 @@ logger = setup_logging(Path(__file__).stem)
 
 @dataclass
 class DialogEntry:
-    """Represents a single dialog entry from the CSV"""
+    """
+    Represents a single dialog entry from the CSV.
+
+    Attributes:
+        str_ref: The string reference ID for this dialog line.
+        system_name: The system/internal name of the character.
+        real_name: The display name of the character.
+        gender: The character's gender ("M", "F", or empty).
+        has_sound: Whether the line has an associated sound file.
+        sound_res_ref: The resource reference for the sound file.
+        sound_file_exists: Whether the sound file exists on disk.
+        text: The dialog text content.
+    """
     str_ref: str
     system_name: str
     real_name: str
@@ -39,39 +58,58 @@ class DialogEntry:
     sound_res_ref: str
     sound_file_exists: bool
     text: str
-    
+
     @property
     def is_ts_sound(self) -> bool:
         """
         Check if this entry needs TTS regeneration.
+
         Returns True if:
-        - SoundResRef is empty (no original voice)
-        - SoundResRef matches the TS pattern (TTS-generated)
+            - SoundResRef is empty (no original voice)
+            - SoundResRef matches the TS pattern (TTS-generated)
+
+        Returns:
+            True if the entry should be regenerated via TTS, False otherwise.
         """
         # Empty SoundResRef means no original voice file exists
         if not self.sound_res_ref or self.sound_res_ref.strip() == '':
             return True
-        
+
         # Check if SoundResRef starts with the configured prefix (case-insensitive)
         return bool(self.sound_res_ref) and self.sound_res_ref.upper().startswith(cfg.FILENAME_PREFIX.upper())
-    
+
     @property
     def is_digit_only(self) -> bool:
-        """Check if SoundResRef contains only digits (lower priority)"""
+        """
+        Check if SoundResRef contains only digits (lower priority).
+
+        Returns:
+            True if SoundResRef is non-empty and contains only digits.
+        """
         return self.sound_res_ref.isdigit() if self.sound_res_ref else False
-    
+
     @property
     def has_brackets(self) -> bool:
-        """Check if text contains angle brackets (very low priority)"""
+        """
+        Check if text contains angle brackets (very low priority).
+
+        Returns:
+            True if the text contains both '<' and '>' characters.
+        """
         return '<' in self.text and '>' in self.text if self.text else False
-    
+
     @property
     def priority(self) -> int:
         """
-        Priority ranking for SAMPLE entries (NON-TS):
-        0: Highest - non-digit SoundResRef without <>
-        1: Medium - digit-only SoundResRef without <>
-        2: Lowest - contains <>
+        Priority ranking for SAMPLE entries (NON-TS).
+
+        Priority levels:
+            0: Highest - non-digit SoundResRef without angle brackets
+            1: Medium - digit-only SoundResRef without angle brackets
+            2: Lowest - contains angle brackets in text
+
+        Returns:
+            Integer priority value (0 = highest, 2 = lowest).
         """
         if self.has_brackets:
             return 2
@@ -79,40 +117,77 @@ class DialogEntry:
             return 1
         else:
             return 0
-    
+
     @property
     def is_valid_sample(self) -> bool:
         """
         Check if this entry can be used as a sample (NON-TS).
-        Returns True if it's NOT a TS entry.
+
+        Returns:
+            True if the entry is NOT a TS entry (i.e., has original voice),
+            False otherwise.
         """
         return not self.is_ts_sound
 
 
 class VoiceSampleProcessor:
-    """Main processor for voice sample extraction"""
-    
+    """
+    Main processor for voice sample extraction.
+
+    This class handles the complete workflow of loading CSV data, scanning
+    existing voice files, extracting audio samples from game files, and
+    preparing voice profiles for characters that need TTS generation.
+
+    The processor selects the best samples for each character based on
+    priority rules and text length, ensuring high-quality voice samples
+    are prepared for training.
+
+    Attributes:
+        csv_path: Path to the dialog CSV file.
+        blacklist: Set of character names to skip processing.
+        entries_by_realname: Dictionary mapping character names to their dialog entries.
+        existing_voices: Set of character names that already have voice samples.
+        processed_groups: Set of character names that have been processed.
+    """
+
     def __init__(self, csv_path: Path, blacklist: Optional[Set[str]] = None):
+        """
+        Initialize the voice sample processor.
+
+        Args:
+            csv_path: Path to the dialog CSV file to process.
+            blacklist: Optional set of character names to skip.
+        """
         self.csv_path = csv_path
         self.blacklist = blacklist or set()
         self.entries_by_realname: Dict[str, List[DialogEntry]] = defaultdict(list)
         self.existing_voices: Set[str] = set()
         self.processed_groups: Set[str] = set()
-        
+
     def load_csv(self) -> None:
-        """Load and parse the CSV file"""
+        """
+        Load and parse the CSV file.
+
+        Reads the dialog CSV, creates DialogEntry objects for each row,
+        groups entries by RealName, and filters to only include characters
+        that have at least one TS (TTS-eligible) entry. Also logs statistics
+        about loaded data.
+
+        Raises:
+            SystemExit: If the CSV file cannot be loaded.
+        """
         try:
             with open(self.csv_path, 'r', encoding='utf-8-sig') as f:
                 reader = csv.DictReader(f)
-                
+
                 for row in reader:
                     if not row.get('RealName'):
                         continue
-                    
+
                     # Skip blacklisted characters
                     if row['RealName'] in self.blacklist:
                         continue
-                    
+
                     entry = DialogEntry(
                         str_ref=row.get('StrRef', ''),
                         system_name=row.get('SystemName', ''),
@@ -123,36 +198,45 @@ class VoiceSampleProcessor:
                         sound_file_exists=row.get('SoundFileExists', 'false').lower() == 'true',
                         text=row.get('Text', '')
                     )
-                    
+
                     self.entries_by_realname[entry.real_name].append(entry)
-            
+
             # Filter: Only keep characters that have at least one TS entry
             characters_with_ts = {
-                name: entries 
+                name: entries
                 for name, entries in self.entries_by_realname.items()
                 if any(e.is_ts_sound for e in entries)
             }
-            
+
             self.entries_by_realname = characters_with_ts
-            
+
             # Count characters with and without samples
             total_chars = len(self.entries_by_realname)
             chars_with_samples = sum(1 for entries in self.entries_by_realname.values() if any(e.is_valid_sample for e in entries))
             chars_without_samples = total_chars - chars_with_samples
-            
+
             logger.info(f"📊 Loaded {sum(len(v) for v in self.entries_by_realname.values())} entries for {total_chars} characters (need TTS regeneration)")
             if chars_without_samples > 0:
                 logger.warning(f"⚠️ {chars_without_samples} characters have NO source samples available")
-                
+
             if self.blacklist:
                 logger.info(f"🚫 {len(self.blacklist)} characters blacklisted (skipped)")
-                    
+
         except Exception as e:
             logger.error(f"Failed to load CSV: {e}")
             sys.exit(1)
 
     def scan_existing_voices(self) -> None:
-        """Scan voices and voices_prep directories for existing files"""
+        """
+        Scan voices and voices_prep directories for existing voice files.
+
+        Checks both the approved voices directory (cfg.VOICES_DIR) and the
+        preparation directory (cfg.VOICES_PREP_DIR) for existing WAV files.
+        Extracts the character name from each filename (removing number suffixes)
+        and adds it to the existing_voices set.
+
+        The set is used to skip characters that already have voice samples.
+        """
         voices_dir = Path(cfg.VOICES_DIR)
         voices_prep_dir = Path(cfg.VOICES_PREP_DIR)
         for dir_path in [voices_dir, voices_prep_dir]:
@@ -164,15 +248,26 @@ class VoiceSampleProcessor:
                     if ' ' in name and name.split(' ')[-1].isdigit():
                         name = ' '.join(name.split(' ')[:-1])
                     self.existing_voices.add(name)
-                    
+
         if self.existing_voices:
             logger.info(f"Found {len(self.existing_voices)} existing voice samples")
-    
+
     def get_audio_duration(self, audio_path: Path) -> Optional[float]:
-        """Get duration of audio file using ffmpeg"""
+        """
+        Get duration of audio file using ffmpeg/ffprobe.
+
+        Uses ffprobe to extract the duration from the audio file metadata.
+
+        Args:
+            audio_path: Path to the audio file.
+
+        Returns:
+            Duration in seconds as float, or None if duration cannot be
+            determined (e.g., file is corrupted or ffprobe fails).
+        """
         try:
             cmd = [
-                'ffprobe', 
+                'ffprobe',
                 '-v', 'error',
                 '-show_entries', 'format=duration',
                 '-of', 'default=noprint_wrappers=1:nokey=1',
@@ -185,23 +280,33 @@ class VoiceSampleProcessor:
         except Exception as e:
             logger.error(f"Failed to get duration for {audio_path}: {e}")
             return None
-    
+
     def extract_audio_files(self, entries: List[DialogEntry]) -> Dict[str, Optional[Path]]:
         """
         Mass extract audio files for multiple entries.
-        Returns dict mapping sound_res_ref to Path or None if extraction failed.
+
+        Attempts to find each audio file in the game's override folder first,
+        then falls back to extracting from BIFF files using WeiDU. All extracted
+        files are placed in the extracted subdirectory.
+
+        Args:
+            entries: List of DialogEntry objects to extract audio for.
+
+        Returns:
+            Dictionary mapping sound_res_ref to Path (if extraction succeeded)
+            or None (if extraction failed).
         """
         extract_dir = Path(cfg.VOICES_PREP_DIR) / "extracted"
         extract_dir.mkdir(parents=True, exist_ok=True)
-        
-        results = {}
-        to_extract = []  # Files that need weidu extraction
+
+        results: Dict[str, Optional[Path]] = {}
+        to_extract: List[str] = []  # Files that need weidu extraction
         override_count = 0
-        
+
         for entry in entries:
             sound_res_ref = entry.sound_res_ref
             output_path = extract_dir / f"{sound_res_ref}.WAV"
-            
+
             # Check override folder first
             override_path = Path(cfg.GAME_DIRECTORY) / "override" / f"{sound_res_ref}.WAV"
             if override_path.exists():
@@ -214,12 +319,12 @@ class VoiceSampleProcessor:
                 # Need to extract via weidu
                 to_extract.append(sound_res_ref)
                 results[sound_res_ref] = None  # Placeholder
-        
+
         # Mass extract using weidu
         if to_extract:
             logger.info(f"Extracting {len(to_extract)} files with WeiDU...")
             game_path = str(Path(cfg.GAME_DIRECTORY))
-            
+
             try:
                 weidu_exe = Path(cfg.WEIDU_PATH)
                 if not weidu_exe.exists():
@@ -228,15 +333,15 @@ class VoiceSampleProcessor:
                     for sound_res_ref in to_extract:
                         results[sound_res_ref] = None
                     return results
-                
+
                 # Build command with multiple --biff-get parameters
                 cmd = [str(weidu_exe), '--game', game_path, '--out', str(extract_dir)]
                 for sound_res_ref in to_extract:
                     cmd.extend(['--biff-get', f"{sound_res_ref}.WAV"])
-                
+
                 logger.debug(f"Running: {' '.join(cmd)}")
                 result = subprocess.run(cmd, capture_output=True, text=True)
-                
+
                 # Check each extracted file
                 for sound_res_ref in to_extract:
                     output_path = extract_dir / f"{sound_res_ref}.WAV"
@@ -245,45 +350,62 @@ class VoiceSampleProcessor:
                         logger.debug(f"Extracted: {sound_res_ref}")
                     else:
                         logger.warning(f"Failed to extract: {sound_res_ref}")
-                        
+
             except Exception as e:
                 logger.error(f"Error during mass extraction: {e}")
                 # Mark all as failed
                 for sound_res_ref in to_extract:
                     results[sound_res_ref] = None
-        
+
         logger.info(f"Extraction complete: {override_count} from override, {len([p for p in results.values() if p]) - override_count} from BIFF, {len([p for p in results.values() if not p])} failed")
         return results
-    
+
     def process_character_group(self, real_name: str, entries: List[DialogEntry]) -> bool:
-        """Process a single character group and create voice sample"""
+        """
+        Process a single character group and create voice samples.
+
+        The processing steps:
+            1. Check if character already has voice samples
+            2. Filter to non-TS (sample) entries
+            3. Sort samples by priority and text length
+            4. Extract audio files in batches
+            5. Select samples until minimum duration is reached
+            6. Create WAV and TXT files in the voices_prep directory
+
+        Args:
+            real_name: The character's display name.
+            entries: List of DialogEntry objects for this character.
+
+        Returns:
+            True if samples were successfully created, False otherwise.
+        """
         if real_name in self.existing_voices:
             return False
-        
+
         # Check if character has TS entries
         has_ts = any(e.is_ts_sound for e in entries)
         if not has_ts:
             return False
-        
+
         # Get sample entries (NON-TS)
         sample_entries = [e for e in entries if e.is_valid_sample]
         if not sample_entries:
             return False
-        
+
         # Log that we're starting to process this character
         logger.debug(f"Processing {real_name} - found {len(sample_entries)} potential samples")
-        
+
         # Sort sample entries by priority and text length
         entries_by_priority = defaultdict(list)
         for entry in sample_entries:
             entries_by_priority[entry.priority].append(entry)
-        
+
         # Process each priority level
         collected_samples = []
         total_duration = 0.0
         priority_used = 2  # Default to lowest
         priority_names = {0: "HIGH", 1: "MEDIUM", 2: "LOW"}
-        
+
         for priority in sorted(entries_by_priority.keys()):
             # Get top 5 longest texts for this priority
             sorted_entries = sorted(
@@ -291,77 +413,97 @@ class VoiceSampleProcessor:
                 key=lambda e: len(e.text),
                 reverse=True
             )[:5]
-            
+
             if not sorted_entries:
                 continue
-            
+
             # Mass extract audio files for these entries
             logger.debug(f"Extracting {len(sorted_entries)} samples for {real_name} (priority {priority_names[priority]})")
             extracted_paths = self.extract_audio_files(sorted_entries)
-            
+
             # Build list of valid samples
             valid_samples = []
             for entry in sorted_entries:
                 audio_path = extracted_paths.get(entry.sound_res_ref)
                 if not audio_path:
                     continue
-                
+
                 duration = self.get_audio_duration(audio_path)
                 if duration is None:
                     continue
-                
+
                 if duration > cfg.MAX_DURATION:
                     logger.debug(f"Rejected {entry.sound_res_ref} - too long ({duration:.2f}s > {cfg.MAX_DURATION}s)")
                     continue
-                
+
                 valid_samples.append((entry, audio_path, duration))
-            
+
             # Sort by priority ascending, then duration descending
             valid_samples.sort(key=lambda x: (x[0].priority, -x[2]))
-            
+
             # Add samples until we reach cfg.MIN_DURATION
             for entry, audio_path, duration in valid_samples:
                 if total_duration >= cfg.MIN_DURATION:
                     break
-                
+
                 collected_samples.append((entry, audio_path, duration))
                 total_duration += duration
                 priority_used = priority
                 logger.debug(f"Added sample {entry.sound_res_ref} ({duration:.2f}s) - total: {total_duration:.2f}s")
-            
+
             if total_duration >= cfg.MIN_DURATION:
                 break
-        
+
         if not collected_samples:
             logger.warning(f"❌ No usable samples found for {real_name}")
             return False
-        
+
         # Create output files
         return self.create_sample_files(real_name, collected_samples, priority_used, total_duration, has_ts)
-    
-    def create_sample_files(self, real_name: str, samples: List[Tuple], priority_used: int, total_duration: float, has_ts: bool) -> bool:
-        """Create WAV and TXT files for the collected samples"""
+
+    def create_sample_files(self, real_name: str, samples: List[Tuple[Any, ...]],
+                            priority_used: int, total_duration: float, has_ts: bool) -> bool:
+        """
+        Create WAV and TXT files for the collected samples.
+
+        Each sample is saved as:
+            - {real_name} {N}.WAV (audio file)
+            - {real_name} {N}.txt (transcript text)
+
+        Samples are numbered starting from 1, and only the first sample is
+        saved without a number suffix (for backward compatibility).
+
+        Args:
+            real_name: The character's display name.
+            samples: List of tuples (entry, audio_path, duration).
+            priority_used: The priority level that was used (0, 1, or 2).
+            total_duration: Total duration of collected samples.
+            has_ts: Whether the character has TS entries.
+
+        Returns:
+            True if all files were created successfully, False otherwise.
+        """
         voice_prep_dir = Path(cfg.VOICES_PREP_DIR)
-        
+
         priority_labels = ["HIGH", "MEDIUM", "LOW"]
         priority_text = f"{'⚠️ ' if priority_used > 0 else ''}{priority_labels[priority_used] if priority_used is not None else 'HIGH'}"
-        
+
         # Build status message
         status = "✅ " if total_duration >= cfg.MIN_DURATION else "⚠️ "
         duration_status = f"{total_duration:.1f}s" + (f" (need {cfg.MIN_DURATION:.1f}s)" if total_duration < cfg.MIN_DURATION else "")
-        
+
         # Build StrRef:SoundResRef pairs for logging
         sample_pairs = [f"{entry.str_ref}:{entry.sound_res_ref}({duration:.1f}s)" for entry, _, duration in samples]
         pairs_str = ", ".join(sample_pairs) if len(sample_pairs) <= 3 else f"{', '.join(sample_pairs[:3])}... ({len(sample_pairs)} total)"
-        
+
         logger.log(logging.WARNING if priority_used > 0 or total_duration < cfg.MIN_DURATION else logging.INFO,  f"{status} {real_name}: {len(samples)} samples, {duration_status} [{priority_text} priority] [{pairs_str}]")
-        
+
         # Detailed debug log for all samples
         if logger.isEnabledFor(logging.DEBUG):
             logger.debug(f"  Detailed samples for {real_name}:")
             for idx, (entry, audio_path, duration) in enumerate(samples):
                 logger.debug(f"    {idx+1}. StrRef: {entry.str_ref}, Sound: {entry.sound_res_ref}, Duration: {duration:.2f}s")
-        
+
         # Create files for each sample - ALWAYS use numbers starting from 1
         for idx, (entry, audio_path, duration) in enumerate(samples):
             # Always use number, starting from 1
@@ -370,22 +512,31 @@ class VoiceSampleProcessor:
                 base_name = f"{real_name} 1"
             else:
                 base_name = f"{real_name} {sample_num}"
-            
+
             # Copy WAV file
             wav_path = voice_prep_dir / f"{base_name}.WAV"
             shutil.copy2(audio_path, wav_path)
-            
+
             # Create TXT file with text
             txt_path = voice_prep_dir / f"{base_name}.txt"
             with open(txt_path, 'w', encoding='utf-8') as f:
                 f.write(entry.text)
-        
+
         return True
 
     def can_create_file(self, path: Path) -> bool:
         """
         Check if a file can be created at the given path.
-        Returns True if the file can be created, False otherwise.
+
+        Tests file creation by attempting to create the file and immediately
+        deleting it. This validates that the path is writable and that the
+        filename is valid for the current filesystem.
+
+        Args:
+            path: The file path to test.
+
+        Returns:
+            True if the file can be created, False otherwise.
         """
         try:
             # Try to create the file (fail if it already exists)
@@ -394,32 +545,45 @@ class VoiceSampleProcessor:
             return True
         except OSError:
             return False
-    
+
     def process_all(self) -> None:
-        """Process all character groups"""
+        """
+        Process all character groups.
+
+        Orchestrates the complete workflow:
+            1. Load and parse the CSV
+            2. Scan for existing voice files
+            3. Filter characters eligible for processing
+            4. Process each character group
+            5. Clean up temporary files
+            6. Log summary statistics
+
+        The method handles blacklist filtering, existence checking, and
+        validation of output file creation.
+        """
         self.load_csv()
         self.scan_existing_voices()
 
         voice_prep_dir = Path(cfg.VOICES_PREP_DIR)
-        
+
         # Filter and prepare the list of characters to process
         characters_to_process = []
         skipped_count = 0
         no_samples_count = 0
         blacklisted_count = 0
         invalid_filename_count = 0
-        
+
         for real_name, entries in self.entries_by_realname.items():
             # Check if blacklisted
             if real_name in self.blacklist:
                 blacklisted_count += 1
                 continue
-                
+
             # Check if already exists
             if real_name in self.existing_voices:
                 skipped_count += 1
                 continue
-            
+
             # Check if has sample entries
             has_samples = any(e.is_valid_sample for e in entries)
             if not has_samples:
@@ -431,16 +595,16 @@ class VoiceSampleProcessor:
             if not self.can_create_file(test_path):
                 logger.warning(f"❌ Skipping '{real_name}' - cannot create file (invalid filename or permissions)")
                 invalid_filename_count += 1
-                continue            
-            
+                continue
+
             # This character is eligible for processing
             characters_to_process.append((real_name, entries))
-        
+
         # Sort characters by number of entries (more entries = more likely to find good samples)
         characters_to_process.sort(key=lambda x: len(x[1]), reverse=True)
-        
+
         total_to_process = len(characters_to_process)
-        
+
         logger.info(f"\n{'─'*50}")
         logger.info(f"🎯 Starting voice sample preparation...")
         logger.info(f"{'─'*50}")
@@ -448,20 +612,20 @@ class VoiceSampleProcessor:
         logger.info(f"  🚫 Blacklisted: {blacklisted_count}")
         logger.info(f"  ⏭️ Already exist: {skipped_count}")
         logger.info(f"  ⚠️ No source samples: {no_samples_count}")
-        logger.info(f"  ❌ Invalid filenames: {invalid_filename_count}")        
+        logger.info(f"  ❌ Invalid filenames: {invalid_filename_count}")
         logger.info(f"  ✅ To process: {total_to_process}")
         logger.info(f"{'─'*50}")
-        
+
         processed_count = 0
-        
+
         for idx, (real_name, entries) in enumerate(characters_to_process, 1):
             # Log progress before processing
             logger.info(f"[{idx}/{total_to_process}] Processing: {real_name}")
-            
+
             if self.process_character_group(real_name, entries):
                 processed_count += 1
                 self.existing_voices.add(real_name)
-        
+
         # Clean up extracted directory
         extract_dir = voice_prep_dir / "extracted"
         if extract_dir.exists():
@@ -472,7 +636,7 @@ class VoiceSampleProcessor:
                 logger.warning(f"⚠️ Could not delete {extract_dir} - permission denied (files may be in use)")
             except Exception as e:
                 logger.warning(f"⚠️ Could not delete {extract_dir}: {e}")
-        
+
         # Final summary
         logger.info(f"\n{'='*60}")
         logger.info(f"📋 PROCESSING COMPLETE")
@@ -484,10 +648,23 @@ class VoiceSampleProcessor:
         logger.info(f"  📁 Output directory:   {cfg.VOICES_PREP_DIR}")
         logger.info(f"{'='*60}")
 
+
 def load_blacklist(blacklist_file: Optional[Path] = None) -> Set[str]:
-    """Load blacklist from a file, one name per line"""
+    """
+    Load blacklist from a file, one name per line.
+
+    Combines the hardcoded blacklist from cfg.BLACKLIST with entries
+    from the blacklist file. Lines starting with '#' are treated as
+    comments and skipped.
+
+    Args:
+        blacklist_file: Optional path to a blacklist file.
+
+    Returns:
+        Set of character names to blacklist.
+    """
     blacklist = set(cfg.BLACKLIST)  # Start with hardcoded list
-    
+
     if blacklist_file and blacklist_file.exists():
         with open(blacklist_file, 'r', encoding='utf-8') as f:
             for line in f:
@@ -495,27 +672,36 @@ def load_blacklist(blacklist_file: Optional[Path] = None) -> Set[str]:
                 if name and not name.startswith('#'):  # Skip comments and empty lines
                     blacklist.add(name)
         logger.info(f"Loaded {len(blacklist)} blacklisted characters from {blacklist_file}")
-    
+
     return blacklist
 
-def main():
-    """Main entry point"""
+
+def main() -> None:
+    """
+    Main entry point for the voice sample preparation script.
+
+    Validates required paths and files, creates output directories,
+    loads the blacklist, and starts the processing pipeline.
+
+    Returns:
+        None (exits with status code 1 on error).
+    """
     csv_path = Path(cfg.CSV_PATH)
     if not csv_path.exists():
         print(f"Error: CSV file not found: {csv_path}")
         sys.exit(1)
-    
+
     # Validate game directory
     if not Path(cfg.GAME_DIRECTORY).exists():
         logger.warning(f"Game directory not found: {cfg.GAME_DIRECTORY}")
         logger.warning("Please update cfg.GAME_DIRECTORY to your actual game directory path")
-    
+
     # Validate weidu
     weidu_path = Path(cfg.WEIDU_PATH)
     if not weidu_path.exists():
         logger.warning(f"Weidu not found at: {cfg.WEIDU_PATH}")
         logger.warning("Please update cfg.WEIDU_PATH to point to your weidu executable")
-    
+
     # Create output directories
     voices_dir = Path(cfg.VOICES_DIR)
     voices_prep_dir = Path(cfg.VOICES_PREP_DIR)
@@ -523,9 +709,9 @@ def main():
     voices_prep_dir.mkdir(parents=True, exist_ok=True)
 
     # Load blacklist
-    blacklist_file = Path(blacklist_file) if (blacklist_file := Path(cfg.BLACKLIST_FILE)).exists() else None
+    blacklist_file = Path(cfg.BLACKLIST_FILE) if Path(cfg.BLACKLIST_FILE).exists() else None
     blacklist = load_blacklist(blacklist_file)
-    
+
     # Process
     processor = VoiceSampleProcessor(csv_path, blacklist)
     processor.process_all()
