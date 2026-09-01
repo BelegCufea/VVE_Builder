@@ -22,8 +22,9 @@ dialog.tlk (+ dialogf.tlk).
 from __future__ import annotations
 
 import argparse
+import os
 import shutil
-import sys
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -80,6 +81,36 @@ def filter_to_valid_strrefs(
     return kept, dropped
 
 
+def _rmtree_onerror(func, path, exc_info) -> None:
+    """
+    shutil.rmtree error handler: if the failure is permissions-related
+    (e.g. a read-only file/dir on Windows), clear the read-only bit and
+    retry once. Otherwise leave it - the caller decides whether that's fatal.
+    """
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def clean_mod_root(mod_root: Path, logger) -> None:
+    """
+    Remove an existing mod_root folder before staging, best-effort.
+
+    Read-only files/dirs are unlocked and retried automatically. Anything
+    that still can't be removed (e.g. a dir held read-only in a way Windows
+    won't budge on) is logged as a warning and left in place - the WAV/2DA
+    files it may contain get overwritten anyway on the next steps.
+    """
+    if not mod_root.exists():
+        return
+    shutil.rmtree(mod_root, onerror=_rmtree_onerror)
+    if mod_root.exists():
+        logger.warning(f"Could not fully clean {mod_root} (permission denied on some "
+                        f"files/dirs) - continuing, existing files will be overwritten.")
+
+
 def write_2da(entries: list[Entry], mapping_path: Path) -> None:
     """
     Minimal 2DA: WeiDU's COUNT_2DA_ROWS/READ_2DA_ENTRY_FORMER treat line 1
@@ -133,6 +164,10 @@ def main() -> int:
     if not game_dir.is_dir():
         logger.error(f"game dir not found: {game_dir}")
         return 1
+
+    if mod_root.exists():
+        logger.info(f"Cleaning existing mod folder: {mod_root}")
+        clean_mod_root(mod_root, logger)
 
     entries, skipped = scan(output_dir)
 
