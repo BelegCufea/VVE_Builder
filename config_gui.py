@@ -1,10 +1,17 @@
-"""Small Qt configuration utility for the game-specific settings."""
+"""
+Small Qt configuration utility for the game-specific settings.
+
+Provides a graphical interface for editing and validating configuration
+settings used by the game-data workflows, including game directory paths,
+language selection, text encoding, and Voicebox API configuration.
+"""
 
 from __future__ import annotations
 
 import codecs
 import sys
 from pathlib import Path
+from typing import Optional, List, Dict, Any
 
 import requests
 from appconfig import cfg, set_many
@@ -28,15 +35,37 @@ from PySide6.QtWidgets import (
 
 
 class HealthCheckWorker(QObject):
-    """Runs a single Voicebox API health check off the UI thread."""
+    """
+    Runs a single Voicebox API health check off the UI thread.
+
+    Performs an asynchronous GET request to the /health endpoint of the
+    Voicebox API and emits the result via the finished signal.
+
+    Signals:
+        finished: Emitted with (success_bool, payload_dict) when the
+            health check completes.
+    """
 
     finished = Signal(bool, dict)
 
     def __init__(self, base_url: str) -> None:
+        """
+        Initialize the health check worker.
+
+        Args:
+            base_url: Base URL of the Voicebox API (e.g., http://localhost:17493).
+        """
         super().__init__()
         self._base_url = base_url
 
     def run(self) -> None:
+        """
+        Execute the health check request.
+
+        Sends a GET request to /health endpoint with a 5-second timeout.
+        Emits finished signal with success status and response payload
+        or error information.
+        """
         try:
             resp = requests.get(f"{self._base_url}/health", timeout=5)
             resp.raise_for_status()
@@ -45,14 +74,27 @@ class HealthCheckWorker(QObject):
             except ValueError:
                 payload = {}
             self.finished.emit(True, payload)
-        except Exception as exc:  # noqa: BLE001 - surface any failure reason to the UI
+        except Exception as exc:
+            # Surface any failure reason to the UI
             self.finished.emit(False, {"error": str(exc)})
 
 
 class ConfigWindow(QMainWindow):
-    """Edit and validate the settings required by the game-data workflows."""
+    """
+    Edit and validate the settings required by the game-data workflows.
+
+    Provides a tabbed interface for configuring:
+        - Game directory path
+        - Language selection (auto-detected from game's lang directory)
+        - Text encoding
+        - Voicebox API URL, engine, model size
+        - Transcription language
+
+    Features real-time validation and health checking for the API endpoint.
+    """
 
     def __init__(self) -> None:
+        """Initialize the configuration window and build the UI."""
         super().__init__()
         self.setWindowTitle("VVE Builder - Configuration")
         self.setMinimumWidth(620)
@@ -118,11 +160,17 @@ class ConfigWindow(QMainWindow):
         self.setCentralWidget(central_widget)
 
         self.save_button = save_button
-        self._health_thread: QThread | None = None
-        self._health_worker: HealthCheckWorker | None = None
+        self._health_thread: Optional[QThread] = None
+        self._health_worker: Optional[HealthCheckWorker] = None
         self.refresh_languages()
 
     def _build_api_tab(self) -> QWidget:
+        """
+        Build the API configuration tab.
+
+        Returns:
+            QWidget containing the API settings form.
+        """
         self.base_url_edit = QLineEdit(str(cfg.BASE_URL))
         self.base_url_edit.setPlaceholderText("http://localhost:8000")
         self.base_url_edit.textChanged.connect(self.validate)
@@ -169,7 +217,13 @@ class ConfigWindow(QMainWindow):
         return container
 
     def check_health(self) -> None:
-        """Kick off a single async health check against the current URL field."""
+        """
+        Kick off a single async health check against the current URL field.
+
+        Starts a background thread to query the /health endpoint and
+        updates the status indicator when complete. Prevents multiple
+        concurrent health checks.
+        """
         if self._health_thread is not None:
             return  # a check is already in flight
 
@@ -196,6 +250,7 @@ class ConfigWindow(QMainWindow):
         thread.start()
 
     def _clear_health_thread(self) -> None:
+        """Clean up the health check thread and worker after completion."""
         if self._health_worker is not None:
             self._health_worker.deleteLater()
         if self._health_thread is not None:
@@ -204,7 +259,16 @@ class ConfigWindow(QMainWindow):
         self._health_thread = None
         self.check_health_button.setEnabled(True)
 
-    def on_health_checked(self, ok: bool, payload: dict) -> None:
+    def on_health_checked(self, ok: bool, payload: Dict[str, Any]) -> None:
+        """
+        Handle the health check result.
+
+        Updates the status indicator color and tooltip based on success/failure.
+
+        Args:
+            ok: True if the health check succeeded, False otherwise.
+            payload: Response payload from the API or error information.
+        """
         if ok:
             self.health_dot.setStyleSheet("background-color: #28a745; border-radius: 7px;")
             self.health_dot.setToolTip("Voicebox API is reachable")
@@ -214,6 +278,11 @@ class ConfigWindow(QMainWindow):
             self.health_dot.setToolTip(f"Voicebox API check failed: {error}")
 
     def browse_game_directory(self) -> None:
+        """
+        Open a directory selection dialog for the game installation.
+
+        Updates the game directory field with the selected path.
+        """
         selected = QFileDialog.getExistingDirectory(
             self,
             "Select game directory",
@@ -222,7 +291,14 @@ class ConfigWindow(QMainWindow):
         if selected:
             self.game_directory_edit.setText(selected)
 
-    def available_languages(self) -> list[str]:
+    def available_languages(self) -> List[str]:
+        """
+        Detect available language directories in the game's lang directory.
+
+        Returns:
+            Sorted list of language directory names found in the game's
+            lang directory, or empty list if the directory doesn't exist.
+        """
         lang_directory = Path(self.game_directory_edit.text()).expanduser() / "lang"
         if not lang_directory.is_dir():
             return []
@@ -232,14 +308,29 @@ class ConfigWindow(QMainWindow):
         )
 
     def on_language_changed(self, locale_name: str) -> None:
+        """
+        Handle language selection change.
+
+        Automatically sets the transcription language to the English name
+        of the selected locale when possible.
+
+        Args:
+            locale_name: The selected locale name (e.g., "en_US").
+        """
         if locale_name:
             loc = QLocale(locale_name)
             if loc.language() != QLocale.Language.C:
                 english_name = QLocale.languageToString(loc.language())
                 self.transcription_language_edit.setText(english_name.lower())
-        self.validate()    
+        self.validate()
 
     def refresh_languages(self) -> None:
+        """
+        Refresh the language combo box with available languages.
+
+        Preserves the previous selection if still available, otherwise
+        selects the first available language.
+        """
         previous = self.language_combo.currentText() or str(cfg.LANGUAGE)
         languages = self.available_languages()
         self.language_combo.blockSignals(True)
@@ -252,12 +343,19 @@ class ConfigWindow(QMainWindow):
         self.language_combo.blockSignals(False)
         self.validate()
 
-    def validation_errors(self) -> list[str]:
+    def validation_errors(self) -> List[str]:
+        """
+        Validate all configuration fields and collect errors.
+
+        Returns:
+            List of error messages describing validation failures.
+            Empty list if all settings are valid.
+        """
         game_directory = Path(self.game_directory_edit.text()).expanduser()
         languages = self.available_languages()
         transcription_lang = self.transcription_language_edit.text().strip()
         encoding = self.encoding_edit.text().strip()
-        errors: list[str] = []
+        errors: List[str] = []
 
         if not game_directory.is_dir():
             errors.append("Game directory does not exist or is not a directory.")
@@ -270,7 +368,7 @@ class ConfigWindow(QMainWindow):
             errors.append("Select one of the languages found in the lang directory.")
 
         if not transcription_lang:
-            errors.append("Transcription language cannot be empty.")            
+            errors.append("Transcription language cannot be empty.")
 
         if not encoding:
             errors.append("Text encoding cannot be empty.")
@@ -292,6 +390,11 @@ class ConfigWindow(QMainWindow):
         return errors
 
     def validate(self) -> None:
+        """
+        Perform validation and update the status display accordingly.
+
+        Enables/disables the Save button based on validation results.
+        """
         errors = self.validation_errors()
         if errors:
             self.status_label.setText("<b>Needs attention</b><br>" + "<br>".join(errors))
@@ -303,6 +406,12 @@ class ConfigWindow(QMainWindow):
             self.save_button.setEnabled(True)
 
     def save(self) -> None:
+        """
+        Save the current configuration to appconfig.json.
+
+        Validates settings before saving and displays success/failure
+        message dialogs. Closes the window on success.
+        """
         errors = self.validation_errors()
         if errors:
             QMessageBox.warning(self, "Invalid configuration", "\n".join(errors))
@@ -312,7 +421,7 @@ class ConfigWindow(QMainWindow):
             {
                 "GAME_DIRECTORY": str(Path(self.game_directory_edit.text()).expanduser()),
                 "LANGUAGE": self.language_combo.currentText(),
-                "TRANSCRIPTION_LANGUAGE": self.transcription_language_edit.text().strip(),                
+                "TRANSCRIPTION_LANGUAGE": self.transcription_language_edit.text().strip(),
                 "TEXT_ENCODING": self.encoding_edit.text().strip(),
                 "BASE_URL": self.base_url_edit.text().strip(),
                 "ENGINE": self.engine_edit.text().strip(),
@@ -324,6 +433,12 @@ class ConfigWindow(QMainWindow):
 
 
 def main() -> int:
+    """
+    Application entry point.
+
+    Returns:
+        Exit code (0 for success, non-zero for failure).
+    """
     app = QApplication(sys.argv)
     window = ConfigWindow()
     window.show()
