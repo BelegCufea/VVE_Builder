@@ -19,6 +19,8 @@ import json
 import os
 import glob
 import shutil
+import sys
+from typing import Dict, List, Tuple, Optional
 
 from appconfig import cfg
 
@@ -32,12 +34,12 @@ _BACKUP_SUFFIX = ".backup"
 # Functions
 # ============================================================
 
-def find_memory_files():
+def find_memory_files() -> List[str]:
     """
     Find all generation-memory*.json files in the current directory.
 
     Returns:
-        list: List of file paths, sorted alphabetically.
+        List of file paths, sorted alphabetically.
     """
     pattern = "generation-memory*.json"
     files = glob.glob(pattern)
@@ -46,18 +48,29 @@ def find_memory_files():
     return sorted(files)
 
 
-def merge_memory_files(file_list, verbose=True):
+def merge_memory_files(file_list: List[str], verbose: bool = True) -> Tuple[Dict[str, Dict[str, bool]], int, int]:
     """
     Merge multiple generation-memory.json files into one.
 
+    Each file contains a dictionary mapping NPC names to dictionaries of
+    STRREF keys (with True as the value). The merge combines all entries,
+    deduplicating by NPC name and STRREF.
+
     Args:
-        file_list (list): List of file paths to merge.
-        verbose (bool): Whether to print progress information.
+        file_list: List of file paths to merge.
+        verbose: Whether to print progress information.
 
     Returns:
-        dict: The merged memory dictionary.
+        A tuple containing:
+            - merged: The merged memory dictionary with sorted NPCs and STRREFs.
+            - loaded_count: Number of files successfully loaded.
+            - total_strrefs: Total number of STRREF entries across all loaded files.
+
+    Note:
+        Files that cannot be loaded (e.g., due to JSON syntax errors) are
+        skipped with an error message if verbose is True.
     """
-    merged = {}
+    merged: Dict[str, Dict[str, bool]] = {}
     loaded_count = 0
     total_strrefs = 0
 
@@ -88,7 +101,7 @@ def merge_memory_files(file_list, verbose=True):
                 print(f"  ❌ Error loading {file_path}: {e}")
 
     # Sort the merged data
-    sorted_merged = {}
+    sorted_merged: Dict[str, Dict[str, bool]] = {}
     for npc in sorted(merged.keys(), key=lambda v: v.lower()):
         sorted_strrefs = sorted(
             merged[npc].keys(),
@@ -99,7 +112,7 @@ def merge_memory_files(file_list, verbose=True):
     return sorted_merged, loaded_count, total_strrefs
 
 
-def backup_file(file_path):
+def backup_file(file_path: str) -> bool:
     """
     Create a backup copy of the file if it exists.
 
@@ -107,10 +120,11 @@ def backup_file(file_path):
     The original file remains unchanged.
 
     Args:
-        file_path (str): Path to the file to backup.
+        file_path: Path to the file to backup.
 
     Returns:
-        bool: True if backup was created successfully, False otherwise.
+        True if backup was created successfully, False otherwise
+        (including if the source file doesn't exist).
     """
     if not os.path.exists(file_path):
         return False
@@ -123,8 +137,21 @@ def backup_file(file_path):
         return False
 
 
-def main():
-    """Main entry point."""
+def main() -> None:
+    """
+    Main entry point for the generation memory merger script.
+
+    Orchestrates the complete workflow:
+        1. Finds all generation-memory*.json files in the current directory
+        2. Validates that at least one file exists
+        3. Checks if only one file exists (nothing to merge)
+        4. Backs up the existing output file (if present)
+        5. Merges all found files
+        6. Saves the merged result to generation-memory.json
+        7. Displays a summary of the merge operation
+
+    Exits with status code 1 if no memory files are found.
+    """
     print("=" * 60)
     print("🗂️  GENERATION MEMORY MERGER")
     print("=" * 60)
@@ -190,6 +217,6 @@ def main():
     print("=" * 60)
     print("✅ Done!")
 
+
 if __name__ == "__main__":
-    import sys
     main()
