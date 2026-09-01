@@ -2,18 +2,15 @@
  * IE Voiceover Patcher
  * Attaches WAV voiceovers to existing dialog.tlk strrefs.
  *
- * Companion tool: build_mod.py stages the original TSXXXXXX.WAV files
- * (unchanged) into WAV/ and writes mapping.2da, a lookup table of
- * "strref resref" pairs, both placed next to this tp2. This script never
- * decodes base36 itself - it just walks the table WeiDU's own way, via
- * COUNT_2DA_ROWS / READ_2DA_ENTRY_FORMER.
+ * Built by build_mod.py from the VVE_Builder toolchain - see
+ * `build_mod.py --help` for how this mod folder is generated/staged.
  */
 
 BACKUP ~backup~
 AUTHOR ~VVE_Builder~
 VERSION ~v1.0~
 
-BEGIN @0 /* Add NPC voiceovers */
+BEGIN ~Add NPC voiceovers~
 
 OUTER_SET nrows = COUNT_2DA_ROWS ~mapping.2da~
 OUTER_SET patched = 0
@@ -37,4 +34,4 @@ FOR (row = 0; row < nrows; row = row + 1) BEGIN
 
 END
 
-PRINT ~[ievo] Patched %patched% strref(s) with voiceover.~
+PRINT ~[VO Patcher] Patched %patched% strref(s) with voiceover.~

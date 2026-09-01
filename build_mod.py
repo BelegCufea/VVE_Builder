@@ -1,22 +1,16 @@
 """
 build_mod.py
 
-Scans OUTPUT_DIR (subdirectories per NPC) for WAV files named:
-    TSXXXXXX.WAV
-where XXXXXX = base36(strref).
+Stages generated voiceover WAV files into a WeiDU-installable mod folder:
+copies the WAVs, writes a strref->resref lookup table, and brings in the
+tp2 and the WeiDU executable, renamed to WeiDU's setup-<modname> convention.
 
-Filenames are left EXACTLY as-is (TSXXXXXX.WAV, 8-char resref "TSXXXXXX")
-and simply copied/flattened into the mod's WAV folder. Alongside that,
-this script writes a 2DA-style lookup table (strref -> resref) that the
-.tp2 reads at install time with WeiDU's built-in COUNT_2DA_ROWS /
-READ_2DA_ENTRY_FORMER - so WeiDU never has to know about base36 at all,
-it just looks up "which resref goes with this strref" from the table.
+Files whose strref doesn't exist in the target game's dialog.tlk are
+dropped before staging, so a modded generation source can be reduced
+to something a clean install can actually accept.
 
-The tp2 source (MOD_TP2) is copied alongside the WAV folder and mapping
-table, renamed to f"setup-{MOD_NAME}.tp2" as WeiDU convention expects.
-
-Before staging, every candidate file's strref is checked against a 
-dialog.tlk (+ dialogf.tlk).
+Run with --help for the full description and available options (the
+--help text is built at runtime so it reflects your actual configuration).
 """
 
 from __future__ import annotations
@@ -25,6 +19,7 @@ import argparse
 import os
 import shutil
 import stat
+import textwrap
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -125,19 +120,95 @@ def write_2da(entries: list[Entry], mapping_path: Path) -> None:
             f.write(f"{e.strref} {e.resref}\n")
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument(
-        "--game-dir",
-        type=Path,
-        default=None,
-        help="Game install to validate strrefs against (its dialog.tlk / "
-             "dialogf.tlk). Defaults to cfg.GAME_DIRECTORY. Point this at a "
-             "clean game install to strip strrefs that does not exist in there. "
-             "This is useful if you are using a"
-             "modded install used for VO generation.",
+def build_description() -> str:
+    """
+    Full --help description, built at runtime so it reflects the actual
+    configured cfg values rather than placeholder names.
+    """
+    fill = lambda text: textwrap.fill(text, width=78, break_on_hyphens=False)
+
+    paragraphs = [
+        fill(f"Scans {cfg.OUTPUT_DIR} (subdirectories per NPC) for WAV "
+             f"files named:")
+        + f"\n    {cfg.FILENAME_PREFIX}XXXXXX.WAV\n"
+        + fill("where XXXXXX = base36(strref)."),
+
+        fill("Filenames are copied/flattened into the mod's WAV folder. "
+             "Alongside that, this script writes a 2DA-style lookup table "
+             "(strref -> resref) that the .tp2 reads at install time, so "
+             "WeiDU never has to know about base36 at all."),
+
+        fill(f"The tp2 source ({cfg.MOD_TP2}) is copied alongside the WAV "
+             f"folder and mapping table, renamed to setup-{cfg.MOD_NAME}.tp2 "
+             f"as WeiDU convention expects. The WeiDU executable "
+             f"({cfg.WEIDU_PATH}) is likewise copied in and renamed to "
+             f"setup-{cfg.MOD_NAME}.exe, so the mod folder is ready to "
+             f"install standalone."),
+
+        fill(f"Before staging, every candidate file's strref is checked "
+             f"against {cfg.GAME_DIRECTORY}'s dialog.tlk (+ dialogf.tlk)."),
+    ]
+    return "\n\n".join(paragraphs)
+
+
+ARG_SPECS = [
+    {
+        "flags": ["--game-dir"],
+        "type": Path,
+        "metavar": "PATH",
+        "help": (
+            f"Game install to validate strrefs against (its dialog.tlk / "
+            f"dialogf.tlk). Defaults to {cfg.GAME_DIRECTORY}. Point this "
+            f"at a clean game install to strip strrefs that don't exist "
+            f"there - useful if VO generation was done against a modded "
+            f"install."
+        ),
+    },
+    {
+        "flags": ["--mod-name"],
+        "type": str,
+        "metavar": "NAME",
+        "help": (
+            f"Mod name to use for this build (folder name under "
+            f"{cfg.MOD_ROOT}, and the setup-<mod-name>.tp2/.exe "
+            f"filenames). Defaults to {cfg.MOD_NAME}."
+        ),
+    },
+]
+
+
+def build_parser() -> argparse.ArgumentParser:
+    parser = argparse.ArgumentParser(
+        description=build_description(),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    return parser.parse_args(argv)
+    for spec in ARG_SPECS:
+        parser.add_argument(
+            *spec["flags"],
+            type=spec["type"],
+            default=None,
+            metavar=spec["metavar"],
+            help=spec["help"],
+        )
+    return parser
+
+
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    return build_parser().parse_args(argv)
+
+
+def log_optional_parameters(logger) -> None:
+    """Log a short summary of ARG_SPECS, reusing the same help text and
+    already-resolved cfg values shown by --help - nothing hand-duplicated."""
+    lines = ["Optional parameters (run with --help for the full description):"]
+    for spec in ARG_SPECS:
+        flag = f"{spec['flags'][0]} <{spec['metavar']}>"
+        lines.append(f"  {flag}")
+        lines.extend(
+            f"      {line}"
+            for line in textwrap.wrap(spec["help"], width=70, break_on_hyphens=False)
+        )
+    logger.info("\n".join(lines))
 
 
 def main() -> int:
@@ -145,12 +216,17 @@ def main() -> int:
 
     logger = setup_logging( Path(__file__).stem)
 
-    mod_root = Path(cfg.MOD_ROOT) / cfg.MOD_NAME
+    log_optional_parameters(logger)
+
+    mod_name = args.mod_name if args.mod_name is not None else cfg.MOD_NAME
+    mod_root = Path(cfg.MOD_ROOT) / mod_name
     output_dir = Path(cfg.OUTPUT_DIR)
     mod_dir = Path(mod_root / "WAV")
     mapping_path = Path(mod_root / "mapping.2da")
     tp2_src = Path(cfg.MOD_TP2)
-    tp2_dest = Path(mod_root / f"setup-{cfg.MOD_NAME}.tp2")
+    tp2_dest = Path(mod_root / f"setup-{mod_name}.tp2")
+    weidu_src = Path(cfg.WEIDU_PATH)
+    weidu_dest = Path(cfg.MOD_ROOT) / f"setup-{mod_name}.exe"
 
     if not output_dir.is_dir():
         logger.error(f"output dir not found: {output_dir}")
@@ -158,6 +234,10 @@ def main() -> int:
 
     if not tp2_src.is_file():
         logger.error(f"tp2 source not found: {tp2_src}")
+        return 1
+
+    if not weidu_src.is_file():
+        logger.error(f"WeiDU executable not found: {weidu_src}")
         return 1
 
     game_dir = args.game_dir if args.game_dir is not None else Path(cfg.GAME_DIRECTORY)
@@ -205,9 +285,13 @@ def main() -> int:
     tp2_dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(tp2_src, tp2_dest)
 
+    weidu_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(weidu_src, weidu_dest)
+
     logger.info(f"Staged {len(entries)} WAV file(s) to: {mod_dir}")
     logger.info(f"Lookup table written to: {mapping_path}")
     logger.info(f"tp2 copied to: {tp2_dest}")
+    logger.info(f"WeiDU copied to: {weidu_dest}")
 
     return 0
 
