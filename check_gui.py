@@ -14,6 +14,7 @@ Features:
   - Drill-down panel showing all samples for the selected NPC
   - Side-by-side text comparison dialog with copy buttons
   - Real-time progress bar with ETA and throughput metrics
+  - Export and import check results via CSV with audio playback support
 
 Configuration lives in appconfig.py; all cfg.* values are read once at startup.
 
@@ -587,6 +588,8 @@ class CheckWindow(QMainWindow):
         self.export_btn = QPushButton("Export CSV")
         self.export_btn.setEnabled(False)
         self.export_btn.clicked.connect(self._export_csv)
+        self.import_btn = QPushButton("Import CSV")
+        self.import_btn.clicked.connect(self._import_csv)
 
         samples_label = QLabel("Samples/NPC:")
         self.samples_spin = QSpinBox()
@@ -607,6 +610,7 @@ class CheckWindow(QMainWindow):
         toolbar.addWidget(self.start_btn)
         toolbar.addWidget(self.stop_btn)
         toolbar.addWidget(self.export_btn)
+        toolbar.addWidget(self.import_btn)
         toolbar.addSpacing(16)
         toolbar.addWidget(samples_label)
         toolbar.addWidget(self.samples_spin)
@@ -765,6 +769,7 @@ class CheckWindow(QMainWindow):
         self.overall_label.setText("Starting...")
         self.stats_label.setText("NPCs: -  Samples: - Duration: - Avg: -%")
         self.export_btn.setEnabled(False)
+        self.import_btn.setEnabled(False)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
         self.samples_spin.setEnabled(False)
@@ -796,6 +801,7 @@ class CheckWindow(QMainWindow):
         self.start_btn.setEnabled(True)
         self.stop_btn.setEnabled(False)
         self.samples_spin.setEnabled(True)
+        self.import_btn.setEnabled(True)
 
     def _on_samples_per_npc_changed(self, value: int) -> None:
         """Update cfg.SAMPLES_PER_NPC live from the spin box.
@@ -863,6 +869,7 @@ class CheckWindow(QMainWindow):
         self.statusBar().showMessage(f"Failed: {message}", 8000)
         self.overall_label.setText(f"Failed: {message}")
         self.npc_table.setSortingEnabled(True)
+        self.import_btn.setEnabled(True)
 
     # ------------------------------------------------------------------
     # NPC table helpers
@@ -1126,7 +1133,7 @@ class CheckWindow(QMainWindow):
         self.statusBar().showMessage(f"🔊 Playing: {wav_path.name}", 3000)
 
     # ------------------------------------------------------------------
-    # Export CSV
+    # Export & Import CSV
     # ------------------------------------------------------------------
 
     def _export_csv(self) -> None:
@@ -1150,21 +1157,236 @@ class CheckWindow(QMainWindow):
             self.statusBar().showMessage("Nothing to export.", 3000)
             return
 
-        with open(output_file, "w", encoding="utf-8-sig", newline="") as f:
-            writer = csv.DictWriter(
-                f,
-                fieldnames=[
-                    "NPC", "StrRef", "AudioFile",
-                    "SimilarityScore", "CSVText", "TranscribedText",
-                ],
-            )
-            writer.writeheader()
-            writer.writerows(rows)
+        base_columns = [
+            "NPC", "StrRef", "AudioFile", "AudioPath",
+            "SimilarityScore", "Duration", "CSVText", "TranscribedText",
+        ]
+        all_keys = list(base_columns)
+        for row in rows:
+            for k in row.keys():
+                if k not in all_keys:
+                    all_keys.append(k)
 
-        logger.info(f"Exported {len(rows)} rows to {output_file}")
-        self.statusBar().showMessage(
-            f"Exported {len(rows)} rows to {output_file}", 5000
+        export_rows = []
+        for r in rows:
+            clean_row = {}
+            for k in all_keys:
+                v = r.get(k, "")
+                clean_row[k] = str(v) if isinstance(v, Path) else v
+            export_rows.append(clean_row)
+
+        try:
+            with open(output_file, "w", encoding="utf-8-sig", newline="") as f:
+                writer = csv.DictWriter(
+                    f,
+                    fieldnames=all_keys,
+                    extrasaction="ignore",
+                )
+                writer.writeheader()
+                writer.writerows(export_rows)
+
+            logger.info(f"Exported {len(export_rows)} rows to {output_file}")
+            self.statusBar().showMessage(
+                f"Exported {len(export_rows)} rows to {output_file}", 5000
+            )
+        except Exception as ex:
+            logger.error(f"Failed to export CSV: {ex}")
+            self.statusBar().showMessage(f"Failed to export CSV: {ex}", 5000)
+
+    def _parse_imported_sample(self, row: dict) -> Tuple[str, dict]:
+        """Parse and normalize a single CSV row into a sample dictionary."""
+        npc_name = (
+            row.get("NPC") or row.get("npc") or row.get("NPC Name") or "UNKNOWN"
+        ).strip()
+
+        raw_strref = row.get("StrRef") if "StrRef" in row else row.get("strref", "0")
+        try:
+            strref = int(raw_strref or "0")
+        except (ValueError, TypeError):
+            strref = 0
+
+        audio_file = (
+            row.get("AudioFile") or row.get("audiofile") or row.get("Audio File") or ""
+        ).strip()
+
+        raw_score = (
+            row.get("SimilarityScore")
+            if "SimilarityScore" in row
+            else row.get("score")
+            if "score" in row
+            else row.get("Score")
+            if "Score" in row
+            else row.get("Score %")
         )
+        try:
+            score = (
+                float(raw_score)
+                if raw_score is not None and str(raw_score).strip() != ""
+                else 0.0
+            )
+        except (ValueError, TypeError):
+            score = 0.0
+
+        raw_duration = (
+            row.get("Duration")
+            if "Duration" in row
+            else row.get("duration")
+            if "duration" in row
+            else row.get("Duration (s)")
+        )
+        try:
+            duration = (
+                float(raw_duration)
+                if raw_duration is not None and str(raw_duration).strip() != ""
+                else 0.0
+            )
+        except (ValueError, TypeError):
+            duration = 0.0
+
+        csv_text = (
+            row.get("CSVText")
+            if "CSVText" in row
+            else row.get("ExpectedText")
+            if "ExpectedText" in row
+            else row.get("CSV Text")
+            if "CSV Text" in row
+            else row.get("text", "")
+        ) or ""
+
+        trans_text = (
+            row.get("TranscribedText")
+            if "TranscribedText" in row
+            else row.get("transcribed_text")
+            if "transcribed_text" in row
+            else row.get("Transcribed")
+            if "Transcribed" in row
+            else ""
+        ) or ""
+
+        raw_path = (
+            row.get("AudioPath")
+            if "AudioPath" in row
+            else row.get("audiopath")
+            if "audiopath" in row
+            else row.get("Audio Path")
+        )
+        if raw_path and Path(raw_path).exists():
+            audio_path = Path(raw_path).resolve()
+        elif audio_file:
+            fallback = Path(cfg.OUTPUT_DIR) / npc_name / audio_file
+            if fallback.exists():
+                audio_path = fallback.resolve()
+            elif raw_path:
+                audio_path = Path(raw_path).resolve()
+            else:
+                audio_path = fallback.resolve()
+        elif raw_path:
+            audio_path = Path(raw_path).resolve()
+        else:
+            audio_path = None
+
+        sample = {
+            "NPC": npc_name,
+            "StrRef": strref,
+            "AudioFile": audio_file,
+            "AudioPath": audio_path,
+            "CSVText": csv_text,
+            "TranscribedText": trans_text,
+            "SimilarityScore": score,
+            "Duration": duration,
+        }
+
+        for k, v in row.items():
+            if k is not None and k not in sample:
+                sample[k] = v
+
+        return npc_name, sample
+
+    def _import_csv(self) -> None:
+        input_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Import Transcription Samples",
+            "",
+            "CSV Files (*.csv);;All Files (*)",
+        )
+
+        if not input_file:
+            return  # User cancelled
+
+        try:
+            with open(input_file, "r", encoding="utf-8-sig", newline="") as f:
+                reader = csv.DictReader(f)
+                raw_rows = list(reader)
+        except Exception as ex:
+            logger.error(f"Failed to read CSV {input_file}: {ex}")
+            self.statusBar().showMessage(f"Failed to read CSV: {ex}", 5000)
+            return
+
+        if not raw_rows:
+            self.statusBar().showMessage("No data found in imported CSV.", 5000)
+            return
+
+        npc_groups: Dict[str, List[dict]] = {}
+        for row in raw_rows:
+            npc_name, sample = self._parse_imported_sample(row)
+            npc_groups.setdefault(npc_name, []).append(sample)
+
+        # Reconstruct window state
+        self._all_npc_data.clear()
+        self._npc_row_index.clear()
+        self._selected_npc = None
+        self.npc_table.setSortingEnabled(False)
+        self.npc_table.setRowCount(0)
+        self.detail_table.setRowCount(0)
+        self.detail_table.hide()
+        self.detail_placeholder.setText(
+            "Select an NPC from the table above to see its samples."
+        )
+        self.detail_placeholder.show()
+        self._clear_fulltext_panel()
+
+        total_samples = 0
+        for npc_name, npc_samples in npc_groups.items():
+            total_samples += len(npc_samples)
+            scores = [
+                s["SimilarityScore"] for s in npc_samples
+                if isinstance(s["SimilarityScore"], (int, float))
+            ]
+            durations = [
+                s["Duration"] for s in npc_samples
+                if isinstance(s["Duration"], (int, float))
+            ]
+            worst = min(scores) if scores else None
+            avg = (sum(scores) / len(scores)) if scores else None
+            sum_duration = sum(durations) if durations else None
+
+            npc_data = {
+                "npc": npc_name,
+                "samples": npc_samples,
+                "worst_score": worst,
+                "avg_score": avg,
+                "sum_duration": sum_duration,
+                "done": True,
+            }
+            self._all_npc_data[npc_name] = npc_data
+            self._append_npc_row(npc_data)
+
+        self._update_stats_label()
+        self.npc_table.setSortingEnabled(True)
+        self.npc_table.sortItems(1, Qt.SortOrder.AscendingOrder)
+        self.export_btn.setEnabled(bool(self._all_npc_data) and total_samples > 0)
+        self.overall_bar.setValue(10_000)
+        file_name = Path(input_file).name
+        self.overall_label.setText(
+            f"Imported {len(self._all_npc_data)} NPCs, {total_samples} samples from {file_name}."
+        )
+        self.statusBar().showMessage(
+            f"Imported {total_samples} samples across {len(self._all_npc_data)} NPCs.", 5000
+        )
+        logger.info(f"Imported {total_samples} samples from {input_file}")
+
+        if self.npc_table.rowCount() > 0:
+            self.npc_table.selectRow(0)
 
     # ------------------------------------------------------------------
     # Cleanup
