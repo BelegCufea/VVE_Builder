@@ -601,7 +601,7 @@ class CheckWindow(QMainWindow):
         self.samples_spin.valueChanged.connect(self._on_samples_per_npc_changed)
 
         self.stats_label = QLabel(
-            f"NPCs: -  Samples: -  Avg: -%  (sequential)"
+            f"NPCs: -  Samples: - Duration: - Avg: -%"
         )
         self.stats_label.setStyleSheet("color: gray; font-size: 11px;")
         toolbar.addWidget(self.start_btn)
@@ -631,7 +631,7 @@ class CheckWindow(QMainWindow):
         self.npc_table = QTableWidget()
         self.npc_table.setColumnCount(6)
         self.npc_table.setHorizontalHeaderLabels(
-            ["NPC Name", "Worst %", "Avg %", "Samples", "Σ Duration (s)", "Status"]
+            ["NPC Name", "Worst %", "Avg %", "Samples", "Duration", "Status"]
         )
         self.npc_table.horizontalHeader().setStretchLastSection(True)
         self.npc_table.setSelectionBehavior(
@@ -641,7 +641,7 @@ class CheckWindow(QMainWindow):
         self.npc_table.setColumnWidth(1, 80)
         self.npc_table.setColumnWidth(2, 80)
         self.npc_table.setColumnWidth(3, 80)
-        self.npc_table.setColumnWidth(4, 100)
+        self.npc_table.setColumnWidth(4, 80)
         self.npc_table.itemSelectionChanged.connect(self._on_npc_selected)
         self.npc_table.setSortingEnabled(True)
         tg_layout.addWidget(self.npc_table)
@@ -763,7 +763,7 @@ class CheckWindow(QMainWindow):
         self.detail_placeholder.show()
         self.overall_bar.setValue(0)
         self.overall_label.setText("Starting...")
-        self.stats_label.setText("NPCs: -  Samples: -  Avg: -%")
+        self.stats_label.setText("NPCs: -  Samples: - Duration: - Avg: -%")
         self.export_btn.setEnabled(False)
         self.start_btn.setEnabled(False)
         self.stop_btn.setEnabled(True)
@@ -905,9 +905,9 @@ class CheckWindow(QMainWindow):
         ci.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
         self.npc_table.setItem(row, 3, ci)
 
-        # Average duration
+        # Total duration
         if sum_duration is not None:
-            di = _NumericTableWidgetItem(f"{sum_duration:.2f}")
+            di = _NumericTableWidgetItem(format_time(sum_duration))
             di.setData(Qt.ItemDataRole.UserRole + 1, sum_duration)
         else:
             di = QTableWidgetItem("-")
@@ -942,18 +942,26 @@ class CheckWindow(QMainWindow):
             item.setForeground(QColor(color))
 
     def _update_stats_label(self) -> None:
-        all_scores = [
-            s["SimilarityScore"]
-            for data in self._all_npc_data.values()
+        all_samples = [
+            s for data in self._all_npc_data.values()
             for s in data.get("samples", [])
-            if isinstance(s["SimilarityScore"], (int, float))
+        ]
+        all_scores = [
+            s["SimilarityScore"] for s in all_samples
+            if isinstance(s.get("SimilarityScore"), (int, float))
+        ]
+        all_durations = [
+            s["Duration"] for s in all_samples
+            if isinstance(s.get("Duration"), (int, float))
         ]
         total_npcs = len(self._all_npc_data)
         total_samples = len(all_scores)
         avg_all = (sum(all_scores) / len(all_scores)) if all_scores else None
         avg_str = f"{avg_all:.1f}%" if avg_all is not None else "-"
+        dur_str = format_time(sum(all_durations)) if all_durations else "-"
+
         self.stats_label.setText(
-            f"NPCs: {total_npcs}  Samples: {total_samples}  Avg: {avg_str}"
+            f"NPCs: {total_npcs}  Samples: {total_samples}  Duration: {dur_str}  Avg: {avg_str}"
         )
 
     # ------------------------------------------------------------------
