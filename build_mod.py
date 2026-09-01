@@ -23,23 +23,49 @@ import stat
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
+from typing import List, Set, Tuple, Optional, Callable, Any
 
 from appconfig import cfg
 from utils import from_base36, filename_re, load_valid_strrefs, setup_logging
 
-# =========================================================================
+logger = setup_logging(Path(__file__).stem)
+
 
 @dataclass
 class Entry:
+    """
+    Represents a single voiceover file entry discovered during scanning.
+
+    Attributes:
+        strref: The numeric string reference ID extracted from the filename.
+        resref: The resource reference name (filename without .WAV extension).
+        source_path: Full filesystem path to the source WAV file.
+        npc_subdir: NPC subdirectory path relative to output directory.
+    """
     strref: int
-    resref: str          # e.g. "TS12345" (filename without .WAV, original case)
+    resref: str
     source_path: Path
     npc_subdir: str
 
 
-def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
-    entries: list[Entry] = []
-    skipped: list[Path] = []
+def scan(output_dir: Path) -> Tuple[List[Entry], List[Path]]:
+    """
+    Scan the output directory for valid voiceover WAV files.
+
+    Recursively traverses the output directory, identifying WAV files that
+    match the expected naming pattern (FILENAME_PREFIX + base36(strref) + .WAV).
+    Validates that strref > 0 and file size > 0 before including.
+
+    Args:
+        output_dir: Root directory to scan for WAV files.
+
+    Returns:
+        A tuple containing:
+            - entries: List of valid Entry objects discovered.
+            - skipped: List of Paths that matched pattern but failed validation.
+    """
+    entries: List[Entry] = []
+    skipped: List[Path] = []
     pattern = filename_re()
 
     for wav_path in output_dir.rglob("*"):
@@ -60,7 +86,7 @@ def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
             skipped.append(wav_path)
             continue
 
-        resref = wav_path.stem  # "TS12345", preserves original casing/length
+        resref = wav_path.stem
         npc_subdir = wav_path.parent.relative_to(output_dir).as_posix()
         entries.append(Entry(strref=strref, resref=resref, source_path=wav_path, npc_subdir=npc_subdir))
 
@@ -68,14 +94,26 @@ def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
 
 
 def filter_to_valid_strrefs(
-    entries: list[Entry], valid_strrefs: set[int]
-) -> tuple[list[Entry], list[Entry]]:
+    entries: List[Entry], valid_strrefs: Set[int]
+) -> Tuple[List[Entry], List[Entry]]:
     """
-    Split entries into (kept, dropped) based on whether their strref exists
-    in the game's dialog.tlk/dialogf.tlk and audio file physically exists.
+    Filter entries based on strref validity against the game's dialog.tlk.
+
+    Splits the input entries into kept and dropped lists based on whether
+    each entry's strref exists in the game's dialog.tlk/dialogf.tlk and
+    the audio file physically exists and is non-empty.
+
+    Args:
+        entries: List of Entry objects to filter.
+        valid_strrefs: Set of valid strref integers from the game install.
+
+    Returns:
+        A tuple containing:
+            - kept: Entries with valid strrefs and existing non-empty files.
+            - dropped: Entries that failed validation criteria.
     """
-    kept: list[Entry] = []
-    dropped: list[Entry] = []
+    kept: List[Entry] = []
+    dropped: List[Entry] = []
     for e in entries:
         is_valid = (
             e.strref > 0
@@ -87,11 +125,18 @@ def filter_to_valid_strrefs(
     return kept, dropped
 
 
-def _rmtree_onerror(func, path, exc_info) -> None:
+def _rmtree_onerror(func: Callable, path: str, exc_info: Any) -> None:
     """
-    shutil.rmtree error handler: if the failure is permissions-related
-    (e.g. a read-only file/dir on Windows), clear the read-only bit and
-    retry once. Otherwise leave it - the caller decides whether that's fatal.
+    Error handler for shutil.rmtree to handle permission issues.
+
+    Attempts to clear the read-only bit and retry the operation once.
+    Silently fails if the retry also fails, allowing the caller to
+    handle remaining files.
+
+    Args:
+        func: The function that failed (e.g., os.remove, os.rmdir).
+        path: Path to the file/directory that caused the error.
+        exc_info: Exception information from the failed operation.
     """
     try:
         os.chmod(path, stat.S_IWRITE)
@@ -100,14 +145,17 @@ def _rmtree_onerror(func, path, exc_info) -> None:
         pass
 
 
-def clean_mod_root(mod_root: Path, logger) -> None:
+def clean_mod_root(mod_root: Path) -> None:
     """
-    Remove an existing mod_root folder before staging, best-effort.
+    Remove an existing mod_root folder before staging.
 
-    Read-only files/dirs are unlocked and retried automatically. Anything
-    that still can't be removed (e.g. a dir held read-only in a way Windows
-    won't budge on) is logged as a warning and left in place - the WAV/2DA
-    files it may contain get overwritten anyway on the next steps.
+    Performs a best-effort cleanup of the mod_root directory, attempting
+    to handle read-only files/dirs by clearing the read-only bit and retrying.
+    If some files remain after cleanup, logs a warning and continues, as
+    subsequent steps will overwrite existing files.
+
+    Args:
+        mod_root: Path to the mod root directory to clean.
     """
     if not mod_root.exists():
         return
@@ -117,9 +165,17 @@ def clean_mod_root(mod_root: Path, logger) -> None:
                        f"files/dirs) - continuing, existing files will be overwritten.")
 
 
-def write_mapping(entries: list[Entry], mapping_path: Path) -> None:
+def write_mapping(entries: List[Entry], mapping_path: Path) -> None:
     """
-    Writes a raw space-delimited text mapping file (strref resref) with no headers.
+    Write a space-delimited strref->resref mapping file.
+
+    Creates a text file where each line contains a strref and its
+    corresponding resref separated by a space. Entries are sorted by
+    strref for deterministic output.
+
+    Args:
+        entries: List of Entry objects to include in the mapping.
+        mapping_path: Destination path for the mapping file.
     """
     mapping_path.parent.mkdir(parents=True, exist_ok=True)
     with mapping_path.open("w", encoding="ascii", newline="\n") as f:
@@ -129,8 +185,14 @@ def write_mapping(entries: list[Entry], mapping_path: Path) -> None:
 
 def build_description() -> str:
     """
-    Full --help description, built at runtime so it reflects the actual
-    configured cfg values rather than placeholder names.
+    Build the full --help description at runtime.
+
+    Constructs the help text dynamically using current configuration values
+    rather than hardcoded placeholders, ensuring accurate documentation
+    that reflects the actual configured paths and settings.
+
+    Returns:
+        A formatted help description string with proper line wrapping.
     """
     fill = lambda text: textwrap.fill(text, width=78, break_on_hyphens=False)
 
@@ -186,6 +248,15 @@ ARG_SPECS = [
 
 
 def build_parser() -> argparse.ArgumentParser:
+    """
+    Build and configure the argument parser for the script.
+
+    Creates an ArgumentParser with the runtime-generated description
+    and adds all command-line arguments defined in ARG_SPECS.
+
+    Returns:
+        A configured ArgumentParser instance ready for parsing.
+    """
     parser = argparse.ArgumentParser(
         description=build_description(),
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -201,13 +272,26 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+def parse_args(argv: Optional[List[str]] = None) -> argparse.Namespace:
+    """
+    Parse command-line arguments.
+
+    Args:
+        argv: Optional list of command-line arguments. If None, uses sys.argv.
+
+    Returns:
+        Parsed arguments as a Namespace object.
+    """
     return build_parser().parse_args(argv)
 
 
-def log_optional_parameters(logger) -> None:
-    """Log a short summary of ARG_SPECS, reusing the same help text and
-    already-resolved cfg values shown by --help - nothing hand-duplicated."""
+def log_optional_parameters() -> None:
+    """
+    Log a summary of optional command-line parameters.
+
+    Reuses the same help text and configuration values shown by --help
+    to avoid duplication and ensure consistency between help text and logs.
+    """
     lines = ["Optional parameters (run with --help for the full description):"]
     for spec in ARG_SPECS:
         flag = f"{spec['flags'][0]} <{spec['metavar']}>"
@@ -220,11 +304,23 @@ def log_optional_parameters(logger) -> None:
 
 
 def main() -> int:
+    """
+    Main entry point for the mod build script.
+
+    Orchestrates the complete build process:
+    1. Parse command-line arguments and validate paths
+    2. Clean any existing mod directory
+    3. Scan output directory for WAV files
+    4. Validate strrefs against game install
+    5. Stage validated files to mod directory
+    6. Write mapping file, copy TP2/TRA/WeiDU files
+
+    Returns:
+        Exit code: 0 for success, 1 for failure.
+    """
     args = parse_args()
 
-    logger = setup_logging( Path(__file__).stem)
-
-    log_optional_parameters(logger)
+    log_optional_parameters()
 
     mod_name = args.mod_name if args.mod_name is not None else cfg.MOD_NAME
     mod_root = Path(cfg.MOD_ROOT) / mod_name
@@ -248,7 +344,7 @@ def main() -> int:
 
     if not tra_src.is_file():
         logger.error(f"tra source not found: {tra_src}")
-        return 1    
+        return 1
 
     if not weidu_src.is_file():
         logger.error(f"WeiDU executable not found: {weidu_src}")
@@ -261,7 +357,7 @@ def main() -> int:
 
     if mod_root.exists():
         logger.info(f"Cleaning existing mod folder: {mod_root}")
-        clean_mod_root(mod_root, logger)
+        clean_mod_root(mod_root)
 
     entries, skipped = scan(output_dir)
 
