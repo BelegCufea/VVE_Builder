@@ -182,6 +182,7 @@ DEFAULTS: dict = {
     "REALNAME_NOT_FOUND": "RealNameMissing",
 
     # Mod Build
+    "MOD_ROOT": r"mod",
     "MOD_NAME": "ievo",
     "MOD_TP2": r"setup.tp2",
 

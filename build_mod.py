@@ -21,13 +21,14 @@ dialog.tlk (+ dialogf.tlk).
 
 from __future__ import annotations
 
+import argparse
 import shutil
 import sys
 from dataclasses import dataclass
 from pathlib import Path
 
 from appconfig import cfg
-from utils import from_base36, filename_re, load_valid_strrefs
+from utils import from_base36, filename_re, load_valid_strrefs, setup_logging
 
 # =========================================================================
 
@@ -93,8 +94,27 @@ def write_2da(entries: list[Entry], mapping_path: Path) -> None:
             f.write(f"{e.strref} {e.resref}\n")
 
 
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--game-dir",
+        type=Path,
+        default=None,
+        help="Game install to validate strrefs against (its dialog.tlk / "
+             "dialogf.tlk). Defaults to cfg.GAME_DIRECTORY. Point this at a "
+             "clean game install to strip strrefs that does not exist in there. "
+             "This is useful if you are using a"
+             "modded install used for VO generation.",
+    )
+    return parser.parse_args(argv)
+
+
 def main() -> int:
-    mod_root = Path("mod") / cfg.MOD_NAME
+    args = parse_args()
+
+    logger = setup_logging( Path(__file__).stem)
+
+    mod_root = Path(cfg.MOD_ROOT) / cfg.MOD_NAME
     output_dir = Path(cfg.OUTPUT_DIR)
     mod_dir = Path(mod_root / "WAV")
     mapping_path = Path(mod_root / "mapping.2da")
@@ -102,43 +122,43 @@ def main() -> int:
     tp2_dest = Path(mod_root / f"setup-{cfg.MOD_NAME}.tp2")
 
     if not output_dir.is_dir():
-        print(f"ERROR: output dir not found: {output_dir}", file=sys.stderr)
+        logger.error(f"output dir not found: {output_dir}")
         return 1
 
     if not tp2_src.is_file():
-        print(f"ERROR: tp2 source not found: {tp2_src}", file=sys.stderr)
+        logger.error(f"tp2 source not found: {tp2_src}")
         return 1
 
-    game_dir = Path(cfg.GAME_DIRECTORY)
+    game_dir = args.game_dir if args.game_dir is not None else Path(cfg.GAME_DIRECTORY)
     if not game_dir.is_dir():
-        print(f"ERROR: game dir not found: {game_dir}", file=sys.stderr)
+        logger.error(f"game dir not found: {game_dir}")
         return 1
 
     entries, skipped = scan(output_dir)
 
     if skipped:
-        print(f"WARNING: {len(skipped)} file(s) matched the {cfg.FILENAME_PREFIX} prefix "
-              f"but had an invalid base36 body and were skipped:")
+        logger.warning(f"{len(skipped)} file(s) matched the {cfg.FILENAME_PREFIX} prefix "
+                       f"but had an invalid base36 body and were skipped:")
         for p in skipped:
-            print(f"  - {p}")
+            logger.warning(f"  - {p}")
 
-    print(f"Found {len(entries)} candidate voiceover file(s) across "
-          f"{len({e.npc_subdir for e in entries})} NPC folder(s).")
+    logger.info(f"Found {len(entries)} candidate voiceover file(s) across "
+                f"{len({e.npc_subdir for e in entries})} NPC folder(s).")
 
-    print(f"Loading strrefs from game install: {game_dir}")
+    logger.info(f"Loading strrefs from game install: {game_dir}")
     valid_strrefs = load_valid_strrefs(game_dir)
-    print(f"Clean install has {len(valid_strrefs)} valid strref(s).")
+    logger.info(f"Clean install has {len(valid_strrefs)} valid strref(s).")
 
     entries, dropped = filter_to_valid_strrefs(entries, valid_strrefs)
 
     if dropped:
-        print(f"WARNING: {len(dropped)} file(s) reference strrefs not present in the "
-              f"install's dialog.tlk and were dropped (these would make WeiDU "
-              f"fail on a install):")
+        logger.warning(f"WARNING: {len(dropped)} file(s) reference strrefs not present in the "
+                       f"install's dialog.tlk and were dropped (these would make WeiDU "
+                       f"fail on a install):")
         for e in sorted(dropped, key=lambda x: x.strref):
-            print(f"  - {e.strref} ({e.resref}) [{e.source_path}]")
+            logger.warning(f"  - {e.strref} ({e.resref}) [{e.source_path}]")
 
-    print(f"{len(entries)} voiceover file(s) will be staged after strref validation.")
+    logger.info(f"{len(entries)} voiceover file(s) will be staged after strref validation.")
 
     mod_dir.mkdir(parents=True, exist_ok=True)
     for e in entries:
@@ -150,9 +170,9 @@ def main() -> int:
     tp2_dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(tp2_src, tp2_dest)
 
-    print(f"Staged {len(entries)} WAV file(s) to: {mod_dir}")
-    print(f"Lookup table written to: {mapping_path}")
-    print(f"tp2 copied to: {tp2_dest}")
+    logger.info(f"Staged {len(entries)} WAV file(s) to: {mod_dir}")
+    logger.info(f"Lookup table written to: {mapping_path}")
+    logger.info(f"tp2 copied to: {tp2_dest}")
 
     return 0
 
