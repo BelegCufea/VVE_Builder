@@ -18,7 +18,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from appconfig import cfg
-from utils import load_patcher_config, iter_files_ci
+from utils import (
+    load_patcher_config,
+    iter_files_ci,
+    TlkEntry,
+    parse_dialog_tlk,
+    find_dialog_tlk,
+    find_dialogf_tlk,
+)
 
 # ==================== CONFIGURATION ====================
 
@@ -132,54 +139,6 @@ def scan_dlg_files_for_strrefs(extract_dir: Path) -> dict[int, dict]:
                 strref_info[item.strref] = {"dlg": dlg_resref, "kind": item.kind}
 
     return strref_info
-
-
-# ==================== STEP 3: dialog.tlk / dialogf.tlk parsing ====================
-
-@dataclass
-class TlkEntry:
-    strref: int
-    flags: int
-    sound_resref: str
-    text: str
-
-
-def parse_dialog_tlk(path: Path) -> dict[int, TlkEntry]:
-    data = path.read_bytes()
-    signature, version, lang_id, count, strings_offset = struct.unpack_from(
-        "<4s4sHII", data, 0
-    )
-    if signature != b"TLK ":
-        raise ValueError(f"Not a TLK file: {path} (signature={signature!r})")
-
-    entries: dict[int, TlkEntry] = {}
-    pos = 18  # header size
-    for strref in range(count):
-        flags, sound_resref_raw, vol_var, pitch_var, text_off, text_len = (
-            struct.unpack_from("<H8sIII I", data, pos)
-        )
-        sound_resref = sound_resref_raw.split(b"\x00", 1)[0].decode(cfg.TEXT_ENCODING, errors="replace")
-        text_start = strings_offset + text_off
-        text = data[text_start:text_start + text_len].decode(cfg.TEXT_ENCODING, errors="replace")
-        entries[strref] = TlkEntry(strref, flags, sound_resref, text)
-        pos += 26  # entry size
-
-    return entries
-
-
-def find_dialog_tlk(game_dir: Path) -> Path:
-    candidates = list(game_dir.glob("lang/*/dialog.tlk"))
-    if not candidates:
-        raise FileNotFoundError(f"No dialog.tlk found under {game_dir}/lang/*/")
-    for c in candidates:
-        if c.parent.name.lower() == "en_us":
-            return c
-    return candidates[0]
-
-
-def find_dialogf_tlk(dialog_tlk_path: Path) -> Path | None:
-    candidate = dialog_tlk_path.parent / "dialogf.tlk"
-    return candidate if candidate.exists() else None
 
 
 # ==================== STEP 4: CRE parsing ====================

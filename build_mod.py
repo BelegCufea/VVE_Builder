@@ -15,10 +15,8 @@ it just looks up "which resref goes with this strref" from the table.
 The tp2 source (MOD_TP2) is copied alongside the WAV folder and mapping
 table, renamed to f"setup-{MOD_NAME}.tp2" as WeiDU convention expects.
 
-No CLI arguments - GAME_DIRECTORY, MOD_NAME, MOD_TP2, OUTPUT_DIR, and
-FILENAME_PREFIX are all shared with the rest of the VO-generation
-suite and read live from appconfig - there's no local config section
-in this file at all.
+Before staging, every candidate file's strref is checked against a 
+dialog.tlk (+ dialogf.tlk).
 """
 
 from __future__ import annotations
@@ -29,7 +27,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from appconfig import cfg
-from utils import from_base36, filename_re
+from utils import from_base36, filename_re, load_valid_strrefs
 
 # =========================================================================
 
@@ -67,6 +65,20 @@ def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
     return entries, skipped
 
 
+def filter_to_valid_strrefs(
+    entries: list[Entry], valid_strrefs: set[int]
+) -> tuple[list[Entry], list[Entry]]:
+    """
+    Split entries into (kept, dropped) based on whether their strref exists
+    in the game's dialog.tlk/dialogf.tlk.
+    """
+    kept: list[Entry] = []
+    dropped: list[Entry] = []
+    for e in entries:
+        (kept if e.strref in valid_strrefs else dropped).append(e)
+    return kept, dropped
+
+
 def write_2da(entries: list[Entry], mapping_path: Path) -> None:
     """
     Minimal 2DA: WeiDU's COUNT_2DA_ROWS/READ_2DA_ENTRY_FORMER treat line 1
@@ -97,6 +109,11 @@ def main() -> int:
         print(f"ERROR: tp2 source not found: {tp2_src}", file=sys.stderr)
         return 1
 
+    game_dir = Path(cfg.GAME_DIRECTORY)
+    if not game_dir.is_dir():
+        print(f"ERROR: game dir not found: {game_dir}", file=sys.stderr)
+        return 1
+
     entries, skipped = scan(output_dir)
 
     if skipped:
@@ -105,8 +122,23 @@ def main() -> int:
         for p in skipped:
             print(f"  - {p}")
 
-    print(f"Found {len(entries)} valid voiceover file(s) across "
+    print(f"Found {len(entries)} candidate voiceover file(s) across "
           f"{len({e.npc_subdir for e in entries})} NPC folder(s).")
+
+    print(f"Loading strrefs from game install: {game_dir}")
+    valid_strrefs = load_valid_strrefs(game_dir)
+    print(f"Clean install has {len(valid_strrefs)} valid strref(s).")
+
+    entries, dropped = filter_to_valid_strrefs(entries, valid_strrefs)
+
+    if dropped:
+        print(f"WARNING: {len(dropped)} file(s) reference strrefs not present in the "
+              f"install's dialog.tlk and were dropped (these would make WeiDU "
+              f"fail on a install):")
+        for e in sorted(dropped, key=lambda x: x.strref):
+            print(f"  - {e.strref} ({e.resref}) [{e.source_path}]")
+
+    print(f"{len(entries)} voiceover file(s) will be staged after strref validation.")
 
     mod_dir.mkdir(parents=True, exist_ok=True)
     for e in entries:

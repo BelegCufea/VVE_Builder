@@ -8,8 +8,10 @@ to avoid code duplication and ensure consistency.
 import json
 import logging
 import re
+import struct
 import subprocess
 import sys
+from dataclasses import dataclass
 from datetime import datetime, timedelta
 import jiwer
 from difflib import SequenceMatcher
@@ -178,6 +180,100 @@ def preprocess_text(text: str, patcher_config: Dict[str, Any]) -> str:
     text = re.sub(r"<[^>]+>", "", text)
     
     return text
+
+
+# ============================================================================
+# dialog.tlk Parsing
+# ============================================================================
+
+@dataclass
+class TlkEntry:
+    strref: int
+    flags: int
+    sound_resref: str
+    text: str
+
+
+def parse_dialog_tlk(path: Path) -> Dict[int, "TlkEntry"]:
+    """
+    Parse a dialog.tlk / dialogf.tlk file into strref -> TlkEntry.
+
+    Args:
+        path: Path to the .tlk file.
+
+    Returns:
+        Dict mapping strref (int) to TlkEntry.
+
+    Raises:
+        ValueError: If the file signature isn't "TLK ".
+    """
+    data = path.read_bytes()
+    signature, version, lang_id, count, strings_offset = struct.unpack_from(
+        "<4s4sHII", data, 0
+    )
+    if signature != b"TLK ":
+        raise ValueError(f"Not a TLK file: {path} (signature={signature!r})")
+
+    entries: Dict[int, TlkEntry] = {}
+    pos = 18  # header size
+    for strref in range(count):
+        flags, sound_resref_raw, vol_var, pitch_var, text_off, text_len = (
+            struct.unpack_from("<H8sIII I", data, pos)
+        )
+        sound_resref = sound_resref_raw.split(b"\x00", 1)[0].decode(cfg.TEXT_ENCODING, errors="replace")
+        text_start = strings_offset + text_off
+        text = data[text_start:text_start + text_len].decode(cfg.TEXT_ENCODING, errors="replace")
+        entries[strref] = TlkEntry(strref, flags, sound_resref, text)
+        pos += 26  # entry size
+
+    return entries
+
+
+def find_dialog_tlk(game_dir: Path) -> Path:
+    """
+    Locate dialog.tlk under <game_dir>/lang/*/, preferring en_us.
+
+    Raises:
+        FileNotFoundError: If no dialog.tlk is found.
+    """
+    candidates = list(game_dir.glob("lang/*/dialog.tlk"))
+    if not candidates:
+        raise FileNotFoundError(f"No dialog.tlk found under {game_dir}/lang/*/")
+    for c in candidates:
+        if c.parent.name.lower() == "en_us":
+            return c
+    return candidates[0]
+
+
+def find_dialogf_tlk(dialog_tlk_path: Path) -> Optional[Path]:
+    """Return the sibling dialogf.tlk next to dialog_tlk_path, if it exists."""
+    candidate = dialog_tlk_path.parent / "dialogf.tlk"
+    return candidate if candidate.exists() else None
+
+
+def load_valid_strrefs(game_dir: Path) -> "set[int]":
+    """
+    Load the set of strref numbers that actually exist in a game install's
+    dialog.tlk (+ dialogf.tlk, if present).
+
+    A strref is considered valid if it's present in either file, since
+    WeiDU/the engine will resolve it from whichever TLK is active for the
+    player's chosen game language/gender.
+
+    Args:
+        game_dir: Root game directory (containing lang/*/dialog.tlk).
+
+    Returns:
+        Set of valid strref integers.
+    """
+    tlk_path = find_dialog_tlk(game_dir)
+    valid = set(parse_dialog_tlk(tlk_path).keys())
+
+    tlkf_path = find_dialogf_tlk(tlk_path)
+    if tlkf_path is not None:
+        valid |= set(parse_dialog_tlk(tlkf_path).keys())
+
+    return valid
 
 
 # ============================================================================
