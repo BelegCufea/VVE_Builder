@@ -1,0 +1,3 @@
+@1 = ~Add NPC voiceovers~
+@2 = ~[VO Patcher] Copying voiceover files to override (this may take a few minutes)...~
+@3 = ~[VO Patcher] Successfully patched %patched% strref(s) with voiceover.~

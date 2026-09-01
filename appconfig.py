@@ -185,6 +185,7 @@ DEFAULTS: dict = {
     "MOD_ROOT": r"mod",
     "MOD_NAME": "ievo",
     "MOD_TP2": r"setup.tp2",
+    "MOD_TRA": r"setup.tra",
 
     # Voice Sample Preparation / Extraction
     "WEIDU_PATH": r"weidu/weidu.exe",

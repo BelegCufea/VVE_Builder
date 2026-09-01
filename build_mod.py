@@ -5,9 +5,10 @@ Stages generated voiceover WAV files into a WeiDU-installable mod folder:
 copies the WAVs, writes a strref->resref lookup table, and brings in the
 tp2 and the WeiDU executable, renamed to WeiDU's setup-<modname> convention.
 
-Files whose strref doesn't exist in the target game's dialog.tlk are
-dropped before staging, so a modded generation source can be reduced
-to something a clean install can actually accept.
+Files whose strref doesn't exist in the target game's dialog.tlk or whose
+audio files are missing/empty/strref <= 0 are dropped before staging,
+so a modded generation source can be reduced to something a clean install
+can actually accept.
 
 Run with --help for the full description and available options (the
 --help text is built at runtime so it reflects your actual configuration).
@@ -55,6 +56,10 @@ def scan(output_dir: Path) -> tuple[list[Entry], list[Path]]:
             skipped.append(wav_path)
             continue
 
+        if strref <= 0 or wav_path.stat().st_size == 0:
+            skipped.append(wav_path)
+            continue
+
         resref = wav_path.stem  # "TS12345", preserves original casing/length
         npc_subdir = wav_path.parent.relative_to(output_dir).as_posix()
         entries.append(Entry(strref=strref, resref=resref, source_path=wav_path, npc_subdir=npc_subdir))
@@ -67,12 +72,18 @@ def filter_to_valid_strrefs(
 ) -> tuple[list[Entry], list[Entry]]:
     """
     Split entries into (kept, dropped) based on whether their strref exists
-    in the game's dialog.tlk/dialogf.tlk.
+    in the game's dialog.tlk/dialogf.tlk and audio file physically exists.
     """
     kept: list[Entry] = []
     dropped: list[Entry] = []
     for e in entries:
-        (kept if e.strref in valid_strrefs else dropped).append(e)
+        is_valid = (
+            e.strref > 0
+            and e.strref in valid_strrefs
+            and e.source_path.is_file()
+            and e.source_path.stat().st_size > 0
+        )
+        (kept if is_valid else dropped).append(e)
     return kept, dropped
 
 
@@ -103,19 +114,15 @@ def clean_mod_root(mod_root: Path, logger) -> None:
     shutil.rmtree(mod_root, onerror=_rmtree_onerror)
     if mod_root.exists():
         logger.warning(f"Could not fully clean {mod_root} (permission denied on some "
-                        f"files/dirs) - continuing, existing files will be overwritten.")
+                       f"files/dirs) - continuing, existing files will be overwritten.")
 
 
-def write_2da(entries: list[Entry], mapping_path: Path) -> None:
+def write_mapping(entries: list[Entry], mapping_path: Path) -> None:
     """
-    Minimal 2DA: WeiDU's COUNT_2DA_ROWS/READ_2DA_ENTRY_FORMER treat line 1
-    as a free-form signature and line 2 as a default value; data rows start
-    at line 3. Columns are whitespace-separated.
+    Writes a raw space-delimited text mapping file (strref resref) with no headers.
     """
     mapping_path.parent.mkdir(parents=True, exist_ok=True)
     with mapping_path.open("w", encoding="ascii", newline="\n") as f:
-        f.write("2DA V1.0\n")
-        f.write("0\n")
         for e in sorted(entries, key=lambda x: x.strref):
             f.write(f"{e.strref} {e.resref}\n")
 
@@ -134,13 +141,14 @@ def build_description() -> str:
         + fill("where XXXXXX = base36(strref)."),
 
         fill("Filenames are copied/flattened into the mod's WAV folder. "
-             "Alongside that, this script writes a 2DA-style lookup table "
-             "(strref -> resref) that the .tp2 reads at install time, so "
+             "Alongside that, this script writes a text lookup table "
+             "(mapping.txt) that the .tp2 reads at install time, so "
              "WeiDU never has to know about base36 at all."),
 
         fill(f"The tp2 source ({cfg.MOD_TP2}) is copied alongside the WAV "
              f"folder and mapping table, renamed to setup-{cfg.MOD_NAME}.tp2 "
-             f"as WeiDU convention expects. The WeiDU executable "
+             f"as WeiDU convention expects. The tra file ({cfg.MOD_TRA}) "
+             f"is copied to the TRA subdirectory. The WeiDU executable "
              f"({cfg.WEIDU_PATH}) is likewise copied in and renamed to "
              f"setup-{cfg.MOD_NAME}.exe, so the mod folder is ready to "
              f"install standalone."),
@@ -222,9 +230,11 @@ def main() -> int:
     mod_root = Path(cfg.MOD_ROOT) / mod_name
     output_dir = Path(cfg.OUTPUT_DIR)
     mod_dir = Path(mod_root / "WAV")
-    mapping_path = Path(mod_root / "mapping.2da")
+    mapping_path = Path(mod_root / "mapping.txt")
     tp2_src = Path(cfg.MOD_TP2)
     tp2_dest = Path(mod_root / f"setup-{mod_name}.tp2")
+    tra_src = Path(cfg.MOD_TRA)
+    tra_dest = Path(mod_root / "TRA" / "english" / cfg.MOD_TRA)
     weidu_src = Path(cfg.WEIDU_PATH)
     weidu_dest = Path(cfg.MOD_ROOT) / f"setup-{mod_name}.exe"
 
@@ -235,6 +245,10 @@ def main() -> int:
     if not tp2_src.is_file():
         logger.error(f"tp2 source not found: {tp2_src}")
         return 1
+
+    if not tra_src.is_file():
+        logger.error(f"tra source not found: {tra_src}")
+        return 1    
 
     if not weidu_src.is_file():
         logger.error(f"WeiDU executable not found: {weidu_src}")
@@ -277,13 +291,18 @@ def main() -> int:
 
     mod_dir.mkdir(parents=True, exist_ok=True)
     for e in entries:
-        dest = mod_dir / e.source_path.name  # keep original filename as-is
+        dest = mod_dir / e.source_path.name
         shutil.copy2(e.source_path, dest)
 
-    write_2da(entries, mapping_path)
+    write_mapping(entries, mapping_path)
 
+    tp2_content = tp2_src.read_text(encoding="utf-8")
+    tp2_content = tp2_content.replace("VVEBG2", mod_name).replace("%MOD_NAME%", mod_name)
     tp2_dest.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(tp2_src, tp2_dest)
+    tp2_dest.write_text(tp2_content, encoding="utf-8")
+
+    tra_dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(tra_src, tra_dest)
 
     weidu_dest.parent.mkdir(parents=True, exist_ok=True)
     shutil.copy2(weidu_src, weidu_dest)
@@ -291,6 +310,7 @@ def main() -> int:
     logger.info(f"Staged {len(entries)} WAV file(s) to: {mod_dir}")
     logger.info(f"Lookup table written to: {mapping_path}")
     logger.info(f"tp2 copied to: {tp2_dest}")
+    logger.info(f"tra copied to: {tra_dest}")
     logger.info(f"WeiDU copied to: {weidu_dest}")
 
     return 0

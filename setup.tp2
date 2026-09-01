@@ -6,32 +6,38 @@
  * `build_mod.py --help` for how this mod folder is generated/staged.
  */
 
-BACKUP ~backup~
+BACKUP ~%MOD_NAME%/backup~
 AUTHOR ~VVE_Builder~
 VERSION ~v1.0~
 
-BEGIN ~Add NPC voiceovers~
+LANGUAGE ~English~
+         ~english~
+         ~%MOD_NAME%/TRA/english/setup.tra~
 
-OUTER_SET nrows = COUNT_2DA_ROWS ~mapping.2da~
+BEGIN @1
+
+PRINT @2
+COPY ~%MOD_NAME%/WAV~ ~override~
+
+SILENT
+
 OUTER_SET patched = 0
 
-FOR (row = 0; row < nrows; row = row + 1) BEGIN
+COPY - ~%MOD_NAME%/mapping.txt~ ~override~
+  READ_2DA_ENTRIES_NOW mapping 2
 
-    OUTER_SET strref = ((READ_2DA_ENTRY_FORMER ~mapping.2da~ row 0 nrows))
-    OUTER_SPRINT resref = ((READ_2DA_ENTRY_FORMER ~mapping.2da~ row 1 nrows))
+  FOR (row = 0; row < mapping; row = row + 1) BEGIN
+    READ_2DA_ENTRY_FORMER mapping row 0 strref
+    READ_2DA_ENTRY_FORMER mapping row 1 resref
 
-    // The sound resref must exist as a resource (override), not just as a
-    // file somewhere in the mod folder.
-    COPY ~WAV/%resref%.WAV~ ~override/%resref%.WAV~
+    INNER_ACTION BEGIN
+      ACTION_GET_STRREF strref dialogstring
+      STRING_SET_EVALUATE strref ~%dialogstring%~ [%resref%]
+      OUTER_SET patched = patched + 1
+    END
+  END
+BUT_ONLY
 
-    // Grab the existing string text so the dialogue itself is untouched -
-    // we're only attaching a sound file to an existing strref.
-    ACTION_GET_STRREF ~%strref%~ dialogstring
+VERBOSE
 
-    STRING_SET_EVALUATE ~%strref%~ ~%dialogstring%~ [~%resref%~]
-
-    OUTER_SET patched = patched + 1
-
-END
-
-PRINT ~[VO Patcher] Patched %patched% strref(s) with voiceover.~
+PRINT @3
