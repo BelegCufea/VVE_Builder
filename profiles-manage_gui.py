@@ -40,7 +40,7 @@ from PySide6.QtWidgets import (
     QListWidget, QListWidgetItem, QLineEdit, QLabel, QPushButton, QComboBox,
     QScrollArea, QSplitter, QGroupBox, QFrame, QMessageBox, QStatusBar,
     QTextEdit, QDialog, QProgressBar, QFileDialog, QCheckBox, QToolTip,
-    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
+    QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView, QLayout
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 from PySide6.QtGui import QColor, QCursor, QFont
@@ -73,7 +73,17 @@ class VoiceProfileEditor(QDialog):
         - etc.
     """
     
-    def __init__(self, profile_name: str, parent=None, source_dir: Optional[str] = None, audit_mode: bool = False):
+    def __init__(self, profile_name: str, parent: Optional[QWidget] = None, source_dir: Optional[str] = None, audit_mode: bool = False) -> None:
+        """
+        Args:
+            profile_name: Name of the voice profile to edit or create.
+            parent: Parent widget, if any.
+            source_dir: Directory holding the profile's samples; defaults to
+                cfg.VOICES_DIR.
+            audit_mode: When True, the dialog opens in audit-review mode
+                (reviewing unapproved samples in cfg.VOICES_PREP_DIR) and
+                shows the "Approve All Samples" controls.
+        """
         super().__init__(parent)
         self.profile_name = profile_name
         self.parent_window = parent
@@ -87,7 +97,6 @@ class VoiceProfileEditor(QDialog):
         self._last_check_sample = None
         self._last_check_result = None
         
-        # Audio player
         self.audio_output = QAudioOutput()
         self.media_player = QMediaPlayer()
         self.media_player.setAudioOutput(self.audio_output)
@@ -96,26 +105,22 @@ class VoiceProfileEditor(QDialog):
         self._load_samples()
         logger.info(f"Opened {'audit review' if audit_mode else 'voice profile editor'}: {profile_name}")
     
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         """Build the editor UI."""
         layout = QVBoxLayout(self)
         
-        # Header
         header = QLabel(f"<h2>Editing Profile: {self.profile_name}</h2>")
         layout.addWidget(header)
         
-        # Samples list
         layout.addWidget(QLabel("Samples:"))
         
         self.samples_list = QListWidget()
         self.samples_list.currentItemChanged.connect(self._on_sample_selected)
         layout.addWidget(self.samples_list)
         
-        # Sample details area
         details_group = QGroupBox("Sample Details")
         details_layout = QVBoxLayout(details_group)
         
-        # Audio player + similarity check
         sample_btn_layout = QHBoxLayout()
         self.play_btn = QPushButton("▶️ Play")
         self.play_btn.clicked.connect(self._play_selected_sample)
@@ -134,7 +139,6 @@ class VoiceProfileEditor(QDialog):
         sample_btn_layout.addStretch()
         details_layout.addLayout(sample_btn_layout)
         
-        # Text editor
         details_layout.addWidget(QLabel("Text:"))
         self.text_edit = QTextEdit()
         self.text_edit.setMaximumHeight(150)
@@ -142,7 +146,6 @@ class VoiceProfileEditor(QDialog):
         self.text_edit.setEnabled(False)
         details_layout.addWidget(self.text_edit)
 
-        # Similarity check results
         check_result_layout = QHBoxLayout()
         check_result_layout.addWidget(QLabel("Similarity:"))
         self.check_status_label = QLabel("")
@@ -183,7 +186,6 @@ class VoiceProfileEditor(QDialog):
             audit_btn_layout.addStretch()
             layout.addLayout(audit_btn_layout)
 
-        # Action buttons
         btn_layout = QHBoxLayout()
         
         self.add_btn = QPushButton("➕ Add Sample (File)")
@@ -207,14 +209,12 @@ class VoiceProfileEditor(QDialog):
         
         layout.addLayout(btn_layout)
         
-        # Status bar
         self.status_label = QLabel("Ready")
         layout.addWidget(self.status_label)
         
-        # Audio error handler
         self.media_player.errorOccurred.connect(self._on_audio_error)
     
-    def _load_samples(self):
+    def _load_samples(self) -> None:
         """
         Load all samples for this profile from /voices directory.
         
@@ -234,7 +234,6 @@ class VoiceProfileEditor(QDialog):
         escaped_name = re.escape(self.profile_name)
         pattern = re.compile(rf'^{escaped_name}(?: \d+)?$', re.IGNORECASE)
         
-        # Use a set to avoid duplicates
         unique_files = set()
         
         # Find all WAV files (case-insensitive on Windows)
@@ -252,7 +251,6 @@ class VoiceProfileEditor(QDialog):
             
             txt_path = wav_path.with_suffix('.txt')
             
-            # Read text if exists
             text = ""
             if txt_path.exists():
                 try:
@@ -260,7 +258,6 @@ class VoiceProfileEditor(QDialog):
                 except:
                     pass
             
-            # Get audio duration
             duration = get_audio_duration(wav_path)
             
             self._sample_data.append({
@@ -272,19 +269,25 @@ class VoiceProfileEditor(QDialog):
             })
         
         # Sort by sample number (extract number from stem)
-        def get_sample_num(stem):
+        def get_sample_num(stem: str) -> int:
+            """
+            Extract the trailing sample number from a file stem.
+
+            Args:
+                stem: File stem to inspect.
+
+            Returns:
+                The trailing integer, or 0 if the stem has no trailing digits.
+            """
             match = re.search(r'(\d+)$', stem)
             return int(match.group(1)) if match else 0
         
         self._sample_data.sort(key=lambda x: get_sample_num(x['stem']))
         
-        # Populate list with duration info
         for sample in self._sample_data:
-            # Try to get sample number
             match = re.search(r'(\d+)$', sample['stem'])
             label = f"Sample {match.group(1) if match else '?'}: {sample['stem']}"
             
-            # Add duration if available
             if sample['duration'] is not None:
                 duration = sample['duration']
                 if duration >= 60:
@@ -302,8 +305,14 @@ class VoiceProfileEditor(QDialog):
         logger.debug(f"Loaded {len(self._sample_data)} samples for profile {self.profile_name}")
         self.status_label.setText(f"Loaded {len(self._sample_data)} samples")    
 
-    def _on_sample_selected(self, current: QListWidgetItem, previous):
-        """Handle sample selection from the list."""
+    def _on_sample_selected(self, current: Optional[QListWidgetItem], previous: Optional[QListWidgetItem]) -> None:
+        """
+        Handle sample selection from the list.
+
+        Args:
+            current: The newly selected list item, or None if the selection was cleared.
+            previous: The previously selected list item, or None.
+        """
         if current is None:
             self.play_btn.setEnabled(False)
             self.check_btn.setEnabled(False)
@@ -323,7 +332,6 @@ class VoiceProfileEditor(QDialog):
             self.text_edit.setEnabled(True)
             self.delete_btn.setEnabled(True)
             
-            # Load text
             self.text_edit.blockSignals(True)
             self.text_edit.setPlainText(sample['text'])
             self.text_edit.blockSignals(False)
@@ -335,7 +343,7 @@ class VoiceProfileEditor(QDialog):
             else:
                 self._clear_check_ui()
     
-    def _play_selected_sample(self):
+    def _play_selected_sample(self) -> None:
         """Play the selected sample using Qt Multimedia."""
         if not self._current_sample:
             return
@@ -345,9 +353,7 @@ class VoiceProfileEditor(QDialog):
             self.status_label.setText(f"⚠️ Audio file not found: {wav_path.name}")
             return
         
-        # Stop any existing playback first
         self.media_player.stop()
-        # Ensure the previous source is cleared
         self.media_player.setSource(QUrl())
         QApplication.processEvents()
         
@@ -357,15 +363,22 @@ class VoiceProfileEditor(QDialog):
         self.media_player.play()
         self.status_label.setText(f"🔊 Playing: {wav_path.name}")
 
-    def _clear_check_ui(self):
+    def _clear_check_ui(self) -> None:
         """Clear the similarity-check result area (no check run yet for this sample)."""
         self.check_status_label.setText("")
         self.check_status_label.setStyleSheet("")
         self.transcribed_text_edit.clear()
         self.use_transcribed_btn.setEnabled(False)
 
-    def _show_check_result(self, result: Optional[dict]):
-        """Redisplay a previously-computed check result (e.g. on reselection)."""
+    def _show_check_result(self, result: Optional[dict]) -> None:
+        """
+        Redisplay a previously-computed check result (e.g. on reselection).
+
+        Args:
+            result: The check result dict returned by transcribe_and_score
+                (with "score", "success", and "transcribed_text" keys), or
+                None to clear the check UI instead.
+        """
         if not result:
             self._clear_check_ui()
             return
@@ -377,17 +390,21 @@ class VoiceProfileEditor(QDialog):
         self.transcribed_text_edit.setPlainText(result["transcribed_text"])
         self.use_transcribed_btn.setEnabled(result["success"])
 
-    def _on_check_similarity_clicked(self):
+    def _on_check_similarity_clicked(self) -> None:
         """Manually check similarity for the currently selected sample."""
         if not self._current_sample:
             return
         self._run_similarity_check(self._current_sample)
 
-    def _run_similarity_check(self, sample: dict):
+    def _run_similarity_check(self, sample: dict) -> None:
         """
         Transcribe a sample's audio via Voicebox and score it against its
         current text. Used both by the manual "Check Similarity" button and
         automatically after a Fish Audio import.
+
+        Args:
+            sample: Sample dict (with "wav_path", "text", and "stem" keys)
+                to transcribe and score.
         """
         wav_path = sample['wav_path']
         if not wav_path.exists():
@@ -418,7 +435,7 @@ class VoiceProfileEditor(QDialog):
             f"Similarity check for {sample['stem']}: {result['score']:.1f}% ({label})"
         )
 
-    def _on_use_transcribed_text(self):
+    def _on_use_transcribed_text(self) -> None:
         """Replace the current sample's text with the transcribed text, after confirmation."""
         if not self._current_sample or not self._last_check_result or not self._last_check_sample:
             return
@@ -442,7 +459,7 @@ class VoiceProfileEditor(QDialog):
         self.status_label.setText(f"📋 Replaced text for {self._current_sample['stem']} with transcribed text")
         logger.info(f"Replaced text for {self._current_sample['stem']} with transcribed text")
 
-    def _on_text_changed(self):
+    def _on_text_changed(self) -> None:
         """Auto-save text when it changes."""
         if not self._current_sample:
             return
@@ -460,11 +477,15 @@ class VoiceProfileEditor(QDialog):
                 self.status_label.setText(f"❌ Error saving text: {e}")
                 logger.error(f"Error saving text for {sample['stem']}: {e}")
 
-    def _import_audio_file(self, input_path: Path):
-        """Import a local audio file (from disk) as a new sample."""
+    def _import_audio_file(self, input_path: Path) -> None:
+        """
+        Import a local audio file (from disk) as a new sample.
+
+        Args:
+            input_path: Path to the source audio file to convert and add.
+        """
         logger.info(f"Importing sample from: {input_path}")
         
-        # Check duration and warn
         duration = get_audio_duration(input_path)
         if duration and duration > cfg.MAX_DURATION:
             logger.warning(f"Audio too long: {duration:.1f}s (max: {cfg.MAX_DURATION}s)")
@@ -482,7 +503,6 @@ class VoiceProfileEditor(QDialog):
             if reply != QMessageBox.StandardButton.Yes:
                 return
 
-        # Determine next sample number
         max_num = 0
         for sample in self._sample_data:
             match = re.search(r'(\d+)$', sample['stem'])
@@ -496,10 +516,8 @@ class VoiceProfileEditor(QDialog):
         output_wav = Path(self.source_dir) / f"{stem}.WAV"
         output_txt = Path(self.source_dir) / f"{stem}.txt"
         
-        # Create the target directory if it doesn't exist
         Path(self.source_dir).mkdir(parents=True, exist_ok=True)
         
-        # Convert to Ogg Vorbis
         self.status_label.setText(f"🔄 Converting audio...")
         QApplication.processEvents()
         
@@ -509,16 +527,13 @@ class VoiceProfileEditor(QDialog):
                 "Failed to convert audio file. Please ensure ffmpeg is installed.")
             return
         
-        # Create empty text file
         try:
             output_txt.write_text("", encoding='utf-8')
         except:
             pass
         
-        # Get duration of the converted file
         duration = get_audio_duration(output_wav)
         
-        # Add to sample data
         self._sample_data.append({
             'stem': stem,
             'wav_path': output_wav,
@@ -529,24 +544,26 @@ class VoiceProfileEditor(QDialog):
         
         logger.info(f"Added sample: {stem}")
         
-        # Refresh list
         self._load_samples()
         self.status_label.setText(f"✅ Added sample: {stem}")
         
-        # Select the new sample
         for i in range(self.samples_list.count()):
             item = self.samples_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == stem:
                 self.samples_list.setCurrentItem(item)
                 break
 
-    def _import_downloaded_file(self, temp_path: Path):
-        """Import a downloaded temporary file, then clean up."""
+    def _import_downloaded_file(self, temp_path: Path) -> None:
+        """
+        Import a downloaded temporary file, then clean up.
+
+        Args:
+            temp_path: Path to the temporary downloaded file; deleted after
+                import regardless of whether import succeeds.
+        """
         try:
-            # Use the main import function
             self._import_audio_file(temp_path)
         finally:
-            # Clean up the temporary file
             try:
                 if temp_path.exists():
                     temp_path.unlink()
@@ -562,6 +579,13 @@ class VoiceProfileEditor(QDialog):
         of backslashes escaping a given quote varies field to field (\" vs \\").
         Collapsing all runs of backslashes-before-a-quote, then decoding \\uXXXX
         escapes, normalizes everything to plain JSON-like text regexes can match.
+
+        Args:
+            raw: The raw HTML/JS page source containing the escaped payload.
+
+        Returns:
+            The de-escaped text with quote-backslashes collapsed and
+            \\uXXXX sequences decoded to their literal characters.
         """
         cleaned = re.sub(r'\\+(?=")', '', raw)
         cleaned = re.sub(r'\\u([0-9a-fA-F]{4})', lambda m: chr(int(m.group(1), 16)), cleaned)
@@ -574,8 +598,13 @@ class VoiceProfileEditor(QDialog):
         URL and text, straight from the embedded (escaped) JSON -- no browser
         required.
 
-        Returns {'audio_url': ..., 'text': ...} or None if this voice has no
-        sample (page will contain "no audio samples yet") or parsing fails.
+        Args:
+            url: URL of the Fish Audio model page to fetch.
+
+        Returns:
+            A dict with "audio_url" and "text" keys, or None if this voice
+            has no sample (page will contain "no audio samples yet") or
+            parsing fails.
         """
         try:
             headers = {
@@ -621,13 +650,17 @@ class VoiceProfileEditor(QDialog):
             logger.exception(f"Error parsing Fish Audio page: {e}")
             return None
     
-    def _download_from_url(self, url: str):
-        """Download audio from a URL and add it as a sample."""
+    def _download_from_url(self, url: str) -> None:
+        """
+        Download audio from a URL and add it as a sample.
+
+        Args:
+            url: Direct URL to an audio file to download.
+        """
         self.status_label.setText(f"⬇️ Downloading from URL...")
         QApplication.processEvents()
 
         try:
-            # Download the file with a timeout
             response = requests.get(url, timeout=30, stream=True)
             response.raise_for_status()
 
@@ -646,9 +679,7 @@ class VoiceProfileEditor(QDialog):
                 ext = '.aac'
             elif 'audio/ogg' in content_type:
                 ext = '.ogg'
-            # Could also try to get from URL path
             else:
-                # Try to get extension from URL
                 url_path = url.split('?')[0]
                 if '.' in url_path:
                     possible_ext = Path(url_path).suffix.lower()
@@ -691,7 +722,7 @@ class VoiceProfileEditor(QDialog):
             self.status_label.setText(f"❌ An unexpected error occurred.")
             logger.exception(f"Unexpected error during download from URL {url}: {e}")
 
-    def _add_sample_from_url(self):
+    def _add_sample_from_url(self) -> None:
         """Open dialog to import audio from a URL."""
         dialog = URLImportDialog(self)
         if dialog.exec() == QDialog.DialogCode.Accepted:
@@ -703,12 +734,16 @@ class VoiceProfileEditor(QDialog):
                 else:
                     self._download_from_url(url)
 
-    def _import_from_fish_audio(self, url: str):
-        """Import audio and text from a Fish Audio page."""
+    def _import_from_fish_audio(self, url: str) -> None:
+        """
+        Import audio and text from a Fish Audio page.
+
+        Args:
+            url: URL of the Fish Audio model page to import from.
+        """
         self.status_label.setText(f"🔍 Parsing Fish Audio page...")
         QApplication.processEvents()
         
-        # Use the updated parser
         result = self._parse_fish_audio_page(url)
         
         if not result:
@@ -724,11 +759,9 @@ class VoiceProfileEditor(QDialog):
         audio_url = result['audio_url']
         sample_text = result['text']
         
-        # First download the audio
         self.status_label.setText(f"⬇️ Downloading audio from Fish Audio...")
         QApplication.processEvents()
         
-        # Download and import the audio
         self._download_from_url(audio_url)
         
         # After import, set the text on the newly added sample
@@ -752,7 +785,7 @@ class VoiceProfileEditor(QDialog):
                 logger.error(f"Failed to save sample text: {e}")
                 self.status_label.setText(f"⚠️ Audio imported but text failed: {e}")
     
-    def _add_sample(self):
+    def _add_sample(self) -> None:
         """Add a new sample from a local file."""
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -766,7 +799,7 @@ class VoiceProfileEditor(QDialog):
 
         self._import_audio_file(Path(file_path))
     
-    def _delete_sample(self):
+    def _delete_sample(self) -> None:
         """
         Delete the selected sample with double confirmation.
         
@@ -779,7 +812,6 @@ class VoiceProfileEditor(QDialog):
         sample = self._current_sample
         stem = sample['stem']
         
-        # First warning dialog
         reply = QMessageBox.warning(
             self,
             "Delete Sample",
@@ -792,7 +824,6 @@ class VoiceProfileEditor(QDialog):
         if reply != QMessageBox.StandardButton.Yes:
             return
         
-        # Double-check with user
         reply2 = QMessageBox.warning(
             self,
             "Final Confirmation",
@@ -819,22 +850,18 @@ class VoiceProfileEditor(QDialog):
         # Small delay to ensure the file is released
         time.sleep(0.1)
         
-        # Delete files
         try:
             if sample['wav_path'].exists():
                 sample['wav_path'].unlink()
             if sample['txt_path'].exists():
                 sample['txt_path'].unlink()
             
-            # Remove from list
             self._sample_data = [s for s in self._sample_data if s['stem'] != stem]
             
-            # Refresh list
             self._load_samples()
             self.status_label.setText(f"🗑️ Deleted sample: {stem}")
             logger.info(f"Deleted sample: {stem}")
             
-            # Clear current sample
             self._current_sample = None
             
         except PermissionError as e:
@@ -851,8 +878,13 @@ class VoiceProfileEditor(QDialog):
             logger.error(f"Error deleting sample {stem}: {e}")
             QMessageBox.warning(self, "Error", f"Failed to delete files: {e}")
     
-    def _on_audio_error(self, error):
-        """Handle audio playback errors."""
+    def _on_audio_error(self, error: int) -> None:
+        """
+        Handle audio playback errors.
+
+        Args:
+            error: The QMediaPlayer.Error code reported by the player.
+        """
         error_messages = {
             0: "No error",
             1: "Resource error (file not found or inaccessible)",
@@ -869,7 +901,7 @@ class VoiceProfileEditor(QDialog):
     # Audit Mode: Approve
     # ------------------------------------------------------------------
 
-    def _approve_all_samples(self):
+    def _approve_all_samples(self) -> None:
         """
         Approve this NPC's samples: move all WAV/TXT files for this profile
         from cfg.VOICES_PREP_DIR into cfg.VOICES_DIR, where they become an
@@ -916,8 +948,13 @@ class VoiceProfileEditor(QDialog):
         # so the caller refreshes the NPC's status from scratch.
         self.accept()
     
-    def closeEvent(self, event):
-        """Clean up on close."""
+    def closeEvent(self, event: Any) -> None:
+        """
+        Clean up on close.
+
+        Args:
+            event: The QCloseEvent to accept once cleanup is done.
+        """
         self.media_player.stop()
         logger.info(f"Closed {'audit review' if self.audit_mode else 'voice profile editor'}: {self.profile_name}")
         event.accept()
@@ -930,7 +967,11 @@ class VoiceProfileEditor(QDialog):
 class URLImportDialog(QDialog):
     """Dialog for importing audio from a URL."""
     
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        """
+        Args:
+            parent: Parent widget, if any.
+        """
         super().__init__(parent)
         self.setWindowTitle("📥 Import Audio from URL")
         self.resize(600, 250)
@@ -939,7 +980,6 @@ class URLImportDialog(QDialog):
         
         layout = QVBoxLayout(self)
         
-        # Instructions - now mentions both options
         instructions = QLabel(
             "Paste a URL to an audio file OR a Fish Audio page URL.\n"
             "Fish Audio pages will be parsed to extract the audio and sample text."
@@ -947,7 +987,6 @@ class URLImportDialog(QDialog):
         instructions.setWordWrap(True)
         layout.addWidget(instructions)
         
-        # URL text edit
         self.url_edit = QTextEdit()
         self.url_edit.setPlaceholderText(
             "Direct audio URL:\nhttps://example.com/audio.mp3\n\n"
@@ -956,7 +995,6 @@ class URLImportDialog(QDialog):
         self.url_edit.setMaximumHeight(80)
         layout.addWidget(self.url_edit)
         
-        # Buttons
         btn_layout = QHBoxLayout()
         
         paste_btn = QPushButton("📋 Paste from Clipboard")
@@ -965,7 +1003,6 @@ class URLImportDialog(QDialog):
         
         btn_layout.addStretch()
         
-        # Mode indicator
         self.mode_label = QLabel("🔹 Mode: Auto-detect")
         btn_layout.addWidget(self.mode_label)
         
@@ -980,14 +1017,12 @@ class URLImportDialog(QDialog):
         
         layout.addLayout(btn_layout)
         
-        # Status label
         self.status_label = QLabel("")
         layout.addWidget(self.status_label)
         
-        # Update mode indicator when text changes
         self.url_edit.textChanged.connect(self._update_mode_indicator)
     
-    def _update_mode_indicator(self):
+    def _update_mode_indicator(self) -> None:
         """Update the mode indicator based on the URL."""
         url = self.url_edit.toPlainText().strip()
         if "fish.audio/app/m/" in url:
@@ -997,7 +1032,7 @@ class URLImportDialog(QDialog):
         else:
             self.mode_label.setText("🔹 Mode: Auto-detect")
     
-    def _paste_from_clipboard(self):
+    def _paste_from_clipboard(self) -> None:
         """Paste from clipboard into the text edit."""
         clipboard = QApplication.clipboard()
         text = clipboard.text()
@@ -1007,7 +1042,7 @@ class URLImportDialog(QDialog):
             self.url_edit.selectAll()
             self._update_mode_indicator()
     
-    def _accept_url(self):
+    def _accept_url(self) -> None:
         """Validate and accept the URL."""
         url = self.url_edit.toPlainText().strip()
         if not url:
@@ -1018,7 +1053,6 @@ class URLImportDialog(QDialog):
             self.status_label.setText("⚠️ URL must start with http:// or https://")
             return
         
-        # Auto-detect mode
         if "fish.audio/app/m/" in url:
             self.mode = "fish"
             self.status_label.setText("✅ Fish Audio page detected - will parse for audio + text")
@@ -1030,11 +1064,19 @@ class URLImportDialog(QDialog):
         self.accept()
     
     def get_url(self) -> Optional[str]:
-        """Return the validated URL."""
+        """
+        Returns:
+            The validated URL entered by the user, or None if the dialog
+            was cancelled before a URL was accepted.
+        """
         return self.url
     
     def get_mode(self) -> str:
-        """Return the import mode ('direct' or 'fish')."""
+        """
+        Returns:
+            The detected import mode: "direct" for a plain audio URL, or
+            "fish" for a Fish Audio page URL.
+        """
         return self.mode
 
 
@@ -1050,6 +1092,17 @@ class _NumericTableWidgetItem(QTableWidgetItem):
     """
 
     def __lt__(self, other: QTableWidgetItem) -> bool:
+        """
+        Compare using the stored numeric value when both items have one.
+
+        Args:
+            other: The other table item to compare against.
+
+        Returns:
+            True if this item's numeric value is less than other's; falls
+            back to the default (text-based) comparison if either item has
+            no stored numeric value.
+        """
         self_val = self.data(Qt.ItemDataRole.UserRole + 1)
         other_val = other.data(Qt.ItemDataRole.UserRole + 1)
         if isinstance(self_val, (int, float)) and isinstance(other_val, (int, float)):
@@ -1082,6 +1135,11 @@ class SampleCheckWorker(QObject):
     failed = Signal(str)
 
     def __init__(self, samples: List[Dict[str, Any]]) -> None:
+        """
+        Args:
+            samples: Sample dicts (as produced by scan_voice_sample_dir) to
+                transcribe and score.
+        """
         super().__init__()
         self._samples = samples
         self._stop_requested = threading.Event()
@@ -1099,6 +1157,7 @@ class SampleCheckWorker(QObject):
             self.failed.emit(str(ex))
 
     def _run_impl(self) -> None:
+        """Transcribe and score each sample in order, emitting progress and result signals."""
         total = len(self._samples)
         start_time = time.time()
         checked = 0
@@ -1140,7 +1199,11 @@ class CheckAllSamplesDialog(QDialog):
     shows up in the /voices directory gets checked.
     """
 
-    def __init__(self, parent=None):
+    def __init__(self, parent: Optional[QWidget] = None) -> None:
+        """
+        Args:
+            parent: Parent widget, if any.
+        """
         super().__init__(parent)
         self.setWindowTitle("🧪 Check All Samples")
         self.resize(1100, 800)
@@ -1156,7 +1219,8 @@ class CheckAllSamplesDialog(QDialog):
         self.detail_media_player.setAudioOutput(self.detail_audio_output)
         self._build_ui()
 
-    def _build_ui(self):
+    def _build_ui(self) -> None:
+        """Build the dialog's controls: options, progress, results table, and detail panel."""
         layout = QVBoxLayout(self)
 
         top_layout = QHBoxLayout()
@@ -1292,6 +1356,15 @@ class CheckAllSamplesDialog(QDialog):
     # ------------------------------------------------------------------
 
     def _collect_samples(self, include_prep: bool) -> List[Dict[str, Any]]:
+        """
+        Scan cfg.VOICES_DIR (and optionally cfg.VOICES_PREP_DIR) for all voice samples.
+
+        Args:
+            include_prep: Whether to also include unapproved samples from cfg.VOICES_PREP_DIR.
+
+        Returns:
+            List of sample dicts, as produced by scan_voice_sample_dir.
+        """
         samples = scan_voice_sample_dir(Path(cfg.VOICES_DIR), "Voices")
         if include_prep:
             samples += scan_voice_sample_dir(Path(cfg.VOICES_PREP_DIR), "Prep")
@@ -1301,7 +1374,8 @@ class CheckAllSamplesDialog(QDialog):
     # Check lifecycle
     # ------------------------------------------------------------------
 
-    def _start_check(self):
+    def _start_check(self) -> None:
+        """Collect all samples and start the background check worker on a new thread."""
         samples = self._collect_samples(self.include_prep_cb.isChecked())
         if not samples:
             QMessageBox.information(self, "No Samples", "No voice samples found to check.")
@@ -1332,13 +1406,15 @@ class CheckAllSamplesDialog(QDialog):
 
         logger.info(f"Started 'Check All Samples' on {len(samples)} sample(s)")
 
-    def _stop_check(self):
+    def _stop_check(self) -> None:
+        """Ask the running worker to stop after it finishes the current sample."""
         if self._worker:
             self._worker.request_stop()
             self.stage_label.setText("Stopping after the current sample...")
             self.stop_btn.setEnabled(False)
 
-    def _cleanup_thread(self):
+    def _cleanup_thread(self) -> None:
+        """Stop and discard the worker and its thread, if any are running."""
         if self._worker:
             self._worker.request_stop()
         if self._worker_thread is not None and self._worker_thread.isRunning():
@@ -1347,7 +1423,14 @@ class CheckAllSamplesDialog(QDialog):
         self._worker = None
         self._worker_thread = None
 
-    def _on_progress(self, info: dict):
+    def _on_progress(self, info: dict) -> None:
+        """
+        Update the progress bar and status label from a worker progress signal.
+
+        Args:
+            info: Progress dict with "total", "done", "elapsed", and
+                "eta_seconds" keys.
+        """
         total = info["total"]
         done = info["done"]
         pct = int(100 * done / total) if total else 0
@@ -1363,12 +1446,25 @@ class CheckAllSamplesDialog(QDialog):
             f"Finish: ~{format_finish_time(eta_seconds)}"
         )
 
-    def _on_sample_checked(self, row: Dict[str, Any]):
+    def _on_sample_checked(self, row: Dict[str, Any]) -> None:
+        """
+        Record and display one completed sample check result.
+
+        Args:
+            row: Result dict for one sample (profile, stem, score, success,
+                text, transcribed_text, etc.) emitted by the worker.
+        """
         self._rows.append(row)
         self._add_row(row)
         self.save_results_btn.setEnabled(True)
 
-    def _on_finished(self, info: dict):
+    def _on_finished(self, info: dict) -> None:
+        """
+        Handle worker completion: reset controls and report the total checked.
+
+        Args:
+            info: Completion dict with a "total_checked" key.
+        """
         self.stage_label.setText(f"Done. Checked {info.get('total_checked', 0)} sample(s).")
         self.progress_label.setText("")
         self._cleanup_thread()
@@ -1377,7 +1473,13 @@ class CheckAllSamplesDialog(QDialog):
         self.stop_btn.setEnabled(False)
         logger.info(f"'Check All Samples' finished: {info.get('total_checked', 0)} checked")
 
-    def _on_failed(self, message: str):
+    def _on_failed(self, message: str) -> None:
+        """
+        Handle a fatal worker error: show it to the user and reset controls.
+
+        Args:
+            message: Error message to display to the user.
+        """
         QMessageBox.critical(self, "Check Failed", message)
         self.stage_label.setText(f"❌ Failed: {message}")
         self._cleanup_thread()
@@ -1389,7 +1491,14 @@ class CheckAllSamplesDialog(QDialog):
     # Table population
     # ------------------------------------------------------------------
 
-    def _add_row(self, row: Dict[str, Any]):
+    def _add_row(self, row: Dict[str, Any]) -> None:
+        """
+        Append one checked sample as a new row in the results table.
+
+        Args:
+            row: Result dict for one sample (profile, stem, source, score,
+                success, text, transcribed_text) to display.
+        """
         self.table.setSortingEnabled(False)
         r = self.table.rowCount()
         self.table.insertRow(r)
@@ -1429,6 +1538,11 @@ class CheckAllSamplesDialog(QDialog):
         self.table.setSortingEnabled(True)
 
     def _selected_row_data(self) -> Optional[Dict[str, Any]]:
+        """
+        Returns:
+            The result dict stashed on the currently selected table row, or
+            None if no row is selected.
+        """
         selected = self.table.selectedItems()
         if not selected:
             return None
@@ -1437,10 +1551,15 @@ class CheckAllSamplesDialog(QDialog):
         return item.data(Qt.ItemDataRole.UserRole) if item else None
 
     def _selected_row_index(self) -> Optional[int]:
+        """
+        Returns:
+            The currently selected table row index, or None if no row is selected.
+        """
         selected = self.table.selectedItems()
         return selected[0].row() if selected else None
 
-    def _clear_detail_panel(self):
+    def _clear_detail_panel(self) -> None:
+        """Reset the detail panel to its empty, no-selection state."""
         self._current_detail_row = None
         self.detail_header_label.setText("Select a sample above to see the full text.")
         self.detail_header_label.setStyleSheet("font-weight: bold;")
@@ -1452,7 +1571,13 @@ class CheckAllSamplesDialog(QDialog):
         self.detail_use_btn.setEnabled(False)
         self.detail_save_btn.setEnabled(False)
 
-    def _update_detail_header(self, row: Dict[str, Any]):
+    def _update_detail_header(self, row: Dict[str, Any]) -> None:
+        """
+        Set the detail panel's header label/color to reflect the given row's score.
+
+        Args:
+            row: The result dict for the sample being shown in the detail panel.
+        """
         label, color = score_status(row["score"])
         if not row["success"]:
             label = "Error"
@@ -1461,7 +1586,8 @@ class CheckAllSamplesDialog(QDialog):
         )
         self.detail_header_label.setStyleSheet(f"color: {color}; font-weight: bold;")
 
-    def _on_selection_changed(self):
+    def _on_selection_changed(self) -> None:
+        """Refresh the detail panel to match the newly selected table row."""
         row = self._selected_row_data()
         self._current_detail_row = row
         if not row:
@@ -1477,7 +1603,7 @@ class CheckAllSamplesDialog(QDialog):
         self.detail_use_btn.setEnabled(row.get("success", False))
         self.detail_save_btn.setEnabled(True)
 
-    def _play_selected_detail_sample(self):
+    def _play_selected_detail_sample(self) -> None:
         """Play the audio recording for the currently selected check result."""
         row = self._current_detail_row
         if not row:
@@ -1504,8 +1630,14 @@ class CheckAllSamplesDialog(QDialog):
     # Applying corrections
     # ------------------------------------------------------------------
 
-    def _refresh_grid_row(self, row_idx: int, row: Dict[str, Any]):
-        """Update a row's Score/Status/Sample Text cells after a rescoring."""
+    def _refresh_grid_row(self, row_idx: int, row: Dict[str, Any]) -> None:
+        """
+        Update a row's Score/Status/Sample Text cells after a rescoring.
+
+        Args:
+            row_idx: Index of the table row to update.
+            row: The updated result dict to render into that row.
+        """
         self.table.setSortingEnabled(False)
 
         score = row["score"]
@@ -1534,7 +1666,7 @@ class CheckAllSamplesDialog(QDialog):
 
         self.table.setSortingEnabled(True)
 
-    def _on_use_transcribed_for_selected(self):
+    def _on_use_transcribed_for_selected(self) -> None:
         """Replace the selected sample's text with its transcription, then save."""
         row = self._current_detail_row
         if not row or not row.get("success", False):
@@ -1552,7 +1684,7 @@ class CheckAllSamplesDialog(QDialog):
         self.detail_sample_edit.setPlainText(row["transcribed_text"])
         self._on_save_detail_text()
 
-    def _on_save_detail_text(self):
+    def _on_save_detail_text(self) -> None:
         """Save the (possibly hand-edited) sample text and re-check its score."""
         row = self._current_detail_row
         if not row:
@@ -1580,7 +1712,7 @@ class CheckAllSamplesDialog(QDialog):
             f"(new score: {row['score']:.1f}%)"
         )
 
-    def _on_save_results(self):
+    def _on_save_results(self) -> None:
         """Save all checked samples to a CSV file, sorted worst score first."""
         if not self._rows:
             QMessageBox.information(self, "No Results", "No checked samples to save yet.")
@@ -1621,11 +1753,18 @@ class CheckAllSamplesDialog(QDialog):
             logger.error(f"Failed to save check results: {e}")
             QMessageBox.warning(self, "Save Failed", f"Could not save results:\n{e}")
 
-    def _on_close(self):
+    def _on_close(self) -> None:
+        """Stop any running worker and close the dialog."""
         self._cleanup_thread()
         self.accept()
 
-    def closeEvent(self, event):
+    def closeEvent(self, event: Any) -> None:
+        """
+        Ensure the worker thread is stopped when the dialog is closed via the window controls.
+
+        Args:
+            event: The QCloseEvent to pass along to the base implementation.
+        """
         self._cleanup_thread()
         super().closeEvent(event)
 
@@ -1636,7 +1775,13 @@ class CheckAllSamplesDialog(QDialog):
 class CSVLinesViewer(QDialog):
     """Dialog to display CSV lines affected by a voice assignment."""
     
-    def __init__(self, title: str, df: pd.DataFrame, parent=None):
+    def __init__(self, title: str, df: pd.DataFrame, parent: Optional[QWidget] = None) -> None:
+        """
+        Args:
+            title: Descriptive label shown in the window title (e.g. NPC or system name).
+            df: Rows of the dialogue CSV affected by the assignment being reviewed.
+            parent: Parent widget, if any.
+        """
         super().__init__(parent)
         self.setWindowTitle(f"👁️ CSV Lines: {title}")
         self.resize(1200, 700)
@@ -1644,18 +1789,15 @@ class CSVLinesViewer(QDialog):
         
         layout = QVBoxLayout(self)
         
-        # Info label with line count
         info_label = QLabel(f"Showing {len(df)} lines affected by this assignment")
         layout.addWidget(info_label)
         
-        # Table
         self.table = QTableWidget()
         self.table.setSortingEnabled(True)
         self.table.setWordWrap(True)
         self.table.cellClicked.connect(self._copy_cell_to_clipboard)
         layout.addWidget(self.table)
         
-        # Close button
         btn_layout = QHBoxLayout()
         btn_layout.addStretch()
         close_btn = QPushButton("Close")
@@ -1665,29 +1807,25 @@ class CSVLinesViewer(QDialog):
         
         self._populate_table()
     
-    def _populate_table(self):
+    def _populate_table(self) -> None:
         """Populate the table with CSV data."""
         if self.df.empty:
             return
         
-        # Define columns to show
         columns = ['StrRef', 'SystemName', 'Gender', 'Text']
         display_cols = [col for col in columns if col in self.df.columns]
         
         self.table.setColumnCount(len(display_cols))
         self.table.setHorizontalHeaderLabels(display_cols)
         
-        # Set row count
         self.table.setRowCount(len(self.df))
         
-        # Populate data
         for row_idx, (_, row) in enumerate(self.df.iterrows()):
             for col_idx, col in enumerate(display_cols):
                 value = str(row[col]) if pd.notna(row[col]) else ""
                 item = QTableWidgetItem(value)
                 self.table.setItem(row_idx, col_idx, item)
         
-        # Resize columns
         for col_idx, col in enumerate(display_cols):
             if col == 'Text':
                 self.table.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeMode.Stretch)
@@ -1695,11 +1833,17 @@ class CSVLinesViewer(QDialog):
             else:
                 self.table.horizontalHeader().setSectionResizeMode(col_idx, QHeaderView.ResizeMode.ResizeToContents)
         
-        # Enable alternating row colors for readability
         self.table.setAlternatingRowColors(True)
         self.table.resizeRowsToContents()
 
-    def _copy_cell_to_clipboard(self, row, col):
+    def _copy_cell_to_clipboard(self, row: int, col: int) -> None:
+        """
+        Copy the clicked cell's text to the clipboard and show a brief confirmation tooltip.
+
+        Args:
+            row: Row index of the clicked cell.
+            col: Column index of the clicked cell.
+        """
         item = self.table.item(row, col)
         if item is None:
             return
@@ -1716,7 +1860,15 @@ class CSVLinesViewer(QDialog):
 # ============================================================================
 
 def load_csv(csv_path: str) -> pd.DataFrame:
-    """Load the dialog report CSV file."""
+    """
+    Load the dialog report CSV file.
+
+    Args:
+        csv_path: Path to the CSV file to load.
+
+    Returns:
+        The loaded DataFrame, or an empty DataFrame if loading fails.
+    """
     logger.info(f"Loading CSV from: {csv_path}")
     try:
         df = pd.read_csv(csv_path)
@@ -1728,7 +1880,13 @@ def load_csv(csv_path: str) -> pd.DataFrame:
 
 
 def is_missing_realname_npc(npc_name: str) -> bool:
-    """True if this NPC list entry is a synthetic 'missing RealName' placeholder."""
+    """
+    Args:
+        npc_name: NPC list entry to check.
+
+    Returns:
+        True if this NPC list entry is a synthetic "missing RealName" placeholder.
+    """
     return npc_name.startswith(f"{cfg.REALNAME_NOT_FOUND} - ")
 
 
@@ -1744,6 +1902,13 @@ def prepare_dataframe(df: pd.DataFrame) -> pd.DataFrame:
       up in the NPC list, grouped one entry per SystemName. This label is
       display-only; the real voice-profile/sample name for these entries
       is built separately (see cfg.REALNAME_NOT_FOUND usage in the GUI).
+
+    Args:
+        df: Raw DataFrame loaded from the dialog report CSV.
+
+    Returns:
+        The cleaned DataFrame, with no-SystemName rows dropped and orphan
+        rows given a placeholder RealName.
     """
     if df.empty:
         return df
@@ -1787,7 +1952,6 @@ def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
     """
     original_count = len(df)
     
-    # Convert to string and clean
     sound_refs = df['SoundResRef'].fillna('').astype(str).str.strip()
     
     # Check if SoundResRef is empty (needs assignment)
@@ -1808,19 +1972,21 @@ def filter_csv_for_assignment(df: pd.DataFrame) -> pd.DataFrame:
     return filtered_df
 
 
-def load_json_files():
+def load_json_files() -> tuple[Dict[str, str], Dict[str, str], Dict[str, str]]:
     """
     Load voice substitution rules from a single JSON file.
-    
+
     File structure:
     {
         "npc": {"NPC Name": "voice_profile"},
         "gender": {"NPC|gender": "voice_profile"},
         "sysname": {"SystemName": "voice_profile"}
     }
-    
+
     Returns:
-        tuple: (substitutions, gender_substitutions, sys_substitutions)
+        A tuple of (substitutions, gender_substitutions, sys_substitutions),
+        each mapping a key (NPC name, "NPC|gender", or system name) to a
+        voice profile name. Missing sections default to empty dicts.
     """
     substitutions = {}
     gender_substitutions = {}
@@ -1832,7 +1998,6 @@ def load_json_files():
             with open(path, "r", encoding="utf-8") as f:
                 data = json.load(f)
             
-            # Extract each section, defaulting to empty dict if missing
             substitutions = data.get("npc", {})
             gender_substitutions = data.get("gender", {})
             sys_substitutions = data.get("sysname", {})
@@ -1859,6 +2024,14 @@ def save_json_files(substitutions: Dict, gender_substitutions: Dict, sys_substit
         "gender": {"NPC|gender": "voice_profile"},
         "sysname": {"SystemName": "voice_profile"}
     }
+
+    Args:
+        substitutions: NPC-level voice substitutions.
+        gender_substitutions: Gender-level voice substitutions.
+        sys_substitutions: System-name-level voice substitutions.
+
+    Returns:
+        True if the file was written successfully, False otherwise.
     """
     data = {
         "npc": substitutions,
@@ -1892,7 +2065,6 @@ def clean_redundant_substitutions(substitutions: Dict, existing_voices: Set[str]
     Returns:
         Cleaned substitutions dictionary
     """
-    # Quick check if any redundant entries exist
     has_redundant = any(npc == voice and voice in existing_voices for npc, voice in substitutions.items())
     if not has_redundant:
         return substitutions  # No changes needed
@@ -1906,21 +2078,42 @@ def clean_redundant_substitutions(substitutions: Dict, existing_voices: Set[str]
     return cleaned
 
 
-def remove_orphaned_substitutions(substitutions: Dict, gender_substitutions: Dict,
-                                   sys_substitutions: Dict, available_voices: List[str]):
+def remove_orphaned_substitutions(
+    substitutions: Dict[str, str],
+    gender_substitutions: Dict[str, str],
+    sys_substitutions: Dict[str, str],
+    available_voices: List[str],
+) -> tuple[Dict[str, str], Dict[str, str], Dict[str, str], List[str], List[str], List[str]]:
     """
     Drop any substitution (NPC-, Gender-, or SystemName-level) whose target
     voice profile no longer exists -- e.g. because every sample in that
     profile was deleted, so the profile itself ceased to exist.
 
-    Returns (substitutions, gender_substitutions, sys_substitutions,
-    removed_npc_keys, removed_gender_keys, removed_sys_keys) -- the removed-*
-    lists let the caller do a targeted refresh instead of rebuilding
-    everything.
+    Args:
+        substitutions: NPC-level voice substitutions.
+        gender_substitutions: Gender-level voice substitutions.
+        sys_substitutions: System-name-level voice substitutions.
+        available_voices: Voice profile names that currently exist.
+
+    Returns:
+        A tuple of (substitutions, gender_substitutions, sys_substitutions,
+        removed_npc_keys, removed_gender_keys, removed_sys_keys) -- the
+        removed-* lists let the caller do a targeted refresh instead of
+        rebuilding everything.
     """
     available = set(available_voices)
 
-    def _clean(d: Dict):
+    def _clean(d: Dict[str, str]) -> tuple[Dict[str, str], List[str]]:
+        """
+        Keep only entries whose voice is still available.
+
+        Args:
+            d: A substitutions dict to filter.
+
+        Returns:
+            A tuple of (kept, removed_keys): the filtered dict and the list
+            of keys removed because their voice no longer exists.
+        """
         cleaned = {}
         removed = []
         for k, v in d.items():
@@ -1947,6 +2140,9 @@ def get_available_voice_profiles() -> List[str]:
     
     Groups files like "Boy.wav", "Boy 2.wav", "Boy 3.wav" into a single
     profile "Boy" for the dropdown list.
+
+    Returns:
+        Sorted list of unique voice profile names.
     """
     voices_dir = Path(cfg.VOICES_DIR)
     if not voices_dir.exists():
@@ -1962,7 +2158,10 @@ def get_available_voice_profiles() -> List[str]:
 
 
 def get_existing_voice_files() -> Set[str]:
-    """Get set of base voice filenames (without number suffixes)."""
+    """
+    Returns:
+        Set of base voice filenames (without number suffixes) found in cfg.VOICES_DIR.
+    """
     voices_dir = Path(cfg.VOICES_DIR)
     if not voices_dir.exists():
         return set()
@@ -1984,6 +2183,9 @@ def get_prep_npc_names() -> Set[str]:
     Note: if a name exists in both cfg.VOICES_PREP_DIR and cfg.VOICES_DIR, the
     approved cfg.VOICES_DIR entry takes priority elsewhere (this function
     just reports what prep contains).
+
+    Returns:
+        Set of NPC names with unreviewed samples in cfg.VOICES_PREP_DIR.
     """
     prep_dir = Path(cfg.VOICES_PREP_DIR)
     if not prep_dir.exists():
@@ -2065,6 +2267,18 @@ def build_hierarchy_for_npc(df: pd.DataFrame, npc_name: str, substitutions: Dict
                 }
             }
         }
+
+    Args:
+        df: The full dialogue DataFrame.
+        npc_name: RealName of the NPC to build the entry for.
+        substitutions: NPC-level voice substitutions.
+        gender_substitutions: Gender-level voice substitutions.
+        sys_substitutions: System-name-level voice substitutions.
+        existing_voices: Voice profile names that exist in cfg.VOICES_DIR.
+        prep_npcs: NPC names with unreviewed samples in cfg.VOICES_PREP_DIR.
+
+    Returns:
+        The hierarchy entry dict for this NPC (see structure above).
     """
     prep_npcs = prep_npcs or set()
     npc_name = str(npc_name)
@@ -2088,6 +2302,18 @@ def _build_npc_entry(npc_name: str, npc_df: pd.DataFrame, substitutions: Dict,
     the coverage/filter math below, which already works off the SystemName
     entry inside "genders" -- there's just never a NPC-level or Gender-level
     UI shown for these in the GUI.
+
+    Args:
+        npc_name: RealName of the NPC this entry is for.
+        npc_df: Rows of the dialogue DataFrame belonging to this NPC.
+        substitutions: NPC-level voice substitutions.
+        gender_substitutions: Gender-level voice substitutions.
+        sys_substitutions: System-name-level voice substitutions.
+        existing_voices: Voice profile names that exist in cfg.VOICES_DIR.
+        prep_npcs: NPC names with unreviewed samples in cfg.VOICES_PREP_DIR.
+
+    Returns:
+        The hierarchy entry dict for this NPC.
     """
     is_placeholder = is_missing_realname_npc(npc_name)
     has_existing = npc_name in existing_voices
@@ -2127,7 +2353,20 @@ def _build_npc_entry(npc_name: str, npc_df: pd.DataFrame, substitutions: Dict,
 def build_hierarchy(df: pd.DataFrame, substitutions: Dict, gender_substitutions: Dict,
                      sys_substitutions: Dict, existing_voices: Set[str],
                      prep_npcs: Optional[Set[str]] = None) -> Dict:
-    """Build the full NPC hierarchy for all characters."""
+    """
+    Build the full NPC hierarchy for all characters.
+
+    Args:
+        df: The full dialogue DataFrame.
+        substitutions: NPC-level voice substitutions.
+        gender_substitutions: Gender-level voice substitutions.
+        sys_substitutions: System-name-level voice substitutions.
+        existing_voices: Voice profile names that exist in cfg.VOICES_DIR.
+        prep_npcs: NPC names with unreviewed samples in cfg.VOICES_PREP_DIR.
+
+    Returns:
+        Dict mapping each NPC RealName to its hierarchy entry.
+    """
     logger.info("Building NPC hierarchy...")
     start_time = time.time()
     prep_npcs = prep_npcs or set()
@@ -2155,6 +2394,14 @@ def calculate_line_counts(df: pd.DataFrame, hierarchy: Dict) -> Dict:
 
     Uses a single groupby pass instead of re-filtering the whole DataFrame
     once per NPC, making it much faster on large datasets.
+
+    Args:
+        df: The full dialogue DataFrame.
+        hierarchy: The NPC hierarchy, as built by build_hierarchy().
+
+    Returns:
+        Dict mapping each NPC name to a dict with "total_lines" and a
+        "genders" breakdown mirroring the hierarchy's gender/sysname structure.
     """
     counts = {}
     if df.empty:
@@ -2205,6 +2452,13 @@ def calculate_covered_lines_for_npc(npc_data: Dict, npc_line_counts: Dict) -> in
     A higher-level assignment covers everything beneath it.
 
     Uses cached line counts, not the DataFrame, for fast performance.
+
+    Args:
+        npc_data: This NPC's hierarchy entry.
+        npc_line_counts: This NPC's line-count entry, as produced by calculate_line_counts().
+
+    Returns:
+        Number of CSV lines covered by an existing voice assignment.
     """
     total_lines = npc_line_counts.get('total_lines', 0)
 
@@ -2235,7 +2489,16 @@ def calculate_covered_lines_for_npc(npc_data: Dict, npc_line_counts: Dict) -> in
 
 
 def calculate_all_covered_lines(hierarchy: Dict, line_counts: Dict) -> Dict[str, int]:
-    """Calculate covered-line count for every NPC in the hierarchy."""
+    """
+    Calculate covered-line count for every NPC in the hierarchy.
+
+    Args:
+        hierarchy: The NPC hierarchy, as built by build_hierarchy().
+        line_counts: Line counts per NPC, as produced by calculate_line_counts().
+
+    Returns:
+        Dict mapping each NPC name to its covered-line count.
+    """
     return {
         name: calculate_covered_lines_for_npc(data, line_counts.get(name, {}))
         for name, data in hierarchy.items()
@@ -2263,7 +2526,8 @@ class VoiceProfileManager(QMainWindow):
         - Right panel: Details for selected NPC with assignment controls
     """
     
-    def __init__(self):
+    def __init__(self) -> None:
+        """Load application data (CSV, substitutions, voices) and build the main window."""
         super().__init__()
         self.setWindowTitle("🎯 Voice Profile Manager")
         self.resize(1400, 900)
@@ -2331,7 +2595,7 @@ class VoiceProfileManager(QMainWindow):
     # UI Construction
     # ------------------------------------------------------------------
     
-    def _build_ui(self):
+    def _build_ui(self) -> None:
         """Build the main application UI with split layout."""
         central = QWidget()
         self.setCentralWidget(central)
@@ -2355,7 +2619,6 @@ class VoiceProfileManager(QMainWindow):
         self.stats_sys_level_label = QLabel()
         self.stats_lines_covered_label = QLabel()
 
-        # Coverage progress bar
         self.coverage_progress = QProgressBar()
         self.coverage_progress.setRange(0, 100)
         self.coverage_progress.setValue(0)
@@ -2397,7 +2660,6 @@ class VoiceProfileManager(QMainWindow):
 
         left_layout.addWidget(QLabel("📋 NPC List"))
 
-        # Search box
         self.search_box = QLineEdit()
         self.search_box.setPlaceholderText("🔍 Type to filter...")
         self.search_box.textChanged.connect(self._on_filter_changed)
@@ -2424,11 +2686,9 @@ class VoiceProfileManager(QMainWindow):
         
         left_layout.addLayout(controls_layout)
 
-        # NPC count
         self.npc_count_label = QLabel()
         left_layout.addWidget(self.npc_count_label)
 
-        # NPC list
         self.npc_list = QListWidget()
         self.npc_list.currentItemChanged.connect(self._on_npc_selected)
         left_layout.addWidget(self.npc_list, stretch=1)
@@ -2456,7 +2716,10 @@ class VoiceProfileManager(QMainWindow):
     def _get_coverage_status(self, npc_name: str) -> Dict:
         """
         Get coverage status for an NPC using cached data.
-        
+
+        Args:
+            npc_name: RealName of the NPC to check.
+
         Returns:
             Dict with:
                 - total_lines: Total number of lines
@@ -2468,11 +2731,9 @@ class VoiceProfileManager(QMainWindow):
         data = self.hierarchy[npc_name]
         has_existing = data.get("has_existing_voice", False)
         
-        # Use cached line counts
         npc_counts = self.line_counts.get(npc_name, {})
         total_lines = npc_counts.get('total_lines', 0)
         
-        # Use cached covered lines
         covered_lines = self.covered_lines_by_npc.get(npc_name, 0)
         
         # If NPC has a voice file, it's fully covered
@@ -2496,7 +2757,10 @@ class VoiceProfileManager(QMainWindow):
     def _npc_icon(self, npc_name: str) -> str:
         """
         Get the appropriate icon for an NPC based on coverage status.
-        
+
+        Args:
+            npc_name: RealName of the NPC to get an icon for.
+
         Returns:
             str: Icon character
                 - 🟢 Voice file exists (full coverage)
@@ -2520,7 +2784,7 @@ class VoiceProfileManager(QMainWindow):
             return "🎧"
         return "🔴"
 
-    def _apply_filters(self):
+    def _apply_filters(self) -> None:
         """
         Apply all filters (search, status filter, sort) to determine which NPCs to show.
         
@@ -2580,7 +2844,7 @@ class VoiceProfileManager(QMainWindow):
         
         logger.debug(f"Filter applied: {len(self._filtered_items)} NPCs visible")
 
-    def _populate_npc_list(self):
+    def _populate_npc_list(self) -> None:
         """Populate the NPC list with filtered and sorted items."""
         self.npc_list.blockSignals(True)
         self.npc_list.clear()
@@ -2597,8 +2861,13 @@ class VoiceProfileManager(QMainWindow):
         self.npc_count_label.setText(f"Showing {len(items)} of {len(self.npc_names)} NPCs")
         self.npc_list.blockSignals(False)
 
-    def _refresh_npc_list_icon(self, npc_name: str):
-        """Update the icon for a single NPC in the list."""
+    def _refresh_npc_list_icon(self, npc_name: str) -> None:
+        """
+        Update the icon for a single NPC in the list.
+
+        Args:
+            npc_name: RealName of the NPC whose list entry should be refreshed.
+        """
         for i in range(self.npc_list.count()):
             item = self.npc_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == npc_name:
@@ -2607,8 +2876,15 @@ class VoiceProfileManager(QMainWindow):
                 item.setText(f"{icon} {npc_name} [{line_count} lines]")
                 return
 
-    def _select_npc_in_list(self, npc_name: str):
-        """Select an NPC in the list by name."""
+    def _select_npc_in_list(self, npc_name: str) -> None:
+        """
+        Select an NPC in the list by name.
+
+        Args:
+            npc_name: RealName of the NPC to select. If it isn't currently
+                visible in the list (e.g. filtered out), the detail panel
+                is rendered for it directly instead.
+        """
         for i in range(self.npc_list.count()):
             item = self.npc_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == npc_name:
@@ -2617,8 +2893,14 @@ class VoiceProfileManager(QMainWindow):
         self.selected_npc = npc_name
         self._render_detail_panel()
 
-    def _on_filter_changed(self, text: Optional[str] = None):
-        """Handle changes to search, sort, or filter controls."""
+    def _on_filter_changed(self, text: Optional[str] = None) -> None:
+        """
+        Handle changes to search, sort, or filter controls.
+
+        Args:
+            text: Unused; present because this slot is connected to
+                signals (e.g. textChanged) that pass the new value.
+        """
         self._apply_filters()
         self._populate_npc_list()
         
@@ -2633,8 +2915,14 @@ class VoiceProfileManager(QMainWindow):
         if self.npc_list.count() > 0 and not self.selected_npc:
             self.npc_list.setCurrentRow(0)
 
-    def _on_npc_selected(self, current: QListWidgetItem, previous: QListWidgetItem):
-        """Handle NPC selection from the list."""
+    def _on_npc_selected(self, current: QListWidgetItem, previous: QListWidgetItem) -> None:
+        """
+        Handle NPC selection from the list.
+
+        Args:
+            current: The newly selected list item, or None if the selection was cleared.
+            previous: The previously selected list item.
+        """
         if current is None:
             return
         self.selected_npc = current.data(Qt.ItemDataRole.UserRole)
@@ -2644,10 +2932,17 @@ class VoiceProfileManager(QMainWindow):
     # Detail Panel
     # ------------------------------------------------------------------
 
-    def _clear_layout(self, layout):
-        """Recursively clear all widgets from a layout."""
+    def _clear_layout(self, layout: QLayout) -> None:
+        """
+        Recursively clear all widgets from a layout.
+
+        Args:
+            layout: The layout to empty.
+        """
         while layout.count():
             item = layout.takeAt(0)
+            if item is None:
+                continue
             widget = item.widget()
             if widget is not None:
                 widget.deleteLater()
@@ -2656,20 +2951,29 @@ class VoiceProfileManager(QMainWindow):
                 if sub_layout is not None:
                     self._clear_layout(sub_layout)
 
-    def _make_voice_combo_with_editor(self, current_voice: Optional[str], on_change, profile_name: str, 
+    def _make_voice_combo_with_editor(self, current_voice: Optional[str], on_change: Callable[[str], None],
+                                    profile_name: str,
                                     show_lines_callback: Optional[Callable] = None,
                                     show_lines_param: Optional[Any] = None) -> QWidget:
         """
         Create a combo box with an Edit/Create button and Show Lines button next to it.
-        
-        Returns a widget containing the combo and buttons.
+
+        Args:
+            current_voice: The voice profile currently assigned, or None/empty for unassigned.
+            on_change: Callback invoked with the newly selected voice profile name.
+            profile_name: Name used to pre-fill the "create new profile" editor.
+            show_lines_callback: Optional callback to show the CSV lines associated
+                with this assignment; when given, a "Show Lines" button is added.
+            show_lines_param: Optional value passed through for line-count lookups.
+
+        Returns:
+            A QWidget containing the combo box and its accompanying buttons.
         """
         container = QWidget()
         layout = QHBoxLayout(container)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.setSpacing(4)
         
-        # Combo box
         combo = QComboBox()
         options = [""] + self.available_voices
         combo.addItems(options)
@@ -2684,20 +2988,17 @@ class VoiceProfileManager(QMainWindow):
         # Store reference to combo for the button callback
         setattr(container, 'combo', combo)
         
-        # Show Lines button
         if show_lines_callback:
             show_btn = QPushButton("👁️")
             show_btn.setFixedWidth(30)
             show_btn.setToolTip("Show affected CSV lines")
             if show_lines_param is not None:
-                # Create a lambda that passes the parameter
                 show_btn.clicked.connect(lambda: show_lines_callback(show_lines_param))
             else:
                 show_btn.clicked.connect(show_lines_callback)
             layout.addWidget(show_btn)
             setattr(container, 'show_btn', show_btn)
         
-        # Edit/Create button
         has_voice = current_voice in self.existing_voices
         btn_text = "✏️" if has_voice else "➕"
         btn_tooltip = f"Edit '{current_voice or 'new'}' profile" if has_voice else f"Create '{combo.currentText() or 'new'}' profile"
@@ -2706,12 +3007,12 @@ class VoiceProfileManager(QMainWindow):
         btn.setFixedWidth(30)
         btn.setToolTip(btn_tooltip)
         
-        # Capture combo reference for the lambda
-        def on_btn_clicked():
-            # Get the current text from the combo
+        def on_btn_clicked() -> None:
+            """Open the profile editor for the combo's current selection."""
             current_text = combo.currentText() or profile_name
 
-            def apply_selection():
+            def apply_selection() -> None:
+                """Re-apply the selected voice once the editor closes, before repaint."""
                 # Runs after the editor closes but BEFORE the hierarchy is
                 # rebuilt / the detail panel is re-rendered, so a newly
                 # created profile is picked up as the selected value
@@ -2720,19 +3021,17 @@ class VoiceProfileManager(QMainWindow):
                 if current_text in self.available_voices:
                     on_change(current_text)
 
-            # Open the editor; the new selection is applied before repaint
             self._open_profile_editor(current_text, on_saved=apply_selection)
         
         btn.clicked.connect(on_btn_clicked)
         layout.addWidget(btn)
         
-        # Store reference to button
         setattr(container, 'btn', btn)
         
         return container
 
     def _open_profile_editor(self, profile_name: str, audit_mode: bool = False,
-                              on_saved: Optional[Callable[[], None]] = None):
+                              on_saved: Optional[Callable[[], None]] = None) -> None:
         """
         Open the voice profile editor for the given profile name.
 
@@ -2746,6 +3045,14 @@ class VoiceProfileManager(QMainWindow):
         This lets a caller (e.g. a combo's Create button) apply a pending
         selection so it's reflected in the very first repaint, rather than
         updating state after the old widgets are already gone.
+
+        Args:
+            profile_name: Name of the voice profile to open (created if it
+                doesn't exist yet).
+            audit_mode: Whether to open in audit-review mode against cfg.VOICES_PREP_DIR.
+            on_saved: Optional callback invoked after the editor closes and
+                voice lists are refreshed, but before the hierarchy rebuild
+                and detail-panel re-render.
         """
         if not profile_name:
             profile_name = "New Profile"
@@ -2754,7 +3061,6 @@ class VoiceProfileManager(QMainWindow):
         editor = VoiceProfileEditor(profile_name, self, source_dir=source_dir, audit_mode=audit_mode)
         editor.exec()
         
-        # After editor closes, refresh available voices
         self.available_voices = get_available_voice_profiles()
         self.existing_voices = get_existing_voice_files()
         self.prep_npcs = get_prep_npc_names()
@@ -2802,18 +3108,20 @@ class VoiceProfileManager(QMainWindow):
             self._update_line_counts_for_npc(npc_name)
             self._refresh_npc_list_icon(npc_name)
         
-        # Update stats (Available Voices count)
         self._update_stats()
         
-        # Re-render detail panel to update comboboxes and voice file message
         self._render_detail_panel()
 
-    def _render_missing_realname_detail(self, npc_data: Dict, total_lines: int):
+    def _render_missing_realname_detail(self, npc_data: Dict, total_lines: int) -> None:
         """
         Render the detail panel for a synthetic 'missing RealName' entry:
         just the single SystemName-level assignment -- no NPC-level or
         Gender-level UI. Gender (if any) is shown as a label only, since
         it has no effect on the assignment.
+
+        Args:
+            npc_data: The hierarchy entry for this placeholder NPC.
+            total_lines: Total CSV line count for this entry, shown in the header.
         """
         sysname = None
         sys_assigned_voice = None
@@ -2835,8 +3143,8 @@ class VoiceProfileManager(QMainWindow):
         sys_group = QGroupBox("📋 System Name Assignment")
         sys_form = QFormLayout(sys_group)
 
-        # Show lines callback for system name level
-        def show_sys_lines():
+        def show_sys_lines() -> None:
+            """Open a CSVLinesViewer showing all lines for this system name."""
             sys_rows = self.df[self.df['SystemName'] == sysname]
             if not sys_rows.empty:
                 viewer = CSVLinesViewer(f"System: {sysname}", sys_rows, self)
@@ -2853,7 +3161,7 @@ class VoiceProfileManager(QMainWindow):
         sys_form.addRow(f"{sysname} ({total_lines} lines):", sys_container)
         self.detail_layout.addWidget(sys_group)
 
-    def _render_detail_panel(self):
+    def _render_detail_panel(self) -> None:
         """Render the detail panel for the currently selected NPC."""
         self._clear_layout(self.detail_layout)
 
@@ -2917,8 +3225,8 @@ class VoiceProfileManager(QMainWindow):
         npc_group = QGroupBox(f"📌 NPC Level Assignment ({total_lines} lines)")
         npc_form = QFormLayout(npc_group)
         
-        # Show lines callback for NPC level
-        def show_npc_lines():
+        def show_npc_lines() -> None:
+            """Open a CSVLinesViewer showing all lines for this NPC."""
             npc_rows = self.df[self.df['RealName'] == npc_name]
             if not npc_rows.empty:
                 viewer = CSVLinesViewer(f"NPC: {npc_name}", npc_rows, self)
@@ -2945,8 +3253,14 @@ class VoiceProfileManager(QMainWindow):
                 gender_count = npc_count.get('genders', {}).get(gender, {}).get('total_lines', 0)
                 gform = QFormLayout()
                 
-                # Show lines callback for gender level
-                def show_gender_lines(g=gender):
+                def show_gender_lines(g: str = gender) -> None:
+                    """
+                    Open a CSVLinesViewer showing all lines for this NPC/gender combination.
+
+                    Args:
+                        g: The gender to show lines for; defaults to (and is
+                            bound to) this loop iteration's gender.
+                    """
                     gender_rows = self.df[(self.df['RealName'] == npc_name) & 
                                         (self.df['Gender'].fillna('') == g)]
                     if not gender_rows.empty:
@@ -2971,7 +3285,6 @@ class VoiceProfileManager(QMainWindow):
                     sys_group = QGroupBox(f"📋 System Name Overrides ({gender})")
                     sys_form = QFormLayout(sys_group)
                     
-                    # Sort sysnames by line count (descending)
                     sorted_sysnames = sorted(
                         gender_data["sysnames"],
                         key=lambda s: npc_count.get('genders', {}).get(gender, {}).get('sysnames', {}).get(s["name"], 0),
@@ -2982,8 +3295,14 @@ class VoiceProfileManager(QMainWindow):
                         sysname = sys["name"]
                         sys_count = npc_count.get('genders', {}).get(gender, {}).get('sysnames', {}).get(sysname, 0)
                         
-                        # Show lines callback for system name level
-                        def show_sys_lines(s=sysname):
+                        def show_sys_lines(s: str = sysname) -> None:
+                            """
+                            Open a CSVLinesViewer showing all lines for this system name.
+
+                            Args:
+                                s: The system name to show lines for; defaults to (and is
+                                    bound to) this loop iteration's system name.
+                            """
                             sys_rows = self.df[self.df['SystemName'] == s]
                             if not sys_rows.empty:
                                 viewer = CSVLinesViewer(f"System: {s}", sys_rows, self)
@@ -3009,12 +3328,17 @@ class VoiceProfileManager(QMainWindow):
 
             self.detail_layout.addWidget(gender_group)
 
-    def _copy_name(self, npc_name: str):
-        """Copy NPC name to clipboard."""
+    def _copy_name(self, npc_name: str) -> None:
+        """
+        Copy NPC name to clipboard.
+
+        Args:
+            npc_name: The name to copy.
+        """
         QApplication.clipboard().setText(npc_name)
         self.statusBar().showMessage(f"Copied '{npc_name}' to clipboard!", 3000)
 
-    def _open_check_all_samples(self):
+    def _open_check_all_samples(self) -> None:
         """Open the bulk similarity-check dialog for every voice sample."""
         dlg = CheckAllSamplesDialog(self)
         dlg.exec()
@@ -3023,19 +3347,28 @@ class VoiceProfileManager(QMainWindow):
     # Change Handlers
     # ------------------------------------------------------------------
 
-    def _refresh_npc_entry(self, npc_name: str):
-        """Refresh the hierarchy entry for a single NPC (fast)."""
+    def _refresh_npc_entry(self, npc_name: str) -> None:
+        """
+        Refresh the hierarchy entry for a single NPC (fast).
+
+        Args:
+            npc_name: RealName of the NPC to refresh.
+        """
         self.hierarchy[npc_name] = build_hierarchy_for_npc(
             self.df, npc_name, self.substitutions, self.gender_substitutions,
             self.sys_substitutions, self.existing_voices,
             self.prep_npcs,
         )
-        # Update line counts for this NPC only
         self._update_line_counts_for_npc(npc_name)
         logger.debug(f"Refreshed NPC entry: {npc_name}")
     
-    def _update_line_counts_for_npc(self, npc_name: str):
-        """Update line counts for a single NPC only (fast)."""
+    def _update_line_counts_for_npc(self, npc_name: str) -> None:
+        """
+        Update line counts for a single NPC only (fast).
+
+        Args:
+            npc_name: RealName of the NPC to recompute line counts for.
+        """
         npc_rows = self.df[self.df['RealName'] == npc_name]
         total_lines = len(npc_rows)
         
@@ -3044,7 +3377,6 @@ class VoiceProfileManager(QMainWindow):
             'genders': {}
         }
         
-        # Get the NPC data from hierarchy
         npc_data = self.hierarchy[npc_name]
         for gender in npc_data.get('genders', {}).keys():
             gender_rows = npc_rows[npc_rows['Gender'].fillna('') == gender]
@@ -3066,8 +3398,14 @@ class VoiceProfileManager(QMainWindow):
             npc_data, self.line_counts[npc_name]
         )
 
-    def _on_npc_voice_changed(self, npc_name: str, new_voice: str):
-        """Handle NPC-level voice assignment change."""
+    def _on_npc_voice_changed(self, npc_name: str, new_voice: str) -> None:
+        """
+        Handle NPC-level voice assignment change.
+
+        Args:
+            npc_name: RealName of the NPC being reassigned.
+            new_voice: New voice profile name, or empty string to unassign.
+        """
         current = self.substitutions.get(npc_name) or ""
         if new_voice == current:
             return
@@ -3077,20 +3415,25 @@ class VoiceProfileManager(QMainWindow):
         else:
             self.substitutions.pop(npc_name, None)
         
-        # Clean redundant substitutions before saving
         cleaned_substitutions = clean_redundant_substitutions(self.substitutions, self.existing_voices)
         self.substitutions = cleaned_substitutions
         
         if save_json_files(self.substitutions, self.gender_substitutions, self.sys_substitutions):
-            # Update hierarchy
             self._refresh_npc_entry(npc_name)
             self._update_stats()
             # Update ONLY the changed NPC's icon (fast!)
             self._refresh_npc_list_icon(npc_name)
             self.statusBar().showMessage(f"✅ Updated {npc_name} → {new_voice or 'unassigned'}", 3000)
 
-    def _on_gender_voice_changed(self, npc_name: str, gender: str, new_voice: str):
-        """Handle gender-level voice assignment change."""
+    def _on_gender_voice_changed(self, npc_name: str, gender: str, new_voice: str) -> None:
+        """
+        Handle gender-level voice assignment change.
+
+        Args:
+            npc_name: RealName of the NPC this gender group belongs to.
+            gender: The gender being reassigned.
+            new_voice: New voice profile name, or empty string to unassign.
+        """
         gender_key = f"{npc_name}|{gender}"
         current = self.gender_substitutions.get(gender_key) or ""
         if new_voice == current:
@@ -3106,8 +3449,14 @@ class VoiceProfileManager(QMainWindow):
             self._refresh_npc_list_icon(npc_name)  # Target only this NPC
             self.statusBar().showMessage(f"✅ Updated {npc_name}|{gender} → {new_voice or 'unassigned'}", 3000)
 
-    def _on_sys_voice_changed(self, sysname: str, new_voice: str):
-        """Handle system-name-level voice assignment change."""
+    def _on_sys_voice_changed(self, sysname: str, new_voice: str) -> None:
+        """
+        Handle system-name-level voice assignment change.
+
+        Args:
+            sysname: The SystemName being reassigned.
+            new_voice: New voice profile name, or empty string to unassign.
+        """
         current = self.sys_substitutions.get(sysname) or ""
         if new_voice == current:
             return
@@ -3123,7 +3472,7 @@ class VoiceProfileManager(QMainWindow):
             self._update_stats()
             self.statusBar().showMessage(f"✅ Updated {sysname} → {new_voice or 'unassigned'}", 3000)
 
-    def _update_stats(self):
+    def _update_stats(self) -> None:
         """Update all statistics displays."""
         npcs_with_voice = sum(1 for d in self.hierarchy.values() if d.get("has_existing_voice", False))
         npcs_needing_audit = sum(
@@ -3145,7 +3494,6 @@ class VoiceProfileManager(QMainWindow):
             f"{total_covered:,} / {self.total_lines_all:,} ({pct:.1f}%)"
         )
         
-        # Update progress bar
         self.coverage_progress.setValue(int(pct))
 
 
@@ -3153,7 +3501,7 @@ class VoiceProfileManager(QMainWindow):
 # Application Entry Point
 # ============================================================================
 
-def main():
+def main() -> None:
     """Application entry point."""
     # Suppress Qt multimedia debug messages
     os.environ["QT_LOGGING_RULES"] = "*.debug=false;qt.multimedia.*=false"
