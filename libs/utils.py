@@ -139,6 +139,14 @@ def load_patcher_config(config_path: Union[str, Path]) -> Dict[str, Any]:
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
+def convert_replacement(replacement: str) -> str:
+    """
+    Convert .NET-style backreferences ($1, $2, etc.) to Python-style (\1, \2, etc.)
+    """
+    # Replace $1 with \1, $2 with \2, etc.
+    # Using \g<1> ensures the backreference works correctly
+    return re.sub(r'\$(\d+)', r'\\g<\1>', replacement)
+
 
 def preprocess_text(text: str, patcher_config: Dict[str, Any]) -> str:
     """
@@ -193,6 +201,9 @@ def preprocess_text(text: str, patcher_config: Dict[str, Any]) -> str:
         pattern = rule.get("pattern")
         replacement = rule.get("replacement", "")
         case_sensitive = rule.get("caseSensitive", False)
+
+        # Convert .NET-style backreferences to Python-style
+        replacement = convert_replacement(replacement)
 
         if not pattern:
             continue
