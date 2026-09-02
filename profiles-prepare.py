@@ -22,8 +22,8 @@ from collections import defaultdict
 import shutil
 import logging
 
-from appconfig import cfg
-from utils import setup_logging
+from libs.appconfig import cfg
+from libs.utils import setup_logging
 
 
 # Ensure UTF-8 output on Windows

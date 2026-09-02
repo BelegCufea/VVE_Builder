@@ -25,8 +25,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Set, Tuple, Optional, Callable, Any
 
-from appconfig import cfg
-from utils import from_base36, filename_re, load_valid_strrefs, setup_logging
+from libs.appconfig import cfg
+from libs.utils import from_base36, filename_re, load_valid_strrefs, setup_logging
 
 logger = setup_logging(Path(__file__).stem)
 

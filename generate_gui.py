@@ -25,13 +25,13 @@ import zipfile
 from typing import Any, Dict, Iterator, List, Optional, Set, Tuple, Union, cast
 import requests
 import logging
-from appconfig import cfg, set_many as _appconfig_set_many
+from libs.appconfig import cfg, set_many as _appconfig_set_many
 from collections import defaultdict
 from runstats import Regression
 from datetime import datetime
 from pathlib import Path
 
-from utils import (
+from libs.utils import (
     CaseInsensitiveDict,
     get_canonical_key,
     to_base36,
@@ -42,7 +42,7 @@ from utils import (
     format_finish_time
 )
 
-from tts_voicebox import (
+from libs.tts_voicebox import (
     submit_generation as tts_submit_generation,
     wait_for_completion as tts_wait_for_completion,
     cancel_generation as tts_cancel_generation,

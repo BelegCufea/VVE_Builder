@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Optional, List, Dict, Any
 
 import requests
-from appconfig import cfg, set_many
+from libs.appconfig import cfg, set_many
 from PySide6.QtCore import Qt, QLocale, QObject, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,

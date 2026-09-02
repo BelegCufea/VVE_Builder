@@ -22,7 +22,7 @@ import shutil
 import sys
 from typing import Dict, List, Tuple, Optional
 
-from appconfig import cfg
+from libs.appconfig import cfg
 
 # ============================================================
 # Configuration

@@ -27,7 +27,7 @@ import json
 import os
 from typing import Dict, List, Tuple
 
-from appconfig import cfg
+from libs.appconfig import cfg
 
 
 def load_csv_lookup(csv_path: str) -> Dict[str, Dict[str, str]]:

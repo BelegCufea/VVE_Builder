@@ -17,8 +17,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple, Any
 
-from appconfig import cfg
-from utils import (
+from libs.appconfig import cfg
+from libs.utils import (
     load_patcher_config,
     iter_files_ci,
     TlkEntry,

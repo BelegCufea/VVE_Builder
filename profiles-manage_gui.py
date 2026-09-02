@@ -27,8 +27,8 @@ import csv
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Set
 
-from appconfig import cfg
-from utils import (
+from libs.appconfig import cfg
+from libs.utils import (
     convert_to_ogg, format_finish_time, format_time, get_audio_duration,
     score_status, setup_logging, similarity_score, transcribe_and_score,
 )

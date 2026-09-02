@@ -18,9 +18,9 @@ from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any, Dict, Iterator, Optional, Tuple, Union, Set
 
-from tts_voicebox import transcribe_wav
+from libs.tts_voicebox import transcribe_wav
 
-from appconfig import cfg
+from libs.appconfig import cfg
 
 
 # ============================================================================

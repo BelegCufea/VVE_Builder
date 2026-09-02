@@ -44,8 +44,8 @@ from PySide6.QtWidgets import (
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
-from appconfig import cfg
-from utils import (
+from libs.appconfig import cfg
+from libs.utils import (
     format_finish_time, format_time, from_base36, filename_re,
     load_patcher_config, preprocess_text, score_status, setup_logging,
     transcribe_and_score,

@@ -21,7 +21,7 @@ from pathlib import Path
 
 import requests
 
-from appconfig import cfg
+from libs.appconfig import cfg
 
 
 def _build_transcribe_url() -> str:
