@@ -79,12 +79,12 @@
     "PRO_MASTERMISTRESS": { "male": "master",  "female": "mistress","neutral": "master"   }
   },
 
-  "identityTokens": [
-    "CHARNAME",
-    "GABBER",
-    "PRO_RACE",
-    "RACE"
-  ],
+  "identityTokens": {
+    "CHARNAME": "pcName",
+    "GABBER":   "pcName",
+    "PRO_RACE": "pcRace",
+    "RACE":     "pcRace"
+  },
 
   "phoneticRules": [
     {
@@ -103,7 +103,7 @@
       "comment": "squash consecutive asterisks (two or more) into one"
     },
     {
-      "pattern": "\\*(?:[Aa]chooo?|ahem|belch|boom|bu+r[pp]|cackle|chuckle|cough|crunch|er[pf]|gag|gasp|giggle|glug|grin|groan|growl|gr+u?m+ble|gr+w+r+|gulp|gurgle|gurk|hack|hic(?:cup)?|his+s+|hum|moan|mumble|mutter|nngh|pant|retch|sigh|shiver|shrug|shudder|snarl|snicker|sniff(?:le)?|snork|snort|snore|sob|squeak|u+r[pp]|whinn+e|whistle|yawn)[!\\s]*\\*",
+      "pattern": "\\*(?:[Aa]chooo?|ahem|belch|boom|bu+r[pp]|cackle|chuckle|cough|crunch|er[pf]|gag|gasp|giggle|glug|grin|groan|growl|gr+u?m+ble|gr+w+r+|gulp|gurgle|gurk|hack|hic(?:cup(?:ping)?)?|his+s+|hum|moan|mumble|mutter|nngh|pant|retch|sigh|shiver|shrug|shudder|snarl|snicker|sniff(?:le)?|snork|snort|snore|sob|squeak|u+r[pp]|whinn+(?:y|ie|e)|whistle|yawn)[!\\s]*\\*",
       "replacement": "",
       "comment": "silence vocal sounds, audio effects, and onomatopoeia within asterisks"
     },
@@ -131,21 +131,6 @@
       "pattern": "\\[.*?\\]",
       "replacement": "",
       "comment": "remove text enclosed in square brackets"
-    },
-    {
-      "pattern": "\\b([Gg])orion\\b",
-      "replacement": "$1oh-rye-uhn",
-      "comment": "attempt at neural TTS pronunciation"
-    },
-    {
-      "pattern": "\\b([Ii])moen\\b",
-      "replacement": "$1hm-oh-an",
-      "comment": "attempt at neural TTS pronunciation"
-    },
-    {
-      "pattern": "\\b([Aa])rchmage\\b",
-      "replacement": "$1rch-maige",
-      "comment": "attempt at neural TTS pronunciation"
     },
     {
       "pattern": "\\b[Uu]st\\b",

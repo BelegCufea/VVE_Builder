@@ -171,16 +171,12 @@ def preprocess_text(text: str, patcher_config: Dict[str, Any]) -> str:
         'Talk to Gorion'
     """
     # Stage 1: Identity tokens
-    pc_name = patcher_config.get("pcName", "CHARNAME")
-    pc_race = patcher_config.get("pcRace", "RACE")
-    identity_tokens = patcher_config.get("identityTokens", [])
+    identity_tokens = patcher_config.get("identityTokens", {})
 
     token_map = {}
-    for token in identity_tokens:
-        if token in ("CHARNAME", "GABBER"):
-            token_map[token] = pc_name
-        elif token in ("PRO_RACE", "RACE"):
-            token_map[token] = pc_race
+    for token, source_key in identity_tokens.items():
+        if source_key in patcher_config:
+            token_map[token] = patcher_config[source_key]
 
     for token, replacement in token_map.items():
         text = text.replace(f"<{token}>", replacement)
