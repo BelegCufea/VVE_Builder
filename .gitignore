@@ -85,5 +85,3 @@ build/
 .DS_Store            
 # Windows thumbnail cache
 Thumbs.db           
-# Unit teste (temporary)
-tests/ 
