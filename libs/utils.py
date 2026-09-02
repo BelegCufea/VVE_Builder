@@ -7,6 +7,7 @@ to avoid code duplication and ensure consistency.
 
 import json
 import logging
+import os
 import re
 import struct
 import subprocess
@@ -364,6 +365,52 @@ def load_valid_strrefs(game_dir: Path) -> Set[int]:
         valid |= set(parse_dialog_tlk(tlkf_path).keys())
 
     return valid
+
+
+def load_strref_filter(path: Optional[Union[str, Path]] = None) -> Set[str]:
+    """
+    Load a STRREF filter list (a JSON array of strrefs) from disk.
+
+    Args:
+        path: Path to the filter file. Defaults to cfg.STRREF_FILTER_FILE.
+
+    Returns:
+        Set of strref strings to process, or empty set if the filter
+        couldn't be loaded (in which case a warning is logged).
+    """
+    logger = logging.getLogger(__name__)
+    filter_file = path if path is not None else cfg.STRREF_FILTER_FILE
+    if not os.path.exists(filter_file):
+        logger.warning(f"⚠️ STRREF filter file not found: {filter_file}")
+        logger.warning("   Processing all rows (no filter).")
+        return set()
+    try:
+        with open(filter_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            logger.warning(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
+            return set()
+        return {str(item) for item in data}
+    except Exception as e:
+        logger.warning(f"⚠️ Could not load STRREF filter: {e}")
+        logger.warning("   Processing all rows (no filter).")
+        return set()
+
+
+def save_strref_filter(path: Union[str, Path], strrefs: Any) -> None:
+    """
+    Write a STRREF filter list to disk as a sorted JSON array.
+
+    Overwrites the target file unconditionally with exactly the given
+    strrefs - no merging with whatever the file previously contained.
+
+    Args:
+        path: Path to write the filter file to.
+        strrefs: Iterable of strref values (ints or strings).
+    """
+    sorted_strrefs = sorted({int(s) for s in strrefs})
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(sorted_strrefs, f, indent=2)
 
 
 # ============================================================================

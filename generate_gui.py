@@ -39,7 +39,8 @@ from libs.utils import (
     preprocess_text,
     convert_to_ogg,
     format_time,
-    format_finish_time
+    format_finish_time,
+    load_strref_filter,
 )
 
 from libs.tts_voicebox import (
@@ -59,7 +60,7 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox, QStatusBar,
     QLineEdit, QSpinBox, QDoubleSpinBox, QCheckBox, QComboBox,
-    QDialog, QTabWidget, QFormLayout, QFrame,
+    QDialog, QTabWidget, QFormLayout, QFrame, QFileDialog,
     QTableWidget, QTableWidgetItem, QHeaderView,
 )
 
@@ -1553,32 +1554,6 @@ def filter_and_sort_rows(selected_rows: List[Tuple[str, str, str, str, str]], pr
     return valid_rows
 
 
-def load_strref_filter() -> Set[str]:
-    """
-    Load the STRREF filter list from cfg.STRREF_FILTER_FILE.
-
-    Returns:
-        Set of strref strings to process, or empty set if the filter
-        couldn't be loaded (in which case a warning is logged).
-    """
-    filter_file = cfg.STRREF_FILTER_FILE
-    if not os.path.exists(filter_file):
-        logger.warning(f"⚠️ STRREF filter file not found: {filter_file}")
-        logger.warning("   Processing all rows (no filter).")
-        return set()
-    try:
-        with open(filter_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        if not isinstance(data, list):
-            logger.warning(f"⚠️ STRREF filter file must contain a JSON array, got {type(data)}")
-            return set()
-        return {str(item) for item in data}
-    except Exception as e:
-        logger.warning(f"⚠️ Could not load STRREF filter: {e}")
-        logger.warning("   Processing all rows (no filter).")
-        return set()
-
-
 def iter_filtered_csv_rows(scanning_npc_list: bool = False) -> Iterator[Tuple[str, str, str, str, str, str]]:
     """
     Parse the dialog CSV and yield rows that pass the shared row-level filters.
@@ -3063,7 +3038,43 @@ class ConfigDialog(QDialog):
         limit_hint.setStyleSheet("font-size: 10px; color: gray;")
         form.addRow("", limit_hint)
 
+        sep3 = QFrame()
+        sep3.setFrameShape(QFrame.Shape.HLine)
+        form.addRow(sep3)
+
+        self.strref_filter_check = QCheckBox("Use StrRef filter")
+        self.strref_filter_check.setChecked(cfg.USE_STRREF_FILTER)
+        self.strref_filter_check.setToolTip(
+            "Restrict generation to only the StrRefs listed in the filter "
+            "file below, overriding NPC Targets and Limit (see check_gui.py "
+            "for marking StrRefs to filter on)."
+        )
+        form.addRow("<b>StrRef filter:</b>", self.strref_filter_check)
+
+        strref_filter_box = QHBoxLayout()
+        self.strref_filter_path_edit = QLineEdit(cfg.STRREF_FILTER_FILE)
+        self.strref_filter_browse_btn = QPushButton("Browse…")
+        self.strref_filter_browse_btn.clicked.connect(self._browse_strref_filter_file)
+        strref_filter_box.addWidget(self.strref_filter_path_edit)
+        strref_filter_box.addWidget(self.strref_filter_browse_btn)
+        form.addRow("", strref_filter_box)
+        self.strref_filter_check.toggled.connect(self.strref_filter_path_edit.setEnabled)
+        self.strref_filter_check.toggled.connect(self.strref_filter_browse_btn.setEnabled)
+        self.strref_filter_path_edit.setEnabled(self.strref_filter_check.isChecked())
+        self.strref_filter_browse_btn.setEnabled(self.strref_filter_check.isChecked())
+
         return tab
+
+    def _browse_strref_filter_file(self) -> None:
+        """Open a file picker to choose the StrRef filter JSON file."""
+        path, _ = QFileDialog.getOpenFileName(
+            self,
+            "Select StrRef Filter File",
+            self.strref_filter_path_edit.text(),
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if path:
+            self.strref_filter_path_edit.setText(path)
 
     def _open_npc_targets_dialog(self) -> None:
         """Open the NPC Targets dialog modally and refresh its selection state."""
@@ -3518,6 +3529,8 @@ class GenerateWindow(QMainWindow):
         ]
         if d.fallback_enable_check.isChecked():
             bits.append("fallback on")
+        if d.strref_filter_check.isChecked():
+            bits.append("strref filter on")
         if d.profile_sync_renew_check.isChecked():
             bits.append("profile renew on")
         self.config_summary_label.setText("  •  ".join(bits))
@@ -3537,6 +3550,8 @@ class GenerateWindow(QMainWindow):
             "TIMEOUT_MAX_SECONDS": d.timeout_max_spin.value(),
             "TIMEOUT_MULTIPLIER": d.timeout_multiplier_spin.value(),
             "LIMIT": d.limit_spin.value(),
+            "USE_STRREF_FILTER": d.strref_filter_check.isChecked(),
+            "STRREF_FILTER_FILE": d.strref_filter_path_edit.text().strip(),
             "USE_VOICE_FALLBACK": d.fallback_enable_check.isChecked(),
             "FALLBACK_VOICE_MALE": d.fallback_male_combo.currentText().strip(),
             "FALLBACK_VOICE_FEMALE": d.fallback_female_combo.currentText().strip(),

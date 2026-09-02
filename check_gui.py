@@ -30,7 +30,7 @@ import sys
 import threading
 import time
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple, Any, Union
+from typing import Dict, List, Optional, Set, Tuple, Any, Union
 
 from PySide6.QtCore import (
     Qt, QUrl, QObject, QThread, QTimer, Signal,
@@ -40,7 +40,8 @@ from PySide6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
     QLabel, QPushButton, QProgressBar, QTextEdit, QGroupBox,
     QStatusBar, QTableWidget, QTableWidgetItem,
-    QDialog, QSplitter, QAbstractItemView, QSpinBox, QFileDialog
+    QDialog, QSplitter, QAbstractItemView, QSpinBox, QFileDialog, QMenu,
+    QCheckBox
 )
 from PySide6.QtMultimedia import QMediaPlayer, QAudioOutput
 
@@ -48,7 +49,7 @@ from libs.appconfig import cfg
 from libs.utils import (
     format_finish_time, format_time, from_base36, filename_re,
     load_patcher_config, preprocess_text, score_status, setup_logging,
-    transcribe_and_score,
+    transcribe_and_score, load_strref_filter, save_strref_filter,
 )
 
 logger = setup_logging("check_gui", console_level=logging.ERROR)
@@ -177,10 +178,6 @@ class CheckWorker(QObject):
         for npc_dir in npc_dirs:
             if self._stop_requested.is_set():
                 break
-            # A single case-insensitive glob, deduplicated by resolved path.
-            # Using two globs ("*.wav" + "*.WAV") double-counts every file
-            # on case-insensitive filesystems (Windows, default macOS),
-            # since both patterns match the same files there.
             wav_files = sorted(
                 {
                     p.resolve()
@@ -227,9 +224,6 @@ class CheckWorker(QObject):
             if self._stop_requested.is_set():
                 break
 
-            # Show the NPC immediately as "in progress" rather than waiting
-            # for all its samples - sequential processing means that could
-            # otherwise be a long wait for NPCs with many samples.
             self.npc_completed.emit({
                 "npc": npc_name,
                 "samples": [],
@@ -252,8 +246,6 @@ class CheckWorker(QObject):
                 npc_samples.append(row)
                 self._total_samples_done += 1
 
-                # Incremental update so the sample count/scores tick up live
-                # instead of only appearing once the whole NPC is done.
                 scores = [
                     s["SimilarityScore"] for s in npc_samples
                     if isinstance(s["SimilarityScore"], (int, float))
@@ -563,6 +555,7 @@ class CheckWindow(QMainWindow):
         self._selected_npc: Optional[str] = None
         self._npc_row_index: Dict[str, int] = {}
         self._detail_samples: List[Dict[str, Any]] = []
+        self._marked_strrefs: Set[int] = set()
 
         self.audio_output = QAudioOutput()
         self.media_player = QMediaPlayer()
@@ -581,19 +574,12 @@ class CheckWindow(QMainWindow):
         self.setCentralWidget(central)
         layout = QVBoxLayout(central)
 
-        # Toolbar
         toolbar = QHBoxLayout()
         self.start_btn = QPushButton("Start Check")
         self.start_btn.clicked.connect(self._start)
         self.stop_btn = QPushButton("Stop")
         self.stop_btn.setEnabled(False)
         self.stop_btn.clicked.connect(self._stop)
-        self.export_btn = QPushButton("Export CSV")
-        self.export_btn.setEnabled(False)
-        self.export_btn.clicked.connect(self._export_csv)
-        self.import_btn = QPushButton("Import CSV")
-        self.import_btn.clicked.connect(self._import_csv)
-
         samples_label = QLabel("Samples/NPC:")
         self.samples_spin = QSpinBox()
         self.samples_spin.setMinimum(0)
@@ -606,20 +592,64 @@ class CheckWindow(QMainWindow):
         )
         self.samples_spin.valueChanged.connect(self._on_samples_per_npc_changed)
 
+        process_group = QGroupBox("Process")
+        process_layout = QHBoxLayout(process_group)
+        process_layout.addWidget(self.start_btn)
+        process_layout.addWidget(self.stop_btn)
+        process_layout.addSpacing(12)
+        process_layout.addWidget(samples_label)
+        process_layout.addWidget(self.samples_spin)
+        toolbar.addWidget(process_group)
+        toolbar.addStretch()
+
+        self.export_btn = QPushButton("Export")
+        self.export_btn.setEnabled(False)
+        self.export_btn.clicked.connect(self._export_csv)
+        self.import_btn = QPushButton("Import")
+        self.import_btn.clicked.connect(self._import_csv)
+
+        csv_group = QGroupBox("Backup/Restore")
+        csv_layout = QHBoxLayout(csv_group)
+        csv_layout.addWidget(self.export_btn)
+        csv_layout.addWidget(self.import_btn)
+        toolbar.addWidget(csv_group)
+        toolbar.addStretch()
+
+        self.save_strref_filter_btn = QPushButton("Save")
+        self.save_strref_filter_btn.setToolTip(
+            "Save the checked StrRefs (from the sample detail table below) "
+            "to a JSON filter file, for use with generate_gui.py's StrRef "
+            "filter. Overwrites the target file."
+        )
+        self.save_strref_filter_btn.clicked.connect(self._save_strref_filter)
+        self.load_strref_filter_btn = QPushButton("Load")
+        self.load_strref_filter_btn.setToolTip(
+            "Load a StrRef filter JSON file and check the matching StrRefs "
+            "in the sample detail table below."
+        )
+        self.load_strref_filter_btn.clicked.connect(self._load_strref_filter)
+        self.show_only_marked_check = QCheckBox("Show only marked")
+        self.show_only_marked_check.setToolTip(
+            "Hide NPCs with no marked StrRefs in the table below, and hide "
+            "unmarked samples in the open detail table."
+        )
+        self.show_only_marked_check.toggled.connect(self._refresh_marked_state)
+
+        strref_group = QGroupBox("StrRef Filter")
+        strref_layout = QHBoxLayout(strref_group)
+        strref_layout.addWidget(self.save_strref_filter_btn)
+        strref_layout.addWidget(self.load_strref_filter_btn)
+        strref_layout.addSpacing(12)
+        strref_layout.addWidget(self.show_only_marked_check)
+        toolbar.addWidget(strref_group)
+
+        layout.addLayout(toolbar)
+        layout.addLayout(toolbar)
+
         self.stats_label = QLabel(
             f"NPCs: -  Samples: - Duration: - Avg: -%"
         )
         self.stats_label.setStyleSheet("color: gray; font-size: 11px;")
-        toolbar.addWidget(self.start_btn)
-        toolbar.addWidget(self.stop_btn)
-        toolbar.addWidget(self.export_btn)
-        toolbar.addWidget(self.import_btn)
-        toolbar.addSpacing(16)
-        toolbar.addWidget(samples_label)
-        toolbar.addWidget(self.samples_spin)
-        toolbar.addStretch()
-        toolbar.addWidget(self.stats_label)
-        layout.addLayout(toolbar)
 
         # Overall progress
         pg = QGroupBox("Overall Progress")
@@ -636,21 +666,24 @@ class CheckWindow(QMainWindow):
         tg = QGroupBox("NPC Results")
         tg_layout = QVBoxLayout(tg)
         self.npc_table = QTableWidget()
-        self.npc_table.setColumnCount(6)
+        self.npc_table.setColumnCount(7)
         self.npc_table.setHorizontalHeaderLabels(
-            ["NPC Name", "Worst %", "Avg %", "Samples", "Duration", "Status"]
+            ["Marked", "NPC Name", "Worst %", "Avg %", "Samples", "Duration", "Status"]
         )
         self.npc_table.horizontalHeader().setStretchLastSection(True)
         self.npc_table.setSelectionBehavior(
             QAbstractItemView.SelectionBehavior.SelectRows)
         self.npc_table.setSelectionMode(
             QAbstractItemView.SelectionMode.SingleSelection)
-        self.npc_table.setColumnWidth(1, 80)
+        self.npc_table.setColumnWidth(0, 60)
         self.npc_table.setColumnWidth(2, 80)
         self.npc_table.setColumnWidth(3, 80)
         self.npc_table.setColumnWidth(4, 80)
+        self.npc_table.setColumnWidth(5, 80)
         self.npc_table.itemSelectionChanged.connect(self._on_npc_selected)
         self.npc_table.setSortingEnabled(True)
+        self.npc_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.npc_table.customContextMenuRequested.connect(self._on_npc_table_context_menu)
         tg_layout.addWidget(self.npc_table)
         layout.addWidget(tg, stretch=3)
 
@@ -678,6 +711,7 @@ class CheckWindow(QMainWindow):
         self.detail_table.setEditTriggers(
             QAbstractItemView.EditTrigger.NoEditTriggers)
         self.detail_table.itemDoubleClicked.connect(self._on_detail_double_click)
+        self.detail_table.itemChanged.connect(self._on_detail_strref_checked)
         self.detail_table.itemSelectionChanged.connect(
             self._on_detail_sample_selected)
         self.detail_table.verticalHeader().setVisible(False)
@@ -744,6 +778,7 @@ class CheckWindow(QMainWindow):
         layout.addWidget(fg, stretch=2)
 
         self.setStatusBar(QStatusBar())
+        self.statusBar().addPermanentWidget(self.stats_label)
         self.statusBar().showMessage("Ready", 3000)
 
     # ------------------------------------------------------------------
@@ -760,10 +795,7 @@ class CheckWindow(QMainWindow):
         self._all_npc_data.clear()
         self._npc_row_index.clear()
         self._selected_npc = None
-        # Sorting re-shuffles rows on every single insert/update, which both
-        # invalidates the row-index cache and gets expensive with hundreds+
-        # of NPCs updating live. Keep it off during the run; re-enable and
-        # sort once at the end.
+
         self.npc_table.setSortingEnabled(False)
         self.npc_table.setRowCount(0)
         self.detail_table.setRowCount(0)
@@ -877,10 +909,8 @@ class CheckWindow(QMainWindow):
         self.export_btn.setEnabled(
             bool(self._all_npc_data) and stats["total_samples"] > 0)
         self.statusBar().showMessage("Check complete.", 5000)
-        # Row order was frozen (insertion order) during the run to keep the
-        # row-index cache valid; sort once now, worst score first.
         self.npc_table.setSortingEnabled(True)
-        self.npc_table.sortItems(1, Qt.SortOrder.AscendingOrder)
+        self.npc_table.sortItems(2, Qt.SortOrder.AscendingOrder)
 
     def _on_failed(self, message: str) -> None:
         """Handle failure signal from worker."""
@@ -923,7 +953,13 @@ class CheckWindow(QMainWindow):
         avg = npc_data.get("avg_score")
         sum_duration = npc_data.get("sum_duration")
 
-        self.npc_table.setItem(row, 0, QTableWidgetItem(npc_name))
+        marked_count = self._marked_count_for(npc_data)
+        mi = _NumericTableWidgetItem("" if marked_count == 0 else str(marked_count))
+        mi.setData(Qt.ItemDataRole.UserRole + 1, marked_count)
+        mi.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+        self.npc_table.setItem(row, 0, mi)
+
+        self.npc_table.setItem(row, 1, QTableWidgetItem(npc_name))
 
         if worst is not None:
             wi = _NumericTableWidgetItem(f"{worst:.1f}")
@@ -931,7 +967,7 @@ class CheckWindow(QMainWindow):
         else:
             wi = QTableWidgetItem("...")
         wi.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.npc_table.setItem(row, 1, wi)
+        self.npc_table.setItem(row, 2, wi)
 
         if avg is not None:
             ai = _NumericTableWidgetItem(f"{avg:.1f}")
@@ -939,12 +975,12 @@ class CheckWindow(QMainWindow):
         else:
             ai = QTableWidgetItem("-")
         ai.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.npc_table.setItem(row, 2, ai)
+        self.npc_table.setItem(row, 3, ai)
 
         ci = _NumericTableWidgetItem(str(len(samples)))
         ci.setData(Qt.ItemDataRole.UserRole + 1, len(samples))
         ci.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.npc_table.setItem(row, 3, ci)
+        self.npc_table.setItem(row, 4, ci)
 
         # Total duration
         if sum_duration is not None:
@@ -953,11 +989,30 @@ class CheckWindow(QMainWindow):
         else:
             di = QTableWidgetItem("-")
         di.setTextAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
-        self.npc_table.setItem(row, 4, di)
+        self.npc_table.setItem(row, 5, di)
 
         si = QTableWidgetItem()
         self._apply_status_color(si, worst)
-        self.npc_table.setItem(row, 5, si)
+        self.npc_table.setItem(row, 6, si)
+
+        self.npc_table.setRowHidden(
+            row, self.show_only_marked_check.isChecked() and marked_count == 0
+        )
+
+    def _marked_count_for(self, npc_data: Dict[str, Any]) -> int:
+        """
+        Count how many of an NPC's samples have a marked StrRef.
+
+        Args:
+            npc_data: Dictionary containing the NPC's sample list.
+
+        Returns:
+            Number of samples whose StrRef is in self._marked_strrefs.
+        """
+        return sum(
+            1 for s in npc_data.get("samples", [])
+            if s["StrRef"] in self._marked_strrefs
+        )
 
     def _find_npc_row(self, npc_name: str) -> Optional[int]:
         """
@@ -971,17 +1026,13 @@ class CheckWindow(QMainWindow):
         Returns:
             Row index if found, None otherwise.
         """
-        # O(1) lookup via cache instead of scanning the table. This matters
-        # once there are hundreds/thousands of NPC rows (see cfg batch size).
         row = self._npc_row_index.get(npc_name)
         if row is not None and 0 <= row < self.npc_table.rowCount():
-            item = self.npc_table.item(row, 0)
+            item = self.npc_table.item(row, 1)
             if item and item.text() == npc_name:
                 return row
-        # Cache miss (e.g. row order changed) - fall back to a scan and
-        # repair the cache so future lookups are O(1) again.
         for r in range(self.npc_table.rowCount()):
-            item = self.npc_table.item(r, 0)
+            item = self.npc_table.item(r, 1)
             if item and item.text() == npc_name:
                 self._npc_row_index[npc_name] = r
                 return r
@@ -1038,7 +1089,7 @@ class CheckWindow(QMainWindow):
             self._clear_fulltext_panel()
             return
         row_idx = rows[0].row()
-        name_item = self.npc_table.item(row_idx, 0)
+        name_item = self.npc_table.item(row_idx, 1)
         if not name_item:
             return
         self._selected_npc = name_item.text()
@@ -1066,9 +1117,6 @@ class CheckWindow(QMainWindow):
 
         self.detail_placeholder.hide()
         self.detail_table.show()
-        # Sort by score, lowest first (errors float to the end). Stashed so
-        # row index -> sample lookups (double-click, selection) stay in
-        # sync with what's actually displayed.
         samples = sorted(
             samples,
             key=lambda s: s["SimilarityScore"]
@@ -1077,6 +1125,7 @@ class CheckWindow(QMainWindow):
         )
         self._detail_samples = samples
         self.detail_table.setRowCount(len(samples))
+        self.detail_table.blockSignals(True)
 
         for row, sample in enumerate(samples):
             score = sample["SimilarityScore"]
@@ -1086,6 +1135,12 @@ class CheckWindow(QMainWindow):
             si.setData(Qt.ItemDataRole.UserRole + 1, sample["StrRef"])
             si.setTextAlignment(
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            si.setFlags(si.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            si.setCheckState(
+                Qt.CheckState.Checked
+                if sample["StrRef"] in self._marked_strrefs
+                else Qt.CheckState.Unchecked
+            )
             self.detail_table.setItem(row, 0, si)
 
             self.detail_table.setItem(row, 1, QTableWidgetItem(
@@ -1107,9 +1162,6 @@ class CheckWindow(QMainWindow):
                 Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
             self.detail_table.setItem(row, 3, di)
 
-            # Full text in the cell - Qt elides it to "..." to fit the
-            # current column width automatically, and the tooltip plus the
-            # full-text panel below cover seeing the whole thing.
             csv_t = sample["CSVText"]
             csv_item = QTableWidgetItem(csv_t)
             csv_item.setToolTip(csv_t)
@@ -1120,9 +1172,153 @@ class CheckWindow(QMainWindow):
             tr_item.setToolTip(tr_t)
             self.detail_table.setItem(row, 5, tr_item)
 
+        self.detail_table.blockSignals(False)
         self.detail_table.setWordWrap(False)
         self.detail_table.setCurrentCell(0, 0)
         self._on_detail_sample_selected()
+        if self.show_only_marked_check.isChecked():
+            self._refresh_marked_state(rebuild_detail_checkboxes=False)
+
+    def _on_detail_strref_checked(self, item: QTableWidgetItem) -> None:
+        """
+        Track a StrRef checkbox toggle in the detail table for filter export.
+
+        Args:
+            item: The changed item; only column 0 (StrRef) carries a checkbox.
+        """
+        if item.column() != 0:
+            return
+        row_idx = item.row()
+        if row_idx >= len(self._detail_samples):
+            return
+        strref = self._detail_samples[row_idx]["StrRef"]
+        if item.checkState() == Qt.CheckState.Checked:
+            self._marked_strrefs.add(strref)
+        else:
+            self._marked_strrefs.discard(strref)
+        self._refresh_marked_state(rebuild_detail_checkboxes=False)
+
+    def _refresh_marked_state(self, rebuild_detail_checkboxes: bool = True) -> None:
+        """
+        Reapply everything derived from self._marked_strrefs and the
+        "Show only marked" toggle: each NPC row's Marked count/visibility,
+        and (if a detail table is open) its rows' checkbox state/visibility.
+
+        Args:
+            rebuild_detail_checkboxes: Whether to also re-sync the detail
+                table's checkbox states from self._marked_strrefs. Skipped
+                when called right after a detail-table checkbox toggle,
+                since that row's own checkbox is already correct and
+                rewriting it would just be redundant.
+        """
+        only_marked = self.show_only_marked_check.isChecked()
+
+        for npc_name, npc_data in self._all_npc_data.items():
+            row = self._find_npc_row(npc_name)
+            if row is None:
+                continue
+            marked_count = self._marked_count_for(npc_data)
+            item = self.npc_table.item(row, 0)
+            if item is not None:
+                item.setText("" if marked_count == 0 else str(marked_count))
+                item.setData(Qt.ItemDataRole.UserRole + 1, marked_count)
+            self.npc_table.setRowHidden(row, only_marked and marked_count == 0)
+
+        if not self._detail_samples:
+            return
+
+        self.detail_table.blockSignals(True)
+        for row, sample in enumerate(self._detail_samples):
+            is_marked = sample["StrRef"] in self._marked_strrefs
+            if rebuild_detail_checkboxes:
+                item = self.detail_table.item(row, 0)
+                if item is not None:
+                    item.setCheckState(
+                        Qt.CheckState.Checked if is_marked else Qt.CheckState.Unchecked
+                    )
+            self.detail_table.setRowHidden(row, only_marked and not is_marked)
+        self.detail_table.blockSignals(False)
+
+    def _on_npc_table_context_menu(self, pos: Any) -> None:
+        """
+        Show a context menu on the NPC table to bulk mark/unmark its StrRefs.
+
+        Args:
+            pos: Position (in npc_table's viewport coordinates) of the
+                right-click, as passed by customContextMenuRequested.
+        """
+        item = self.npc_table.itemAt(pos)
+        if not item:
+            return
+        npc_name_item = self.npc_table.item(item.row(), 1)
+        if npc_name_item is None:
+            return
+        npc_name = npc_name_item.text()
+        npc_data = self._all_npc_data.get(npc_name)
+        if not npc_data:
+            return
+        strrefs = [s["StrRef"] for s in npc_data.get("samples", [])]
+        if not strrefs:
+            return
+
+        menu = QMenu(self)
+        mark_action = menu.addAction(f"Mark all StrRefs ({len(strrefs)})")
+        unmark_action = menu.addAction("Unmark all StrRefs")
+        action = menu.exec(self.npc_table.viewport().mapToGlobal(pos))
+        if action is mark_action:
+            self._marked_strrefs.update(strrefs)
+        elif action is unmark_action:
+            self._marked_strrefs.difference_update(strrefs)
+        else:
+            return
+
+        self._refresh_marked_state()
+
+    def _save_strref_filter(self) -> None:
+        """Save the currently checked StrRefs to a JSON filter file (overwrites)."""
+        output_file, _ = QFileDialog.getSaveFileName(
+            self,
+            "Save StrRef Filter",
+            cfg.STRREF_FILTER_FILE,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not output_file:
+            return
+        try:
+            save_strref_filter(output_file, self._marked_strrefs)
+        except Exception as ex:
+            logger.error(f"Failed to save StrRef filter: {ex}")
+            self.statusBar().showMessage(f"Failed to save StrRef filter: {ex}", 5000)
+            return
+        logger.info(f"Saved {len(self._marked_strrefs)} StrRefs to {output_file}")
+        self.statusBar().showMessage(
+            f"Saved {len(self._marked_strrefs)} StrRefs to {output_file}", 5000
+        )
+
+    def _load_strref_filter(self) -> None:
+        """Load a StrRef filter JSON file and check its StrRefs in the detail table."""
+        input_file, _ = QFileDialog.getOpenFileName(
+            self,
+            "Load StrRef Filter",
+            cfg.STRREF_FILTER_FILE,
+            "JSON Files (*.json);;All Files (*)",
+        )
+        if not input_file:
+            return
+        try:
+            loaded = load_strref_filter(input_file)
+        except Exception as ex:
+            logger.error(f"Failed to load StrRef filter: {ex}")
+            self.statusBar().showMessage(f"Failed to load StrRef filter: {ex}", 5000)
+            return
+        self._marked_strrefs = {int(s) for s in loaded}
+        if self._selected_npc:
+            self._populate_detail_panel(self._selected_npc)
+        self._refresh_marked_state(rebuild_detail_checkboxes=False)
+        logger.info(f"Loaded {len(self._marked_strrefs)} StrRefs from {input_file}")
+        self.statusBar().showMessage(
+            f"Loaded {len(self._marked_strrefs)} StrRefs from {input_file}", 5000
+        )
 
     def _apply_score_color(self, item: QTableWidgetItem, score: float) -> None:
         """
@@ -1458,7 +1654,7 @@ class CheckWindow(QMainWindow):
 
         self._update_stats_label()
         self.npc_table.setSortingEnabled(True)
-        self.npc_table.sortItems(1, Qt.SortOrder.AscendingOrder)
+        self.npc_table.sortItems(2, Qt.SortOrder.AscendingOrder)
         self.export_btn.setEnabled(bool(self._all_npc_data) and total_samples > 0)
         self.overall_bar.setValue(10_000)
         file_name = Path(input_file).name
