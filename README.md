@@ -4,6 +4,8 @@
 
 The project consists of several Python scripts that semi-automate the process, along with sample JSON configuration files for Baldur's Gate II: Enhanced Edition.
 
+> 🤖 **Vibe-coded disclosure:** this project was built in close collaboration with a small committee of AI assistants who never quite agreed on code style. Bugs are their fault; the good parts are obviously mine.
+
 ---
 
 ## Workflow Pipeline
