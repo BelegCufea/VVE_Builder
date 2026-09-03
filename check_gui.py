@@ -635,10 +635,14 @@ class CheckWindow(QMainWindow):
         )
         self.show_only_marked_check.toggled.connect(self._refresh_marked_state)
 
+        self.marked_count_label = QLabel("Marked: 0")
+
         strref_group = QGroupBox("StrRef Filter")
         strref_layout = QHBoxLayout(strref_group)
         strref_layout.addWidget(self.save_strref_filter_btn)
         strref_layout.addWidget(self.load_strref_filter_btn)
+        strref_layout.addSpacing(12)
+        strref_layout.addWidget(self.marked_count_label)
         strref_layout.addSpacing(12)
         strref_layout.addWidget(self.show_only_marked_check)
         toolbar.addWidget(strref_group)
@@ -1212,6 +1216,7 @@ class CheckWindow(QMainWindow):
                 rewriting it would just be redundant.
         """
         only_marked = self.show_only_marked_check.isChecked()
+        self.marked_count_label.setText(f"Marked: {len(self._marked_strrefs)}")
 
         for npc_name, npc_data in self._all_npc_data.items():
             row = self._find_npc_row(npc_name)
