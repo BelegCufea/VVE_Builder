@@ -1,6 +1,6 @@
 {
   "pcName":   "adventurer",
-  "pcRace":   "person",
+  "pcRace":   "adventurer",
   "pcGender": "neutral",
 
   "creNameReplacements": {
