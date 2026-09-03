@@ -140,6 +140,54 @@ def load_patcher_config(config_path: Union[str, Path]) -> Dict[str, Any]:
     with open(config_path, 'r', encoding='utf-8') as f:
         return json.load(f)
 
+
+def save_patcher_config(config_path: Union[str, Path], config: Dict[str, Any]) -> None:
+    """
+    Write the patcher configuration out to a JSON file.
+
+    Writes atomically (via a temporary file + replace) so a crash or
+    concurrent read never sees a partially-written file.
+
+    Args:
+        config_path: Path to write the JSON configuration file to.
+        config: The full configuration dictionary to write.
+
+    Example:
+        >>> config = load_patcher_config("patcher-config.json")
+        >>> config["pcName"] = "Gorion"
+        >>> save_patcher_config("patcher-config.json", config)
+    """
+    config_path = Path(config_path)
+    tmp_path = config_path.with_suffix(config_path.suffix + ".tmp")
+    with tmp_path.open("w", encoding="utf-8") as f:
+        json.dump(config, f, indent=2, ensure_ascii=False)
+    tmp_path.replace(config_path)
+
+
+def update_patcher_config(config_path: Union[str, Path], updates: Dict[str, Any]) -> None:
+    """
+    Merge updates into the patcher configuration and persist it to disk.
+
+    Loads the existing configuration (or starts from an empty dict if the
+    file doesn't exist yet), shallow-merges `updates` into it, and writes
+    the result back out via save_patcher_config().
+
+    Args:
+        config_path: Path to the JSON configuration file.
+        updates: Top-level key/value pairs to merge into the configuration.
+
+    Example:
+        >>> update_patcher_config("patcher-config.json", {"pcName": "Gorion"})
+    """
+    config_path = Path(config_path)
+    try:
+        config = load_patcher_config(config_path)
+    except (FileNotFoundError, json.JSONDecodeError):
+        config = {}
+    config.update(updates)
+    save_patcher_config(config_path, config)
+
+
 def convert_replacement(replacement: str) -> str:
     """
     Convert .NET-style backreferences ($1, $2, etc.) to Python-style (\1, \2, etc.)

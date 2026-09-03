@@ -15,6 +15,7 @@ from typing import Optional, List, Dict, Any
 
 import requests
 from libs.appconfig import cfg, set_many
+from libs.utils import load_patcher_config, update_patcher_config
 from PySide6.QtCore import Qt, QLocale, QObject, QThread, Signal
 from PySide6.QtWidgets import (
     QApplication,
@@ -127,10 +128,19 @@ class ConfigWindow(QMainWindow):
         settings_group = QGroupBox("Game data")
         settings_group.setLayout(form)
 
+        pc_group = self._build_player_character_group()
+
+        game_data_container = QWidget()
+        game_data_layout = QVBoxLayout(game_data_container)
+        game_data_layout.setContentsMargins(0, 0, 0, 0)
+        game_data_layout.addWidget(settings_group)
+        game_data_layout.addWidget(pc_group)
+        game_data_layout.addStretch()
+
         api_tab = self._build_api_tab()
 
         tabs = QTabWidget()
-        tabs.addTab(settings_group, "Game data")
+        tabs.addTab(game_data_container, "Game data")
         tabs.addTab(api_tab, "API defaults")
 
         self.status_label = QLabel()
@@ -163,6 +173,45 @@ class ConfigWindow(QMainWindow):
         self._health_thread: Optional[QThread] = None
         self._health_worker: Optional[HealthCheckWorker] = None
         self.refresh_languages()
+
+    def _build_player_character_group(self) -> QWidget:
+        """
+        Build the "Player character" settings group.
+
+        Exposes pcName, pcRace, and pcGender from patcher-config.json,
+        used to fill the <CHARNAME>/<GABBER>, <PRO_RACE>/<RACE>, and
+        gendered tokens during TTS text preprocessing.
+
+        Returns:
+            QGroupBox containing the player character settings form.
+        """
+        try:
+            patcher_config = load_patcher_config(cfg.PATCHER_CONFIG_PATH)
+        except (FileNotFoundError, ValueError):
+            patcher_config = {}
+
+        self.pc_name_edit = QLineEdit(str(patcher_config.get("pcName", "adventurer")))
+        self.pc_name_edit.textChanged.connect(self.validate)
+
+        self.pc_race_edit = QLineEdit(str(patcher_config.get("pcRace", "adventurer")))
+        self.pc_race_edit.textChanged.connect(self.validate)
+
+        self.pc_gender_combo = QComboBox()
+        self.pc_gender_combo.addItems(["male", "female", "neutral"])
+        pc_gender = str(patcher_config.get("pcGender", "neutral"))
+        if pc_gender in ("male", "female", "neutral"):
+            self.pc_gender_combo.setCurrentText(pc_gender)
+        self.pc_gender_combo.currentTextChanged.connect(self.validate)
+
+        pc_form = QFormLayout()
+        pc_form.setFieldGrowthPolicy(QFormLayout.FieldGrowthPolicy.ExpandingFieldsGrow)
+        pc_form.addRow("Player name", self.pc_name_edit)
+        pc_form.addRow("Player race", self.pc_race_edit)
+        pc_form.addRow("Player gender", self.pc_gender_combo)
+
+        pc_group = QGroupBox("Player character")
+        pc_group.setLayout(pc_form)
+        return pc_group
 
     def _build_api_tab(self) -> QWidget:
         """
@@ -387,6 +436,12 @@ class ConfigWindow(QMainWindow):
         if not self.model_size_edit.text().strip():
             errors.append("Model size cannot be empty.")
 
+        if not self.pc_name_edit.text().strip():
+            errors.append("Player name cannot be empty.")
+
+        if not self.pc_race_edit.text().strip():
+            errors.append("Player race cannot be empty.")
+
         return errors
 
     def validate(self) -> None:
@@ -427,6 +482,14 @@ class ConfigWindow(QMainWindow):
                 "ENGINE": self.engine_edit.text().strip(),
                 "MODEL_SIZE": self.model_size_edit.text().strip(),
             }
+        )
+        update_patcher_config(
+            cfg.PATCHER_CONFIG_PATH,
+            {
+                "pcName": self.pc_name_edit.text().strip(),
+                "pcRace": self.pc_race_edit.text().strip(),
+                "pcGender": self.pc_gender_combo.currentText(),
+            },
         )
         QMessageBox.information(self, "Configuration saved", "The settings were saved successfully.")
         self.close()
