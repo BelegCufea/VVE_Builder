@@ -477,12 +477,15 @@ class VoiceProfileEditor(QDialog):
                 self.status_label.setText(f"❌ Error saving text: {e}")
                 logger.error(f"Error saving text for {sample['stem']}: {e}")
 
-    def _import_audio_file(self, input_path: Path) -> None:
+    def _import_audio_file(self, input_path: Path, auto_transcribe: bool = True) -> None:
         """
         Import a local audio file (from disk) as a new sample.
 
         Args:
             input_path: Path to the source audio file to convert and add.
+            auto_transcribe: If True and the new sample has no text (the
+                usual case), automatically run the similarity check to
+                transcribe the audio and fill in the transcribed-text box.
         """
         logger.info(f"Importing sample from: {input_path}")
         
@@ -543,26 +546,31 @@ class VoiceProfileEditor(QDialog):
         })
         
         logger.info(f"Added sample: {stem}")
-        
+
+        new_sample = self._sample_data[-1]
         self._load_samples()
         self.status_label.setText(f"✅ Added sample: {stem}")
-        
+
         for i in range(self.samples_list.count()):
             item = self.samples_list.item(i)
             if item.data(Qt.ItemDataRole.UserRole) == stem:
                 self.samples_list.setCurrentItem(item)
                 break
 
-    def _import_downloaded_file(self, temp_path: Path) -> None:
+        if auto_transcribe and not new_sample['text']:
+            self._run_similarity_check(new_sample)
+
+    def _import_downloaded_file(self, temp_path: Path, auto_transcribe: bool = True) -> None:
         """
         Import a downloaded temporary file, then clean up.
 
         Args:
             temp_path: Path to the temporary downloaded file; deleted after
                 import regardless of whether import succeeds.
+            auto_transcribe: Forwarded to _import_audio_file().
         """
         try:
-            self._import_audio_file(temp_path)
+            self._import_audio_file(temp_path, auto_transcribe=auto_transcribe)
         finally:
             try:
                 if temp_path.exists():
@@ -650,12 +658,13 @@ class VoiceProfileEditor(QDialog):
             logger.exception(f"Error parsing Fish Audio page: {e}")
             return None
     
-    def _download_from_url(self, url: str) -> None:
+    def _download_from_url(self, url: str, auto_transcribe: bool = True) -> None:
         """
         Download audio from a URL and add it as a sample.
 
         Args:
             url: Direct URL to an audio file to download.
+            auto_transcribe: Forwarded to _import_downloaded_file().
         """
         self.status_label.setText(f"⬇️ Downloading from URL...")
         QApplication.processEvents()
@@ -694,7 +703,7 @@ class VoiceProfileEditor(QDialog):
             self.status_label.setText(f"✅ Downloaded. Importing...")
             QApplication.processEvents()
 
-            self._import_downloaded_file(temp_path)
+            self._import_downloaded_file(temp_path, auto_transcribe=auto_transcribe)
 
         except requests.exceptions.Timeout:
             self.status_label.setText("❌ Download timed out. URL may be slow or inaccessible.")
@@ -761,8 +770,8 @@ class VoiceProfileEditor(QDialog):
         
         self.status_label.setText(f"⬇️ Downloading audio from Fish Audio...")
         QApplication.processEvents()
-        
-        self._download_from_url(audio_url)
+
+        self._download_from_url(audio_url, auto_transcribe=False)
         
         # After import, set the text on the newly added sample
         if self._sample_data:
