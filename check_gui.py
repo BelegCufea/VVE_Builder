@@ -648,7 +648,6 @@ class CheckWindow(QMainWindow):
         toolbar.addWidget(strref_group)
 
         layout.addLayout(toolbar)
-        layout.addLayout(toolbar)
 
         self.stats_label = QLabel(
             f"NPCs: -  Samples: - Duration: - Avg: -%"
