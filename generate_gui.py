@@ -41,6 +41,7 @@ from libs.utils import (
     format_time,
     format_finish_time,
     load_strref_filter,
+    setup_logging,
 )
 
 from libs.tts_voicebox import (
@@ -125,54 +126,28 @@ def log_initialize(log_signal: LogSignal) -> logging.Logger:
     """
     Initialize the logging system with three sinks.
 
-    Sets up a logger that writes to:
+    Delegates the file/console/root setup to libs.utils.setup_logging() (so
+    generate_gui.py shares the same behavior as every other script, including
+    capturing libs.* module logging), then adds a GUI log panel sink on top:
         - File: Full debug-level logs with timestamps (YYYY-MM-DD HH:MM:SS)
-        - Console: Clean info-level messages (if a console is attached)
+        - Console: Clean error-level messages (if a console is attached)
         - GUI log panel: Clean info-level messages via QtLogHandler
 
     Args:
         log_signal: The signal to connect the GUI handler to.
 
     Returns:
-        The configured logger instance.
-
-    Note:
-        The logger is configured once at application startup. Although the
-        file handler accepts DEBUG records, the root logger itself is set to
-        INFO, so DEBUG records are currently filtered before reaching it.
-        The console handler, when attached, shows ERROR and above; the GUI
-        handler shows INFO and above.
+        The root logger, which generate_gui.py logs through directly.
     """
-    log_dir = Path(cfg.LOG_DIR)
-    log_dir.mkdir(parents=True, exist_ok=True)
-    log_file = log_dir / f"{Path(__file__).stem}.log"
+    setup_logging(Path(__file__).stem, file_level=logging.DEBUG, console_level=logging.ERROR)
+
     logger = logging.getLogger()
-    if logger.hasHandlers():
-        logger.handlers.clear()
-    logger.setLevel(logging.DEBUG)
-
-    file_handler = logging.FileHandler(log_file, encoding='utf-8')
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(logging.Formatter(
-        '%(asctime)s - %(levelname)s - %(message)s', datefmt='%Y-%m-%d %H:%M:%S'
-    ))
-    logger.addHandler(file_handler)
-
-    if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
-        console_handler = logging.StreamHandler()
-        console_handler.setLevel(logging.ERROR)
-        console_handler.setFormatter(logging.Formatter('%(message)s'))
-        logger.addHandler(console_handler)
 
     gui_handler = QtLogHandler(log_signal)
     gui_handler.setLevel(logging.INFO)
     gui_handler.setFormatter(logging.Formatter('%(message)s'))
     logger.addHandler(gui_handler)
 
-    for noisy_logger in ("urllib3", "urllib3.connectionpool", "requests"):
-        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
-
-    logger.propagate = False
     return logger
 
 

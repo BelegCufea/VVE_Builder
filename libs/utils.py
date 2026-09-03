@@ -1051,6 +1051,9 @@ def score_status(score: Optional[float]) -> Tuple[str, str]:
 # Logging Setup
 # ============================================================================
 
+_configured_scripts: Set[str] = set()
+
+
 def setup_logging(
     script_name: str,
     level: int = logging.INFO,
@@ -1064,9 +1067,15 @@ def setup_logging(
     configured log directory. The log file includes timestamps and log levels,
     while the console output is clean (message only) by default.
 
+    The file/console handlers are attached to the root logger rather than the
+    script-named logger, and propagation is left enabled, so log calls made
+    anywhere else in the process (e.g. libs.* modules using
+    logging.getLogger(__name__)) are also captured in the script's log file
+    and console output, not just calls made through the returned logger.
+
     Args:
         script_name: Name of the script (used for the log filename).
-        level: Default log level for the logger.
+        level: Default log level for the script's own logger.
         console_level: Log level for console output (defaults to level).
         file_level: Log level for file output (defaults to level).
 
@@ -1085,8 +1094,12 @@ def setup_logging(
     logger = logging.getLogger(script_name)
     logger.setLevel(level)
 
-    if logger.handlers:
+    root = logging.getLogger()
+    root.setLevel(logging.DEBUG)
+
+    if script_name in _configured_scripts:
         return logger
+    _configured_scripts.add(script_name)
 
     file_handler = logging.FileHandler(log_file, encoding='utf-8')
     file_handler.setLevel(file_level if file_level is not None else level)
@@ -1096,13 +1109,15 @@ def setup_logging(
             datefmt='%Y-%m-%d %H:%M:%S'
         )
     )
-    logger.addHandler(file_handler)
+    root.addHandler(file_handler)
 
-    console_handler = logging.StreamHandler(sys.stdout)
-    console_handler.setLevel(console_level if console_level is not None else level)
-    console_handler.setFormatter(logging.Formatter('%(message)s'))
-    logger.addHandler(console_handler)
+    if sys.stdout and hasattr(sys.stdout, 'isatty') and sys.stdout.isatty():
+        console_handler = logging.StreamHandler(sys.stdout)
+        console_handler.setLevel(console_level if console_level is not None else level)
+        console_handler.setFormatter(logging.Formatter('%(message)s'))
+        root.addHandler(console_handler)
 
-    logger.propagate = False
+    for noisy_logger in ("urllib3", "urllib3.connectionpool", "requests"):
+        logging.getLogger(noisy_logger).setLevel(logging.WARNING)
 
     return logger

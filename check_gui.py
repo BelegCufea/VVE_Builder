@@ -52,7 +52,7 @@ from libs.utils import (
     transcribe_and_score, load_strref_filter, save_strref_filter,
 )
 
-logger = setup_logging("check_gui", console_level=logging.ERROR)
+logger = setup_logging(Path(__file__).stem, console_level=logging.ERROR)
 for _noisy in ("urllib3", "urllib3.connectionpool", "requests"):
     logging.getLogger(_noisy).setLevel(logging.WARNING)
 
