@@ -6,6 +6,10 @@ The project consists of several Python scripts that semi-automate the process, a
 
 > 🤖 **Vibe-coded disclosure:** this project was built in close collaboration with a small committee of AI assistants who never quite agreed on code style. Bugs are their fault; the good parts are obviously mine.
 
+## Example mod: Voices Voices Extravaganza: Baldur's Gate 2
+
+**[Voices Voices Extravaganza: Baldur's Gate 2](https://github.com/BelegCufea/VoicesVoicesExtravaganzaBG2)** is a full AI-generated NPC voiceover mod for Baldur's Gate II: Enhanced Edition, built end-to-end with this toolchain — a spiritual successor to ColossusChang's original *Voices Voices Extravaganza* for Baldur's Gate 1. Its README includes a full no-command-line-experience walkthrough for regenerating or fixing a single NPC's voice using VVE Builder.
+
 ---
 
 ## Workflow Pipeline
@@ -64,7 +68,15 @@ winget install Gyan.Dev.FFmpeg
 - [check_gui.py](check_gui.py) — scans generated NPC audio, runs Voicebox speech-to-text transcription, and scores results against expected CSV dialog to flag low-quality or incorrect audio.
 
 ### 6) Compile mod
-- [build_mod.py](build_mod.py) — scans generated WAV files, creates the WeiDU mapping table, and stages the final mod package.
+- [build_mod.py](build_mod.py) — scans generated WAV files, creates the WeiDU mapping tables, and stages the final mod package.
+
+The compiled mod installs as three separate WeiDU components, so players can choose how much of the cast gets voiced:
+
+- **Core/Essential NPC voiceovers** — main characters, companions, and other NPCs with a substantial number of generated lines. This component is **mandatory**: it's the one that actually copies the WAV files into the game's `override` folder, so the other two components depend on it being installed.
+- **Common NPC voiceovers** — repeat-visit service/ambient NPCs (vendors, tavern staff, temple clergy, generic guards/soldiers, generic townsfolk) that the player is likely to talk to over and over across a playthrough. Curated by name in [common_NPCs.json](common_NPCs.json), regardless of how many lines they have.
+- **Minor NPC voiceovers** — everyone else: NPCs not listed in `common_NPCs.json` whose folder has fewer than `CORE_NPC_THRESHOLD` (default `10`, configurable in [appconfig.py](libs/appconfig.py)) generated files.
+
+An NPC's folder under `output/` is checked against `common_NPCs.json` first (forced into Common if listed), then against `CORE_NPC_THRESHOLD` (Minor if below it), and otherwise falls into Core/Essential. Players who'd rather skip repetitive vendor/guard barks can simply not install the Common and/or Minor components.
 
 ### Troubleshooting / recovery only
 - [generation-memory-regenerate.py](generation-memory-regenerate.py) — rebuilds the generation-memory cache from generated output files if the cache is missing or stale.

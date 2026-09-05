@@ -413,7 +413,7 @@ def main() -> int:
 
     if mod_root.exists():
         logger.info(f"Cleaning existing mod folder: {mod_root}")
-        # clean_mod_root(mod_root)
+        clean_mod_root(mod_root)
 
     entries, skipped = scan(output_dir)
 
@@ -450,9 +450,9 @@ def main() -> int:
                 f"Minor voiceover file(s).")
 
     mod_dir.mkdir(parents=True, exist_ok=True)
-    # for e in entries:
-    #     dest = mod_dir / e.source_path.name
-    #     shutil.copy2(e.source_path, dest)
+    for e in entries:
+        dest = mod_dir / e.source_path.name
+        shutil.copy2(e.source_path, dest)
 
     write_mapping(core_entries, mapping_core_path)
     write_mapping(common_entries, mapping_common_path)
