@@ -1,3 +1,10 @@
-@1 = ~Add NPC voiceovers~
-@2 = ~[VO Patcher] Copying voiceover files to override (this may take a few minutes)...~
-@3 = ~[VO Patcher] Successfully patched %patched% strref(s) with voiceover.~
+@1 = ~Add Core/Essential NPC voiceovers (Mandatory!)~
+@2 = ~[VO Patcher] Applying Core/Essential NPC voiceovers...~
+@3 = ~[VO Patcher] Successfully patched %patched% strref(s) with voiceover (Core/Essential).~
+@4 = ~Add Common NPC voiceovers~
+@5 = ~[VO Patcher] Applying Common NPC voiceovers...~
+@6 = ~[VO Patcher] Successfully patched %patched% strref(s) with voiceover (Common).~
+@7 = ~[VO Patcher] Copying voiceover files to override (this may take a few minutes)...~
+@8 = ~Add Minor NPC voiceovers~
+@9 = ~[VO Patcher] Applying Minor NPC voiceovers...~
+@10 = ~[VO Patcher] Successfully patched %patched% strref(s) with voiceover (Minor).~

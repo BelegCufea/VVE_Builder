@@ -8,7 +8,7 @@
 
 BACKUP ~%MOD_NAME%/backup~
 AUTHOR ~VVE_Builder~
-VERSION ~v1.0~
+VERSION ~v1.01~
 
 LANGUAGE ~English~
          ~english~
@@ -16,19 +16,21 @@ LANGUAGE ~English~
 
 BEGIN @1
 
-PRINT @2
+PRINT @7
 COPY ~%MOD_NAME%/WAV~ ~override~
+
+PRINT @2
 
 SILENT
 
 OUTER_SET patched = 0
 
-COPY - ~%MOD_NAME%/mapping.txt~ ~override~
-  READ_2DA_ENTRIES_NOW mapping 2
+COPY - ~%MOD_NAME%/mapping_core.txt~ ~override~
+  READ_2DA_ENTRIES_NOW mapping_core 2
 
-  FOR (row = 0; row < mapping; row = row + 1) BEGIN
-    READ_2DA_ENTRY_FORMER mapping row 0 strref
-    READ_2DA_ENTRY_FORMER mapping row 1 resref
+  FOR (row = 0; row < mapping_core; row = row + 1) BEGIN
+    READ_2DA_ENTRY_FORMER mapping_core row 0 strref
+    READ_2DA_ENTRY_FORMER mapping_core row 1 resref
 
     INNER_ACTION BEGIN
       ACTION_GET_STRREF strref dialogstring
@@ -41,3 +43,57 @@ BUT_ONLY
 VERBOSE
 
 PRINT @3
+
+BEGIN @4
+
+PRINT @5
+
+SILENT
+
+OUTER_SET patched = 0
+
+COPY - ~%MOD_NAME%/mapping_common.txt~ ~override~
+  READ_2DA_ENTRIES_NOW mapping_common 2
+
+  FOR (row = 0; row < mapping_common; row = row + 1) BEGIN
+    READ_2DA_ENTRY_FORMER mapping_common row 0 strref
+    READ_2DA_ENTRY_FORMER mapping_common row 1 resref
+
+    INNER_ACTION BEGIN
+      ACTION_GET_STRREF strref dialogstring
+      STRING_SET_EVALUATE strref ~%dialogstring%~ [%resref%]
+      OUTER_SET patched = patched + 1
+    END
+  END
+BUT_ONLY
+
+VERBOSE
+
+PRINT @6
+
+BEGIN @8
+
+PRINT @9
+
+SILENT
+
+OUTER_SET patched = 0
+
+COPY - ~%MOD_NAME%/mapping_minor.txt~ ~override~
+  READ_2DA_ENTRIES_NOW mapping_minor 2
+
+  FOR (row = 0; row < mapping_minor; row = row + 1) BEGIN
+    READ_2DA_ENTRY_FORMER mapping_minor row 0 strref
+    READ_2DA_ENTRY_FORMER mapping_minor row 1 resref
+
+    INNER_ACTION BEGIN
+      ACTION_GET_STRREF strref dialogstring
+      STRING_SET_EVALUATE strref ~%dialogstring%~ [%resref%]
+      OUTER_SET patched = patched + 1
+    END
+  END
+BUT_ONLY
+
+VERBOSE
+
+PRINT @10

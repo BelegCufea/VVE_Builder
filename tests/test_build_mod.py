@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 import build_mod
-from build_mod import Entry, from_base36, main, scan, write_mapping
+from build_mod import Entry, from_base36, group_entries, main, scan, write_mapping
 
 
 @pytest.mark.parametrize(
@@ -237,10 +237,16 @@ def test_main_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog):
     assert result == 0
     dest = tmp_path / "mod" / "ievo"
     assert (dest / "WAV" / "TS000RQE.wav").is_file()
-    assert (dest / "mapping.txt").is_file()
+    assert (dest / "mapping_core.txt").is_file()
+    assert (dest / "mapping_common.txt").is_file()
+    assert (dest / "mapping_minor.txt").is_file()
     assert (dest / "setup-ievo.tp2").is_file()
 
-    mapping = dest.joinpath("mapping.txt").read_text(encoding="ascii")
+    # Single NPC with 1 file, not listed in common_NPCs.json, is below the
+    # default CORE_NPC_THRESHOLD (10), so it lands in the "minor" mapping.
+    assert dest.joinpath("mapping_core.txt").read_text(encoding="ascii") == ""
+    assert dest.joinpath("mapping_common.txt").read_text(encoding="ascii") == ""
+    mapping = dest.joinpath("mapping_minor.txt").read_text(encoding="ascii")
     assert "35942 TS000RQE\n" in mapping
 
     assert "Staged 1 WAV file(s)" in caplog.text
@@ -305,3 +311,124 @@ def test_main_warns_on_invalid_and_stages_valid(
     dest = tmp_path / "mod" / "ievo" / "WAV"
     assert (dest / "TS0000AC.wav").is_file()
     assert not (dest / "TS0000AB.wav").exists()
+
+
+def test_main_splits_core_and_minor_by_threshold(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+):
+    """
+    An NPC with >= CORE_NPC_THRESHOLD files lands in mapping_core.txt; one
+    with fewer (and not in common_NPCs.json) lands in mapping_minor.txt.
+    """
+    core_npc = tmp_path / "output" / "Core Guy"
+    core_npc.mkdir(parents=True)
+    for i in range(1, build_mod.cfg.CORE_NPC_THRESHOLD + 1):
+        (core_npc / f"TS{format(i, '06X')}.wav").write_bytes(b"RIFF")
+
+    minor_npc = tmp_path / "output" / "Rare Guy"
+    minor_npc.mkdir(parents=True)
+    (minor_npc / "TS0003E7.wav").write_bytes(b"RIFF")
+
+    (tmp_path / "setup.tp2").write_text("// test tp2")
+    (tmp_path / "setup.tra").write_text("// test tra")
+    weidu_exe = tmp_path / "weidu" / "weidu.exe"
+    weidu_exe.parent.mkdir(parents=True)
+    weidu_exe.write_bytes(b"MZ")
+
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level("INFO", logger="build_mod")
+    assert main() == 0
+
+    dest = tmp_path / "mod" / "ievo"
+    core_mapping = dest.joinpath("mapping_core.txt").read_text(encoding="ascii")
+    common_mapping = dest.joinpath("mapping_common.txt").read_text(encoding="ascii")
+    minor_mapping = dest.joinpath("mapping_minor.txt").read_text(encoding="ascii")
+
+    assert core_mapping.count("\n") == build_mod.cfg.CORE_NPC_THRESHOLD
+    assert common_mapping == ""
+    assert "TS0003E7" in minor_mapping
+    assert "TS0003E7" not in core_mapping
+
+
+def test_main_forces_common_via_common_npcs_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog
+):
+    """An NPC listed in common_NPCs.json is forced common despite meeting the threshold."""
+    npc = tmp_path / "output" / "Guard"
+    npc.mkdir(parents=True)
+    for i in range(1, build_mod.cfg.CORE_NPC_THRESHOLD + 1):
+        (npc / f"TS{format(i, '06X')}.wav").write_bytes(b"RIFF")
+
+    (tmp_path / "common_NPCs.json").write_text('["Guard"]', encoding="utf-8")
+    (tmp_path / "setup.tp2").write_text("// test tp2")
+    (tmp_path / "setup.tra").write_text("// test tra")
+    weidu_exe = tmp_path / "weidu" / "weidu.exe"
+    weidu_exe.parent.mkdir(parents=True)
+    weidu_exe.write_bytes(b"MZ")
+
+    monkeypatch.chdir(tmp_path)
+    caplog.set_level("INFO", logger="build_mod")
+    assert main() == 0
+
+    dest = tmp_path / "mod" / "ievo"
+    assert dest.joinpath("mapping_core.txt").read_text(encoding="ascii") == ""
+    assert dest.joinpath("mapping_minor.txt").read_text(encoding="ascii") == ""
+    common_mapping = dest.joinpath("mapping_common.txt").read_text(encoding="ascii")
+    assert common_mapping.count("\n") == build_mod.cfg.CORE_NPC_THRESHOLD
+
+
+# ============================== group_entries() ============================
+
+
+def _make_entries(npc_subdir: str, count: int) -> list:
+    return [
+        Entry(strref=i + 1, resref=f"TS{i:06}", source_path=Path(f"{npc_subdir}/{i}"), npc_subdir=npc_subdir)
+        for i in range(count)
+    ]
+
+
+def test_group_entries_below_threshold_is_minor():
+    entries = _make_entries("NPC", 5)
+    core, common, minor = group_entries(entries, common_names=set(), threshold=10)
+    assert core == []
+    assert common == []
+    assert minor == entries
+
+
+def test_group_entries_meets_threshold_is_core():
+    entries = _make_entries("NPC", 10)
+    core, common, minor = group_entries(entries, common_names=set(), threshold=10)
+    assert core == entries
+    assert common == []
+    assert minor == []
+
+
+def test_group_entries_forced_common_overrides_threshold():
+    entries = _make_entries("NPC", 20)
+    core, common, minor = group_entries(entries, common_names={"NPC"}, threshold=10)
+    assert core == []
+    assert common == entries
+    assert minor == []
+
+
+def test_group_entries_forced_common_overrides_below_threshold():
+    """A forced-common NPC with few files still lands in common, not minor."""
+    entries = _make_entries("NPC", 3)
+    core, common, minor = group_entries(entries, common_names={"NPC"}, threshold=10)
+    assert core == []
+    assert common == entries
+    assert minor == []
+
+
+def test_group_entries_multiple_npcs():
+    core_entries = _make_entries("Core NPC", 10)
+    common_entries = _make_entries("Common NPC", 12)
+    minor_entries = _make_entries("Rare NPC", 3)
+    core, common, minor = group_entries(
+        core_entries + common_entries + minor_entries,
+        common_names={"Common NPC"},
+        threshold=10,
+    )
+    assert core == core_entries
+    assert common == common_entries
+    assert minor == minor_entries

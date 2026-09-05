@@ -23,10 +23,10 @@ import stat
 import textwrap
 from dataclasses import dataclass
 from pathlib import Path
-from typing import List, Set, Tuple, Optional, Callable, Any
+from typing import Dict, List, Set, Tuple, Optional, Callable, Any
 
 from libs.appconfig import cfg
-from libs.utils import from_base36, filename_re, load_valid_strrefs, setup_logging
+from libs.utils import from_base36, filename_re, load_valid_strrefs, load_common_npcs, setup_logging
 
 logger = setup_logging(Path(__file__).stem)
 
@@ -125,6 +125,51 @@ def filter_to_valid_strrefs(
     return kept, dropped
 
 
+def group_entries(
+    entries: List[Entry], common_names: Set[str], threshold: int
+) -> Tuple[List[Entry], List[Entry], List[Entry]]:
+    """
+    Split entries into (core, common, minor) groups by NPC folder.
+
+    An NPC is "common" if its name is in common_names (repeat-visit
+    service/ambient NPCs - vendors, tavern staff, temple clergy, generic
+    townsfolk - regardless of file count); "minor" if it's not in
+    common_names and its folder has fewer than `threshold` voiceover
+    files; otherwise it's "core". Grouping is done by the top-level NPC
+    folder name (the first path segment of npc_subdir), so both the file
+    count and the name lookup apply to the NPC directory itself rather
+    than any nested subdirs.
+
+    Args:
+        entries: List of Entry objects to split.
+        common_names: NPC names always forced into the "common" group.
+        threshold: Minimum file count for an NPC to qualify as "core".
+
+    Returns:
+        A tuple containing:
+            - core: Entries belonging to Core/Essential NPCs.
+            - common: Entries belonging to Common NPCs.
+            - minor: Entries belonging to Minor NPCs.
+    """
+    counts: Dict[str, int] = {}
+    for e in entries:
+        npc_name = e.npc_subdir.split("/")[0]
+        counts[npc_name] = counts.get(npc_name, 0) + 1
+
+    core: List[Entry] = []
+    common: List[Entry] = []
+    minor: List[Entry] = []
+    for e in entries:
+        npc_name = e.npc_subdir.split("/")[0]
+        if npc_name in common_names:
+            common.append(e)
+        elif counts[npc_name] < threshold:
+            minor.append(e)
+        else:
+            core.append(e)
+    return core, common, minor
+
+
 def _rmtree_onerror(func: Callable, path: str, exc_info: Any) -> None:
     """
     Error handler for shutil.rmtree to handle permission issues.
@@ -203,9 +248,18 @@ def build_description() -> str:
         + fill("where XXXXXX = base36(strref)."),
 
         fill("Filenames are copied/flattened into the mod's WAV folder. "
-             "Alongside that, this script writes a text lookup table "
-             "(mapping.txt) that the .tp2 reads at install time, so "
-             "WeiDU never has to know about base36 at all."),
+             "Alongside that, this script writes three text lookup tables "
+             "(mapping_core.txt / mapping_common.txt / mapping_minor.txt) "
+             "that the .tp2 reads at install time as three separate WeiDU "
+             "components, so WeiDU never has to know about base36 at all."),
+
+        fill(f"NPCs are split between the three components: an NPC listed "
+             f"in {cfg.COMMON_NPCS_FILE} (repeat-visit service/ambient "
+             f"NPCs - vendors, tavern staff, temple clergy, generic "
+             f"townsfolk) goes into the Common NPCs component; anyone else "
+             f"with fewer than {cfg.CORE_NPC_THRESHOLD} generated file(s) "
+             f"goes into Minor NPCs; everyone remaining goes into "
+             f"Core/Essential NPCs."),
 
         fill(f"The tp2 source ({cfg.MOD_TP2}) is copied alongside the WAV "
              f"folder and mapping table, renamed to setup-{cfg.MOD_NAME}.tp2 "
@@ -326,7 +380,9 @@ def main() -> int:
     mod_root = Path(cfg.MOD_ROOT) / mod_name
     output_dir = Path(cfg.OUTPUT_DIR)
     mod_dir = Path(mod_root / "WAV")
-    mapping_path = Path(mod_root / "mapping.txt")
+    mapping_core_path = Path(mod_root / "mapping_core.txt")
+    mapping_common_path = Path(mod_root / "mapping_common.txt")
+    mapping_minor_path = Path(mod_root / "mapping_minor.txt")
     tp2_src = Path(cfg.MOD_TP2)
     tp2_dest = Path(mod_root / f"setup-{mod_name}.tp2")
     tra_src = Path(cfg.MOD_TRA)
@@ -357,7 +413,7 @@ def main() -> int:
 
     if mod_root.exists():
         logger.info(f"Cleaning existing mod folder: {mod_root}")
-        clean_mod_root(mod_root)
+        # clean_mod_root(mod_root)
 
     entries, skipped = scan(output_dir)
 
@@ -385,12 +441,22 @@ def main() -> int:
 
     logger.info(f"{len(entries)} voiceover file(s) will be staged after strref validation.")
 
-    mod_dir.mkdir(parents=True, exist_ok=True)
-    for e in entries:
-        dest = mod_dir / e.source_path.name
-        shutil.copy2(e.source_path, dest)
+    common_names = load_common_npcs()
+    core_entries, common_entries, minor_entries = group_entries(
+        entries, common_names, cfg.CORE_NPC_THRESHOLD
+    )
+    logger.info(f"Grouped into {len(core_entries)} Core/Essential, "
+                f"{len(common_entries)} Common, and {len(minor_entries)} "
+                f"Minor voiceover file(s).")
 
-    write_mapping(entries, mapping_path)
+    mod_dir.mkdir(parents=True, exist_ok=True)
+    # for e in entries:
+    #     dest = mod_dir / e.source_path.name
+    #     shutil.copy2(e.source_path, dest)
+
+    write_mapping(core_entries, mapping_core_path)
+    write_mapping(common_entries, mapping_common_path)
+    write_mapping(minor_entries, mapping_minor_path)
 
     tp2_content = tp2_src.read_text(encoding="utf-8")
     tp2_content = tp2_content.replace("VVEBG2", mod_name).replace("%MOD_NAME%", mod_name)
@@ -404,7 +470,9 @@ def main() -> int:
     shutil.copy2(weidu_src, weidu_dest)
 
     logger.info(f"Staged {len(entries)} WAV file(s) to: {mod_dir}")
-    logger.info(f"Lookup table written to: {mapping_path}")
+    logger.info(f"Core/Essential lookup table written to: {mapping_core_path}")
+    logger.info(f"Common lookup table written to: {mapping_common_path}")
+    logger.info(f"Minor lookup table written to: {mapping_minor_path}")
     logger.info(f"tp2 copied to: {tp2_dest}")
     logger.info(f"tra copied to: {tra_dest}")
     logger.info(f"WeiDU copied to: {weidu_dest}")

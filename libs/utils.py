@@ -445,6 +445,37 @@ def load_strref_filter(path: Optional[Union[str, Path]] = None) -> Set[str]:
         return set()
 
 
+def load_common_npcs(path: Optional[Union[str, Path]] = None) -> Set[str]:
+    """
+    Load the set of NPC names always treated as "common" regardless of
+    how many voiceover files they have, from a JSON array file.
+
+    Args:
+        path: Path to the common-NPCs file. Defaults to cfg.COMMON_NPCS_FILE.
+
+    Returns:
+        Set of NPC folder names to force into the "common" group, or an
+        empty set if the file couldn't be loaded (grouping then falls
+        back to CORE_NPC_THRESHOLD alone).
+    """
+    logger = logging.getLogger(__name__)
+    common_file = path if path is not None else cfg.COMMON_NPCS_FILE
+    if not os.path.exists(common_file):
+        logger.warning(f"⚠️ Common NPCs file not found: {common_file}")
+        logger.warning("   Grouping by CORE_NPC_THRESHOLD only.")
+        return set()
+    try:
+        with open(common_file, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if not isinstance(data, list):
+            logger.warning(f"⚠️ Common NPCs file must contain a JSON array, got {type(data)}")
+            return set()
+        return {str(item) for item in data}
+    except Exception as e:
+        logger.warning(f"⚠️ Could not load common NPCs list: {e}")
+        return set()
+
+
 def save_strref_filter(path: Union[str, Path], strrefs: Any) -> None:
     """
     Write a STRREF filter list to disk as a sorted JSON array.

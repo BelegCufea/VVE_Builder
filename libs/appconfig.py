@@ -189,6 +189,8 @@ DEFAULTS: Dict[str, Any] = {
     "MOD_NAME": "ievo",
     "MOD_TP2": r"setup.tp2",
     "MOD_TRA": r"setup.tra",
+    "CORE_NPC_THRESHOLD": 10,
+    "COMMON_NPCS_FILE": r"common_NPCs.json",
 
     # Voice Sample Preparation / Extraction
     "WEIDU_PATH": r"weidu/weidu.exe",

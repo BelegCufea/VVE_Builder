@@ -6,7 +6,7 @@ from typing import Any, Dict
 
 import pytest
 
-from libs.utils import convert_replacement, preprocess_text
+from libs.utils import convert_replacement, load_common_npcs, preprocess_text
 
 
 def make_config(**overrides: Any) -> Dict[str, Any]:
@@ -362,3 +362,31 @@ def test_full_pipeline_combines_all_stages():
     text = "<CHARNAME> the <RACE> says <HESHE> will help—today."
     result = preprocess_text(text, config)
     assert result == "adventurer the person says he will help ... today."
+
+
+# ==============================================================================
+# load_common_npcs
+# ==============================================================================
+
+
+def test_load_common_npcs_missing_file_returns_empty_set(tmp_path):
+    result = load_common_npcs(tmp_path / "does-not-exist.json")
+    assert result == set()
+
+
+def test_load_common_npcs_valid_list(tmp_path):
+    path = tmp_path / "common_NPCs.json"
+    path.write_text('["Guard", "Soldier"]', encoding="utf-8")
+    assert load_common_npcs(path) == {"Guard", "Soldier"}
+
+
+def test_load_common_npcs_non_list_json_returns_empty_set(tmp_path):
+    path = tmp_path / "common_NPCs.json"
+    path.write_text('{"not": "a list"}', encoding="utf-8")
+    assert load_common_npcs(path) == set()
+
+
+def test_load_common_npcs_malformed_json_returns_empty_set(tmp_path):
+    path = tmp_path / "common_NPCs.json"
+    path.write_text("not json at all", encoding="utf-8")
+    assert load_common_npcs(path) == set()
